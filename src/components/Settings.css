@@ -1,0 +1,199 @@
+.settings-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  max-width: 560px;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.settings-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.settings-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.settings-check input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.settings-status {
+  padding: 8px 14px;
+  margin-bottom: 16px;
+  background: rgba(124, 108, 255, 0.1);
+  color: var(--accent);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.settings-status--success {
+  background: rgba(46, 204, 113, 0.1);
+  color: #27ae60;
+}
+
+.settings-status--error {
+  background: rgba(231, 76, 60, 0.1);
+  color: #e74c3c;
+}
+
+.settings-status--info {
+  background: rgba(124, 108, 255, 0.1);
+  color: var(--accent);
+}
+
+.email-config-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  background: var(--bg-secondary, #f8f8fa);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.email-config-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
+.settings-field-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.smtp-presets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.smtp-preset-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.smtp-preset-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.smtp-preset-btn--active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.email-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.email-save-btn,
+.email-test-btn {
+  padding: 7px 16px;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.email-save-btn {
+  background: var(--accent);
+  color: white;
+}
+
+.email-test-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.email-save-btn:disabled,
+.email-test-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.email-save-btn:not(:disabled):hover {
+  opacity: 0.9;
+}
+
+.email-test-btn:not(:disabled):hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.email-subject-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.subject-preview-text {
+  font-size: 12px;
+  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+}
+
+.settings-link {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.settings-link:hover {
+  text-decoration: underline;
+}

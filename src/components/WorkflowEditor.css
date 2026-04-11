@@ -1,0 +1,98 @@
+.editor-form {
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.editor-error {
+  background: rgba(234, 67, 53, 0.1);
+  color: var(--error);
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.editor-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.editor-label {
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+}
+
+.editor-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.editor-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.editor-script-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.editor-actions {
+  display: flex;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+/* AI description button */
+.btn-ai {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: var(--radius);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: rgba(124, 108, 255, 0.08);
+  border: 1px solid rgba(124, 108, 255, 0.2);
+  cursor: pointer;
+  transition: all 0.15s;
+  letter-spacing: 0.3px;
+}
+
+.btn-ai:hover:not(:disabled) {
+  background: rgba(124, 108, 255, 0.15);
+  border-color: rgba(124, 108, 255, 0.4);
+}
+
+.btn-ai:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-ai-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.btn-ai-loading {
+  color: var(--text-secondary);
+}
+
+@keyframes aiPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.btn-ai:disabled .btn-ai-loading {
+  animation: aiPulse 1.2s ease-in-out infinite;
+}

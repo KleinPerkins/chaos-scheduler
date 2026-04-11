@@ -1,0 +1,252 @@
+.sched-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* --- Frequency segmented control --- */
+
+.sched-freq-bar {
+  display: flex;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius);
+  padding: 3px;
+  gap: 2px;
+}
+
+.sched-freq-btn {
+  flex: 1;
+  padding: 6px 4px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  transition: all 0.15s;
+}
+
+.sched-freq-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.sched-freq-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* --- Sub-controls area --- */
+
+.sched-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sched-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sched-row select {
+  width: auto;
+  min-width: 60px;
+}
+
+.sched-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.sched-colon {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin: 0 -2px;
+}
+
+/* --- Day-of-week pills --- */
+
+.sched-days {
+  display: flex;
+  gap: 4px;
+}
+
+.sched-day-pill {
+  width: 40px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  transition: all 0.15s;
+  cursor: pointer;
+}
+
+.sched-day-pill .sched-day-abbr {
+  display: none;
+}
+
+.sched-day-pill:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.sched-day-pill.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+@media (min-width: 460px) {
+  .sched-day-pill {
+    width: auto;
+    min-width: 40px;
+    padding: 0 8px;
+  }
+  .sched-day-pill .sched-day-letter {
+    display: none;
+  }
+  .sched-day-pill .sched-day-abbr {
+    display: inline;
+  }
+}
+
+/* --- AM/PM toggle --- */
+
+.sched-ampm-toggle {
+  display: flex;
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  padding: 2px;
+  border: 1px solid var(--border);
+}
+
+.sched-ampm-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: transparent;
+  transition: all 0.15s;
+}
+
+.sched-ampm-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* --- Advanced / raw cron --- */
+
+.sched-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sched-input-error {
+  border-color: var(--error) !important;
+}
+
+.sched-error {
+  font-size: 11px;
+  color: var(--error);
+}
+
+/* --- Preview --- */
+
+.sched-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  background: rgba(124, 108, 255, 0.08);
+  border-radius: var(--radius);
+  border: 1px solid rgba(124, 108, 255, 0.15);
+}
+
+.sched-preview-text {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.sched-preview-next {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* --- Toggle link --- */
+
+.sched-toggle-link {
+  align-self: flex-start;
+  background: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 0;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.sched-toggle-link:hover {
+  color: var(--accent);
+}
+
+/* --- Multi-time rows --- */
+
+.sched-times {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sched-time-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sched-time-remove {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px 6px;
+  margin-left: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.sched-time-remove:hover {
+  color: var(--error);
+  border-color: var(--error);
+  background: rgba(234, 67, 53, 0.08);
+}
+
+.sched-time-add {
+  align-self: flex-start;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 0;
+  margin-top: 2px;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.sched-time-add:hover {
+  color: var(--accent-hover, var(--accent));
+  text-decoration: underline;
+}

@@ -1,0 +1,49 @@
+.rh-loading, .rh-empty {
+  padding: 40px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.rh-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.rh-table th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.rh-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.rh-table tr:hover td {
+  background: var(--bg-secondary);
+}
+
+.rh-exit {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.rh-row-clickable {
+  cursor: pointer;
+}
+
+.rh-detail-arrow {
+  color: var(--text-muted);
+  font-size: 14px;
+  transition: color 0.1s;
+}
+
+.rh-row-clickable:hover .rh-detail-arrow {
+  color: var(--accent);
+}
