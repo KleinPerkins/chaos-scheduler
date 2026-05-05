@@ -5,7 +5,10 @@ mod scheduler;
 use commands::AppState;
 use db::Database;
 use scheduler::{start_scheduler_loop, WorkflowScheduler};
-use std::sync::{Arc, Mutex};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 use tauri::{
     tray::{TrayIcon, TrayIconBuilder},
     Manager, WebviewUrl, WebviewWindowBuilder,
@@ -16,6 +19,8 @@ use tauri::{
 pub struct TrayState {
     pub _icon: TrayIcon,
 }
+
+const TRAY_ID: &str = "chaos-labs-scheduler-tray";
 
 fn detect_chaos_labs_root() -> String {
     if let Ok(home) = std::env::var("HOME") {
@@ -38,6 +43,49 @@ fn detect_python_path(chaos_labs_root: &str) -> String {
     String::from("python3")
 }
 
+fn migrate_legacy_scheduler_db(app_data_dir: &Path) {
+    let new_db = app_data_dir.join("scheduler.db");
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let legacy_db = PathBuf::from(home)
+        .join("Library")
+        .join("Application Support")
+        .join("com.chaoslabs.scheduler")
+        .join("scheduler.db");
+
+    if legacy_db.exists() {
+        let should_migrate = if new_db.exists() {
+            match rusqlite::Connection::open(&new_db) {
+                Ok(conn) => {
+                    let workflow_count = conn.query_row(
+                        "SELECT COUNT(*) FROM workflows",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    );
+                    matches!(workflow_count, Ok(0))
+                }
+                Err(_) => false,
+            }
+        } else {
+            true
+        };
+
+        if !should_migrate {
+            return;
+        }
+
+        if new_db.exists() {
+            let _ = std::fs::remove_file(&new_db);
+        }
+
+        match std::fs::copy(&legacy_db, &new_db) {
+            Ok(_) => log::info!("Migrated legacy scheduler database into new app data dir"),
+            Err(err) => log::warn!("Failed to migrate legacy scheduler database: {err}"),
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -54,6 +102,7 @@ pub fn run() {
 
             let app_data_dir = app.path().app_data_dir().expect("Failed to get app data dir");
             std::fs::create_dir_all(&app_data_dir).ok();
+            migrate_legacy_scheduler_db(&app_data_dir);
 
             let chaos_labs_root = detect_chaos_labs_root();
             let python_path = detect_python_path(&chaos_labs_root);
@@ -89,7 +138,7 @@ pub fn run() {
                 .skip_taskbar(true)
                 .build()?;
 
-            let tray = TrayIconBuilder::new()
+            let tray = TrayIconBuilder::with_id(TRAY_ID)
                 .icon(app.default_window_icon().cloned().expect("No icon"))
                 .icon_as_template(true)
                 .tooltip("Chaos Labs Scheduler")
@@ -121,12 +170,6 @@ pub fn run() {
                                 let popup_width = 340.0_f64;
                                 let x = icon_x + (icon_w / 2.0) - (popup_width / 2.0);
                                 let y = icon_y + icon_h;
-
-                                log::info!(
-                                    "Tray click: phys=({:.0},{:.0}) size=({:.0},{:.0}) scale={} -> logical=({:.0},{:.0})",
-                                    phys_pos.x, phys_pos.y, phys_size.width, phys_size.height,
-                                    scale, x, y
-                                );
 
                                 let _ = popup.set_position(tauri::LogicalPosition::new(x, y));
                                 let _ = popup.show();
@@ -177,6 +220,34 @@ pub fn run() {
             commands::set_email_config,
             commands::test_email_config,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Ready = event {
+                if let Some(tray) = app_handle.tray_by_id(TRAY_ID) {
+                    // Reassert tray visibility on Ready for macOS 26+ resilience.
+                    let _ = tray.set_visible(false);
+                    let _ = tray.set_visible(true);
+                    let _ = tray.set_icon_as_template(true);
+                    let _ = tray.set_tooltip(Some("Chaos Labs Scheduler"));
+                }
+            }
+
+            // Dock-click reopen: ensures the popup is reachable even if the
+            // menu bar tray icon is hidden by macOS (NSStatusItem registration
+            // can be silently dropped by ControlCenter on macOS 26+; the Dock
+            // icon is the always-available fallback access path).
+            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
+                if !has_visible_windows {
+                    if let Some(main) = app_handle.get_webview_window("main") {
+                        let _ = main.show();
+                        let _ = main.set_focus();
+                        log::info!("Dock reopen: main dashboard shown");
+                    }
+                    if let Some(popup) = app_handle.get_webview_window("popup") {
+                        let _ = popup.hide();
+                    }
+                }
+            }
+        });
 }
