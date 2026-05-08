@@ -41,7 +41,15 @@ pub fn create_workflow(
 ) -> Result<Workflow, String> {
     state
         .db
-        .create_workflow(&name, description.as_deref(), &script_path, &cron_schedule, async_mode.unwrap_or(false), email_on_failure.unwrap_or(true), timezone.as_deref().unwrap_or("UTC"))
+        .create_workflow(
+            &name,
+            description.as_deref(),
+            &script_path,
+            &cron_schedule,
+            async_mode.unwrap_or(false),
+            email_on_failure.unwrap_or(true),
+            timezone.as_deref().unwrap_or("UTC"),
+        )
         .map_err(|e| e.to_string())
 }
 
@@ -60,7 +68,17 @@ pub fn update_workflow(
 ) -> Result<Workflow, String> {
     state
         .db
-        .update_workflow(&id, &name, description.as_deref(), &script_path, &cron_schedule, enabled, async_mode.unwrap_or(false), email_on_failure.unwrap_or(true), timezone.as_deref().unwrap_or("UTC"))
+        .update_workflow(
+            &id,
+            &name,
+            description.as_deref(),
+            &script_path,
+            &cron_schedule,
+            enabled,
+            async_mode.unwrap_or(false),
+            email_on_failure.unwrap_or(true),
+            timezone.as_deref().unwrap_or("UTC"),
+        )
         .map_err(|e| e.to_string())
 }
 
@@ -72,15 +90,27 @@ pub fn delete_workflow(state: State<AppState>, id: String) -> Result<(), String>
 #[tauri::command]
 pub fn trigger_workflow(state: State<AppState>, id: String) -> Result<String, String> {
     let result = scheduler::execute_workflow(
-        &state.db, &state.chaos_labs_root, &state.python_path, &id,
-        true, true, false,
+        &state.db,
+        &state.chaos_labs_root,
+        &state.python_path,
+        &id,
+        true,
+        true,
+        false,
     )?;
     Ok(result.run_id)
 }
 
 #[tauri::command]
-pub fn get_run_history(state: State<AppState>, workflow_id: String, limit: Option<i64>) -> Result<Vec<Run>, String> {
-    state.db.get_run_history(&workflow_id, limit.unwrap_or(20)).map_err(|e| e.to_string())
+pub fn get_run_history(
+    state: State<AppState>,
+    workflow_id: String,
+    limit: Option<i64>,
+) -> Result<Vec<Run>, String> {
+    state
+        .db
+        .get_run_history(&workflow_id, limit.unwrap_or(20))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -131,15 +161,23 @@ pub fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn open_run_detail(app: tauri::AppHandle, run_id: String, workflow_id: String) -> Result<(), String> {
+pub fn open_run_detail(
+    app: tauri::AppHandle,
+    run_id: String,
+    workflow_id: String,
+) -> Result<(), String> {
     use tauri::{Emitter, Manager};
     if let Some(main) = app.get_webview_window("main") {
         main.show().map_err(|e| e.to_string())?;
         main.set_focus().map_err(|e| e.to_string())?;
-        main.emit("navigate-to-run", serde_json::json!({
-            "runId": run_id,
-            "workflowId": workflow_id,
-        })).map_err(|e| e.to_string())?;
+        main.emit(
+            "navigate-to-run",
+            serde_json::json!({
+                "runId": run_id,
+                "workflowId": workflow_id,
+            }),
+        )
+        .map_err(|e| e.to_string())?;
     }
     if let Some(popup) = app.get_webview_window("popup") {
         let _ = popup.hide();
@@ -175,7 +213,10 @@ pub fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn get_launch_at_login() -> Result<bool, String> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let plist_path = format!("{}/Library/LaunchAgents/com.chaoslabs.scheduler.plist", home);
+    let plist_path = format!(
+        "{}/Library/LaunchAgents/com.chaoslabs.scheduler.plist",
+        home
+    );
     Ok(std::path::Path::new(&plist_path).exists())
 }
 
@@ -208,7 +249,11 @@ pub fn list_available_scripts(state: State<AppState>) -> Result<Vec<AvailableScr
     Ok(scripts)
 }
 
-fn collect_scripts(dir: &std::path::Path, root: &str, scripts: &mut Vec<AvailableScript>) -> Result<(), String> {
+fn collect_scripts(
+    dir: &std::path::Path,
+    root: &str,
+    scripts: &mut Vec<AvailableScript>,
+) -> Result<(), String> {
     let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -216,16 +261,22 @@ fn collect_scripts(dir: &std::path::Path, root: &str, scripts: &mut Vec<Availabl
         if path.is_dir() {
             collect_scripts(&path, root, scripts)?;
         } else if path.extension().is_some_and(|ext| ext == "py") {
-            let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let filename = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             if filename.starts_with('_') || filename == "__init__.py" {
                 continue;
             }
-            let relative = path.strip_prefix(root)
+            let relative = path
+                .strip_prefix(root)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
             let description = read_script_docstring(&path);
-            let name = filename.trim_end_matches(".py")
+            let name = filename
+                .trim_end_matches(".py")
                 .replace('_', " ")
                 .split_whitespace()
                 .map(|w| {
@@ -259,7 +310,11 @@ fn read_script_docstring(path: &std::path::Path) -> Option<String> {
             if after.ends_with(delim) {
                 return Some(after[..after.len() - 3].trim().to_string());
             }
-            let mut doc = if after.is_empty() { String::new() } else { after.to_string() };
+            let mut doc = if after.is_empty() {
+                String::new()
+            } else {
+                after.to_string()
+            };
             for next_line in lines {
                 if next_line.contains(delim) {
                     break;
@@ -299,9 +354,15 @@ pub fn set_notification_prefs(
 }
 
 #[tauri::command]
-pub fn analyze_run_error(state: State<AppState>, run_id: String) -> Result<serde_json::Value, String> {
+pub fn analyze_run_error(
+    state: State<AppState>,
+    run_id: String,
+) -> Result<serde_json::Value, String> {
     let run = state.db.get_run(&run_id).map_err(|e| e.to_string())?;
-    let workflow = state.db.get_workflow(&run.workflow_id).map_err(|e| e.to_string())?;
+    let workflow = state
+        .db
+        .get_workflow(&run.workflow_id)
+        .map_err(|e| e.to_string())?;
 
     if let Some(existing) = &run.error_analysis {
         return Ok(existing.clone());
@@ -417,7 +478,9 @@ pub fn set_email_config(
     from_name: String,
 ) -> Result<(), String> {
     let password = if smtp_password == "••••••••" {
-        state.db.get_email_config()
+        state
+            .db
+            .get_email_config()
             .map(|c| c.smtp_password)
             .unwrap_or_default()
     } else {
@@ -434,7 +497,10 @@ pub fn set_email_config(
         from_address,
         from_name,
     };
-    state.db.set_email_config(&config).map_err(|e| e.to_string())?;
+    state
+        .db
+        .set_email_config(&config)
+        .map_err(|e| e.to_string())?;
 
     if let Ok(sched) = state.scheduler.lock() {
         sched.refresh_email_config();
@@ -470,16 +536,27 @@ pub fn run_email_script(
         return Err("email_alert.py not found — run deploy.py to sync scripts".to_string());
     }
 
-    let mut context = run_context.cloned().unwrap_or_else(|| serde_json::json!({}));
+    let mut context = run_context
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
     if let Some(obj) = context.as_object_mut() {
         obj.insert("mode".to_string(), serde_json::json!(mode));
         obj.insert("smtp_host".to_string(), serde_json::json!(config.smtp_host));
         obj.insert("smtp_port".to_string(), serde_json::json!(config.smtp_port));
         obj.insert("smtp_user".to_string(), serde_json::json!(config.smtp_user));
-        obj.insert("smtp_password".to_string(), serde_json::json!(config.smtp_password));
-        obj.insert("from_address".to_string(), serde_json::json!(config.from_address));
+        obj.insert(
+            "smtp_password".to_string(),
+            serde_json::json!(config.smtp_password),
+        );
+        obj.insert(
+            "from_address".to_string(),
+            serde_json::json!(config.from_address),
+        );
         obj.insert("from_name".to_string(), serde_json::json!(config.from_name));
-        obj.insert("to_address".to_string(), serde_json::json!(config.alert_email));
+        obj.insert(
+            "to_address".to_string(),
+            serde_json::json!(config.alert_email),
+        );
     }
 
     let output = std::process::Command::new(&python_path)
@@ -500,6 +577,10 @@ pub fn run_email_script(
         .map_err(|e| format!("Failed to run email script: {}", e))?;
 
     let result_str = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(result_str.trim())
-        .map_err(|e| format!("Failed to parse email script output: {} — raw: {}", e, result_str))
+    serde_json::from_str(result_str.trim()).map_err(|e| {
+        format!(
+            "Failed to parse email script output: {} — raw: {}",
+            e, result_str
+        )
+    })
 }

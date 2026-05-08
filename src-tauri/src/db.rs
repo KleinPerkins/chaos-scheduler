@@ -1,8 +1,10 @@
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-fn default_utc() -> String { "UTC".to_string() }
+fn default_utc() -> String {
+    "UTC".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workflow {
@@ -125,29 +127,25 @@ impl Database {
                 result_url TEXT,
                 status TEXT DEFAULT 'running'
             );
-            CREATE INDEX IF NOT EXISTS idx_runs_workflow ON runs(workflow_id);"
+            CREATE INDEX IF NOT EXISTS idx_runs_workflow ON runs(workflow_id);",
         )?;
         // Safe migration: add last_run_at if it doesn't exist
-        let has_col: bool = conn.prepare("SELECT last_run_at FROM workflows LIMIT 0")
+        let has_col: bool = conn
+            .prepare("SELECT last_run_at FROM workflows LIMIT 0")
             .is_ok();
         if !has_col {
             conn.execute_batch("ALTER TABLE workflows ADD COLUMN last_run_at TEXT;")?;
         }
-        conn.execute_batch("
-            CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);"
+        conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);",
         )?;
-        let _ = conn.execute_batch(
-            "ALTER TABLE workflows ADD COLUMN async_mode INTEGER DEFAULT 0;"
-        );
-        let _ = conn.execute_batch(
-            "ALTER TABLE runs ADD COLUMN error_analysis TEXT;"
-        );
-        let _ = conn.execute_batch(
-            "ALTER TABLE workflows ADD COLUMN email_on_failure INTEGER DEFAULT 1;"
-        );
-        let _ = conn.execute_batch(
-            "ALTER TABLE workflows ADD COLUMN timezone TEXT DEFAULT 'UTC';"
-        );
+        let _ =
+            conn.execute_batch("ALTER TABLE workflows ADD COLUMN async_mode INTEGER DEFAULT 0;");
+        let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN error_analysis TEXT;");
+        let _ = conn
+            .execute_batch("ALTER TABLE workflows ADD COLUMN email_on_failure INTEGER DEFAULT 1;");
+        let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN timezone TEXT DEFAULT 'UTC';");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS email_config (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -160,7 +158,7 @@ impl Database {
                 from_address TEXT DEFAULT '',
                 from_name TEXT DEFAULT 'Chaos Labs Scheduler'
             );
-            INSERT OR IGNORE INTO email_config (id) VALUES (1);"
+            INSERT OR IGNORE INTO email_config (id) VALUES (1);",
         )?;
         Ok(())
     }
@@ -183,7 +181,9 @@ impl Database {
                 created_at: row.get(8)?,
                 updated_at: row.get(9)?,
                 email_on_failure: row.get::<_, i32>(10).unwrap_or(1) != 0,
-                timezone: row.get::<_, String>(11).unwrap_or_else(|_| "UTC".to_string()),
+                timezone: row
+                    .get::<_, String>(11)
+                    .unwrap_or_else(|_| "UTC".to_string()),
             })
         })?;
         rows.collect()
@@ -222,7 +222,16 @@ impl Database {
         Ok(())
     }
 
-    pub fn create_workflow(&self, name: &str, description: Option<&str>, script_path: &str, cron_schedule: &str, async_mode: bool, email_on_failure: bool, timezone: &str) -> rusqlite::Result<Workflow> {
+    pub fn create_workflow(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        script_path: &str,
+        cron_schedule: &str,
+        async_mode: bool,
+        email_on_failure: bool,
+        timezone: &str,
+    ) -> rusqlite::Result<Workflow> {
         let id = uuid::Uuid::new_v4().to_string();
         let conn = self.conn()?;
         conn.execute(
@@ -232,7 +241,18 @@ impl Database {
         self.get_workflow(&id)
     }
 
-    pub fn update_workflow(&self, id: &str, name: &str, description: Option<&str>, script_path: &str, cron_schedule: &str, enabled: bool, async_mode: bool, email_on_failure: bool, timezone: &str) -> rusqlite::Result<Workflow> {
+    pub fn update_workflow(
+        &self,
+        id: &str,
+        name: &str,
+        description: Option<&str>,
+        script_path: &str,
+        cron_schedule: &str,
+        enabled: bool,
+        async_mode: bool,
+        email_on_failure: bool,
+        timezone: &str,
+    ) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
         conn.execute(
             "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, updated_at = datetime('now') WHERE id = ?1",
@@ -259,7 +279,14 @@ impl Database {
         self.get_run(&id)
     }
 
-    pub fn finish_run(&self, id: &str, exit_code: i32, stdout: &str, stderr: &str, result_url: Option<&str>) -> rusqlite::Result<()> {
+    pub fn finish_run(
+        &self,
+        id: &str,
+        exit_code: i32,
+        stdout: &str,
+        stderr: &str,
+        result_url: Option<&str>,
+    ) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let status = if exit_code == 0 { "success" } else { "failed" };
         let conn = self.conn()?;
@@ -372,7 +399,8 @@ fn run_from_row(row: &rusqlite::Row) -> Run {
     let stdout: Option<String> = row.get(5).unwrap_or(None);
     let summary = stdout.as_deref().and_then(extract_summary);
     let analysis_str: Option<String> = row.get(10).unwrap_or(None);
-    let error_analysis = analysis_str.as_deref()
+    let error_analysis = analysis_str
+        .as_deref()
         .and_then(|s| serde_json::from_str(s).ok());
     Run {
         id: row.get(0).unwrap_or_default(),
@@ -390,12 +418,11 @@ fn run_from_row(row: &rusqlite::Row) -> Run {
     }
 }
 
-/// Extract a SUMMARY_JSON:{...} line from workflow stdout.
-/// Convention: workflows emit exactly one line starting with `SUMMARY_JSON:`
-/// followed by a JSON object. The object's schema is flexible and
-/// workflow-specific; the frontend renders it generically.
+/// Extract the latest SUMMARY_JSON:{...} line from workflow stdout.
+/// Current async runs store a run-scoped log slice, but latest-wins keeps the
+/// UI correct if a workflow emits multiple summaries inside one run.
 pub fn extract_summary(stdout: &str) -> Option<serde_json::Value> {
-    for line in stdout.lines() {
+    for line in stdout.lines().rev() {
         let trimmed = line.trim();
         if let Some(json_str) = trimmed.strip_prefix("SUMMARY_JSON:") {
             if let Ok(val) = serde_json::from_str(json_str.trim()) {
@@ -404,4 +431,20 @@ pub fn extract_summary(stdout: &str) -> Option<serde_json::Value> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_summary_returns_latest_valid_summary() {
+        let stdout = "\
+SUMMARY_JSON:{\"title\":\"stale\"}
+noise
+SUMMARY_JSON:{\"title\":\"current\"}
+";
+        let summary = extract_summary(stdout).expect("summary should parse");
+        assert_eq!(summary["title"], "current");
+    }
 }

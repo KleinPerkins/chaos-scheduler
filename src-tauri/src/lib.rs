@@ -14,7 +14,6 @@ use tauri::{
     Manager, WebviewUrl, WebviewWindowBuilder,
 };
 
-
 /// Held in managed state so the tray icon is never dropped while the app runs.
 pub struct TrayState {
     pub _icon: TrayIcon,
@@ -58,11 +57,10 @@ fn migrate_legacy_scheduler_db(app_data_dir: &Path) {
         let should_migrate = if new_db.exists() {
             match rusqlite::Connection::open(&new_db) {
                 Ok(conn) => {
-                    let workflow_count = conn.query_row(
-                        "SELECT COUNT(*) FROM workflows",
-                        [],
-                        |row| row.get::<_, i64>(0),
-                    );
+                    let workflow_count =
+                        conn.query_row("SELECT COUNT(*) FROM workflows", [], |row| {
+                            row.get::<_, i64>(0)
+                        });
                     matches!(workflow_count, Ok(0))
                 }
                 Err(_) => false,
@@ -100,7 +98,10 @@ pub fn run() {
                     .build(),
             )?;
 
-            let app_data_dir = app.path().app_data_dir().expect("Failed to get app data dir");
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .expect("Failed to get app data dir");
             std::fs::create_dir_all(&app_data_dir).ok();
             migrate_legacy_scheduler_db(&app_data_dir);
 
@@ -108,9 +109,7 @@ pub fn run() {
             let python_path = detect_python_path(&chaos_labs_root);
 
             let db = Arc::new(Database::new(&app_data_dir));
-            let scheduler = Arc::new(Mutex::new(WorkflowScheduler::new(
-                db.clone(),
-            )));
+            let scheduler = Arc::new(Mutex::new(WorkflowScheduler::new(db.clone())));
 
             app.manage(AppState {
                 db: db.clone(),
@@ -128,15 +127,19 @@ pub fn run() {
             );
 
             let handle = app.handle().clone();
-            let _ = WebviewWindowBuilder::new(&handle, "popup", WebviewUrl::App("index.html?view=popup".into()))
-                .title("Chaos Labs")
-                .inner_size(340.0, 440.0)
-                .resizable(false)
-                .visible(false)
-                .decorations(false)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .build()?;
+            let _ = WebviewWindowBuilder::new(
+                &handle,
+                "popup",
+                WebviewUrl::App("index.html?view=popup".into()),
+            )
+            .title("Chaos Labs")
+            .inner_size(340.0, 440.0)
+            .resizable(false)
+            .visible(false)
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .build()?;
 
             let tray = TrayIconBuilder::with_id(TRAY_ID)
                 .icon(app.default_window_icon().cloned().expect("No icon"))
@@ -237,7 +240,11 @@ pub fn run() {
             // menu bar tray icon is hidden by macOS (NSStatusItem registration
             // can be silently dropped by ControlCenter on macOS 26+; the Dock
             // icon is the always-available fallback access path).
-            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } = event
+            {
                 if !has_visible_windows {
                     if let Some(main) = app_handle.get_webview_window("main") {
                         let _ = main.show();
