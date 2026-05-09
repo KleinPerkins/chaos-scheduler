@@ -40,6 +40,7 @@ pub fn create_workflow(
     timezone: Option<String>,
     corpus: Option<String>,
     trigger_config: Option<String>,
+    queue_config: Option<String>,
 ) -> Result<Workflow, String> {
     state
         .db
@@ -53,6 +54,7 @@ pub fn create_workflow(
             timezone.as_deref().unwrap_or("UTC"),
             corpus.as_deref().unwrap_or("instance"),
             trigger_config.as_deref(),
+            queue_config.as_deref(),
         )
         .map_err(|e| e.to_string())
 }
@@ -71,6 +73,7 @@ pub fn update_workflow(
     timezone: Option<String>,
     corpus: Option<String>,
     trigger_config: Option<String>,
+    queue_config: Option<String>,
 ) -> Result<Workflow, String> {
     let existing = state.db.get_workflow(&id).map_err(|e| e.to_string())?;
     state
@@ -89,6 +92,7 @@ pub fn update_workflow(
             trigger_config
                 .as_deref()
                 .or(existing.trigger_config.as_deref()),
+            queue_config.as_deref().or(existing.queue_config.as_deref()),
         )
         .map_err(|e| e.to_string())
 }

@@ -14,6 +14,7 @@ export interface Workflow {
   corpus: WorkflowCorpus;
   timezone: string;
   trigger_config?: string | null;
+  queue_config?: string | null;
   last_run_at: string | null;
   created_at: string;
   updated_at: string;
@@ -89,6 +90,7 @@ export interface WorkflowPayload {
   timezone?: string;
   corpus?: WorkflowCorpus;
   triggerConfig?: string;
+  queueConfig?: string;
 }
 
 export interface WorkflowUpdatePayload extends WorkflowPayload {

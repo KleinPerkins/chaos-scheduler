@@ -54,6 +54,24 @@ impl WorkflowScheduler {
     }
 
     pub fn find_due_workflows(&self, chaos_labs_root: &str) -> Vec<DueWorkflow> {
+        match self.db.validate_queue_cap_lattice() {
+            Ok(errors) if errors.is_empty() => {}
+            Ok(errors) => {
+                log::error!(
+                    "Scheduler queue cap validation failed; skipping admission: {}",
+                    errors.join("; ")
+                );
+                return vec![];
+            }
+            Err(e) => {
+                log::error!(
+                    "Scheduler queue cap validation failed; skipping admission: {}",
+                    e
+                );
+                return vec![];
+            }
+        }
+
         let workflows = match self.db.list_workflows() {
             Ok(w) => w,
             Err(e) => {
@@ -70,6 +88,8 @@ impl WorkflowScheduler {
                 continue;
             }
 
+            let queue_config =
+                parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
             let trigger_config = parse_trigger_config(workflow.trigger_config.as_deref());
             let has_explicit_triggers = !trigger_config.is_empty();
             let cron_triggers: Vec<String> = if has_explicit_triggers {
@@ -104,9 +124,7 @@ impl WorkflowScheduler {
                             workflow.name,
                             scheduled_time
                         );
-                        let now_str = now.to_rfc3339();
-                        let _ = self.db.set_last_run_at(&workflow.id, &now_str);
-                        due.push(DueWorkflow {
+                        let candidate = DueWorkflow {
                             id: workflow.id.clone(),
                             trigger_kind: Some("cron".to_string()),
                             trigger_payload: Some(
@@ -115,7 +133,14 @@ impl WorkflowScheduler {
                                 })
                                 .to_string(),
                             ),
-                        });
+                            queue_name: queue_config.queue.clone(),
+                            priority: queue_config.priority,
+                        };
+                        if self.admit_or_skip_due_workflow(&workflow, &queue_config, &candidate) {
+                            let now_str = now.to_rfc3339();
+                            let _ = self.db.set_last_run_at(&workflow.id, &now_str);
+                            due.push(candidate);
+                        }
                         continue;
                     }
                 }
@@ -127,17 +152,169 @@ impl WorkflowScheduler {
                 if let Some(reason) =
                     self.evaluate_file_arrival_trigger(&workflow.id, trigger, chaos_labs_root)
                 {
-                    due.push(DueWorkflow {
+                    let candidate = DueWorkflow {
                         id: workflow.id.clone(),
                         trigger_kind: Some("file_arrival".to_string()),
                         trigger_payload: Some(reason.to_string()),
-                    });
+                        queue_name: queue_config.queue.clone(),
+                        priority: queue_config.priority,
+                    };
+                    if self.admit_or_skip_due_workflow(&workflow, &queue_config, &candidate) {
+                        due.push(candidate);
+                    }
                     break;
                 }
             }
         }
 
+        due.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.queue_name.cmp(&b.queue_name))
+                .then_with(|| a.id.cmp(&b.id))
+        });
         due
+    }
+
+    fn admit_or_skip_due_workflow(
+        &self,
+        workflow: &crate::db::Workflow,
+        queue_config: &QueueConfig,
+        candidate: &DueWorkflow,
+    ) -> bool {
+        match self.dependency_decision(workflow, queue_config) {
+            DependencyDecision::Ready => match self.has_queue_capacity(queue_config) {
+                Ok(true) => true,
+                Ok(false) => {
+                    log::info!(
+                        "Deferring workflow {}: queue {} is at capacity",
+                        workflow.id,
+                        queue_config.queue
+                    );
+                    false
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Deferring workflow {}: failed to evaluate queue capacity: {}",
+                        workflow.id,
+                        e
+                    );
+                    false
+                }
+            },
+            DependencyDecision::Waiting(reason) => {
+                log::info!(
+                    "Deferring workflow {} in queue {}: {}",
+                    workflow.id,
+                    queue_config.queue,
+                    reason
+                );
+                false
+            }
+            DependencyDecision::CascadeSkip(reason) => {
+                log::warn!("Cascade-skipping workflow {}: {}", workflow.id, reason);
+                let payload = serde_json::json!({
+                    "reason": reason,
+                    "queue": queue_config.queue,
+                    "original_trigger_kind": candidate.trigger_kind.as_deref(),
+                    "original_trigger_payload": candidate.trigger_payload.as_deref(),
+                })
+                .to_string();
+                let _ = self.db.create_terminal_run_with_context(
+                    &workflow.id,
+                    "cascade-skipped",
+                    candidate.trigger_kind.as_deref(),
+                    Some(&payload),
+                    None,
+                    None,
+                    None,
+                );
+                false
+            }
+        }
+    }
+
+    fn dependency_decision(
+        &self,
+        workflow: &crate::db::Workflow,
+        queue_config: &QueueConfig,
+    ) -> DependencyDecision {
+        for upstream in &queue_config.depends_on {
+            match self.latest_status(upstream) {
+                Some(status) if status == "success" => {}
+                Some(status) if is_failure_terminal(&status) => {
+                    return DependencyDecision::CascadeSkip(format!(
+                        "depends_on upstream {} ended as {}",
+                        upstream, status
+                    ));
+                }
+                Some(status) => {
+                    return DependencyDecision::Waiting(format!(
+                        "depends_on upstream {} is {}",
+                        upstream, status
+                    ));
+                }
+                None => {
+                    return DependencyDecision::Waiting(format!(
+                        "depends_on upstream {} has no runs",
+                        upstream
+                    ));
+                }
+            }
+        }
+        for upstream in &queue_config.waits_for {
+            match self.latest_status(upstream) {
+                Some(status) if is_terminal_status(&status) => {}
+                Some(status) => {
+                    return DependencyDecision::Waiting(format!(
+                        "waits_for upstream {} is {}",
+                        upstream, status
+                    ));
+                }
+                None => {
+                    return DependencyDecision::Waiting(format!(
+                        "waits_for upstream {} has no runs",
+                        upstream
+                    ));
+                }
+            }
+        }
+        if queue_config.queue.trim().is_empty() {
+            return DependencyDecision::Waiting(format!(
+                "workflow {} has empty queue assignment",
+                workflow.id
+            ));
+        }
+        DependencyDecision::Ready
+    }
+
+    fn has_queue_capacity(&self, queue_config: &QueueConfig) -> Result<bool, String> {
+        let capacity = self
+            .db
+            .queue_capacity(&queue_config.queue, &queue_config.corpus)
+            .map_err(|e| e.to_string())?;
+        let running = self
+            .running_count_for_queue(&queue_config.queue, &queue_config.corpus)
+            .map_err(|e| e.to_string())?;
+        Ok(running < capacity)
+    }
+
+    fn running_count_for_queue(&self, queue_name: &str, corpus: &str) -> Result<i64, String> {
+        running_count_for_queue(&self.db, queue_name, corpus)
+    }
+
+    fn latest_status(&self, workflow_id: &str) -> Option<String> {
+        match self.db.latest_run_status(workflow_id) {
+            Ok(status) => status,
+            Err(e) => {
+                log::warn!(
+                    "Failed to read latest run status for {}: {}",
+                    workflow_id,
+                    e
+                );
+                None
+            }
+        }
     }
 
     fn evaluate_file_arrival_trigger(
@@ -187,6 +364,101 @@ pub struct DueWorkflow {
     pub id: String,
     pub trigger_kind: Option<String>,
     pub trigger_payload: Option<String>,
+    pub queue_name: String,
+    pub priority: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct QueueConfig {
+    #[serde(default)]
+    depends_on: Vec<String>,
+    #[serde(default)]
+    waits_for: Vec<String>,
+    #[serde(default)]
+    excludes: Vec<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    queue: String,
+    #[serde(default)]
+    priority: i64,
+    #[serde(skip)]
+    corpus: String,
+}
+
+enum DependencyDecision {
+    Ready,
+    Waiting(String),
+    CascadeSkip(String),
+}
+
+fn parse_queue_config(queue_config: Option<&str>, corpus: &str) -> QueueConfig {
+    let default_queue = format!("{}-default", corpus);
+    let mut parsed = queue_config
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|raw| serde_json::from_str::<QueueConfig>(raw).ok())
+        .unwrap_or(QueueConfig {
+            depends_on: vec![],
+            waits_for: vec![],
+            excludes: vec![],
+            tags: vec![],
+            queue: default_queue.clone(),
+            priority: 0,
+            corpus: corpus.to_string(),
+        });
+    if parsed.queue.trim().is_empty() {
+        parsed.queue = default_queue;
+    }
+    parsed.corpus = corpus.to_string();
+    parsed
+}
+
+fn mutex_keys(workflow_id: &str, queue_config: &QueueConfig) -> Vec<String> {
+    let mut keys = Vec::new();
+    for other in &queue_config.excludes {
+        let mut pair = [workflow_id.to_string(), other.to_string()];
+        pair.sort();
+        keys.push(format!("exclude:{}::{}", pair[0], pair[1]));
+    }
+    for tag in &queue_config.tags {
+        keys.push(format!(
+            "tag:{}:{}:{}",
+            queue_config.corpus, queue_config.queue, tag
+        ));
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+fn running_count_for_queue(
+    db: &Arc<Database>,
+    queue_name: &str,
+    corpus: &str,
+) -> Result<i64, String> {
+    let running = db.get_running_runs().map_err(|e| e.to_string())?;
+    let mut count = 0;
+    for run in running {
+        let workflow = db
+            .get_workflow(&run.workflow_id)
+            .map_err(|e| e.to_string())?;
+        let config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
+        if config.queue == queue_name && config.corpus == corpus {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn is_terminal_status(status: &str) -> bool {
+    matches!(
+        status,
+        "success" | "failed" | "cancelled" | "cascade-skipped"
+    )
+}
+
+fn is_failure_terminal(status: &str) -> bool {
+    matches!(status, "failed" | "cancelled" | "cascade-skipped")
 }
 
 /// Compute the next run time for a cron expression in the given timezone.
@@ -296,6 +568,18 @@ pub fn execute_workflow_with_context(
     let workflow = db
         .get_workflow(workflow_id)
         .map_err(|e| format!("Failed to get workflow: {}", e))?;
+    let queue_config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
+    let capacity = db
+        .queue_capacity(&queue_config.queue, &queue_config.corpus)
+        .map_err(|e| format!("Failed to read queue capacity: {}", e))?;
+    let running = running_count_for_queue(db, &queue_config.queue, &queue_config.corpus)?;
+    if running >= capacity {
+        return Err(format!(
+            "Queue {} is at capacity ({}/{})",
+            queue_config.queue, running, capacity
+        ));
+    }
+    let mutex_keys = mutex_keys(&workflow.id, &queue_config);
 
     let run = db
         .create_run_with_context(
@@ -307,6 +591,18 @@ pub fn execute_workflow_with_context(
             rerun_of_run_id,
         )
         .map_err(|e| format!("Failed to create run record: {}", e))?;
+
+    let acquired = db
+        .acquire_mutex_locks(&workflow.id, &run.id, &mutex_keys)
+        .map_err(|e| format!("Failed to acquire mutex locks: {}", e))?;
+    if !acquired {
+        let reason = format!(
+            "Workflow {} could not acquire mutex locks in queue {}",
+            workflow.id, queue_config.queue
+        );
+        let _ = db.finish_run_with_status(&run.id, "cancelled", "", &reason);
+        return Err(reason);
+    }
 
     let output = build_workflow_command(
         &workflow.script_path,
@@ -1565,6 +1861,83 @@ mod tests {
 
         assert_eq!(triggers.len(), 1);
         assert_eq!(triggers[0]["kind"], "file_arrival");
+    }
+
+    #[test]
+    fn queue_config_defaults_to_corpus_queue() {
+        let config = parse_queue_config(None, "source");
+
+        assert_eq!(config.queue, "source-default");
+        assert_eq!(config.priority, 0);
+        assert!(config.depends_on.is_empty());
+        assert!(config.waits_for.is_empty());
+    }
+
+    #[test]
+    fn scheduler_skips_due_workflows_when_cap_lattice_invalid() {
+        let dir = std::env::temp_dir().join(format!("chaos-cap-lattice-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Database::new(&dir));
+        db.create_workflow(
+            "Due Workflow",
+            None,
+            "scripts/workflows/noop.py",
+            "* * * * *",
+            false,
+            true,
+            "UTC",
+            "source",
+            None,
+            Some(r#"{"queue":"source-default"}"#),
+        )
+        .unwrap();
+        let conn = rusqlite::Connection::open(dir.join("scheduler.db")).unwrap();
+        conn.execute(
+            "UPDATE scheduler_config SET value = '2' WHERE key = 'global_parallelism_cap'",
+            [],
+        )
+        .unwrap();
+
+        let scheduler = WorkflowScheduler::new(db);
+
+        assert!(scheduler
+            .find_due_workflows(dir.to_str().unwrap())
+            .is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn queue_config_parses_dependency_fields() {
+        let config = parse_queue_config(
+            Some(
+                r#"{"depends_on":["capture"],"waits_for":["gmail"],"queue":"source-heavy","priority":7}"#,
+            ),
+            "source",
+        );
+
+        assert_eq!(config.depends_on, vec!["capture"]);
+        assert_eq!(config.waits_for, vec!["gmail"]);
+        assert_eq!(config.queue, "source-heavy");
+        assert_eq!(config.priority, 7);
+    }
+
+    #[test]
+    fn mutex_keys_include_pair_and_tag_groups() {
+        let config = parse_queue_config(
+            Some(r#"{"excludes":["refresh"],"tags":["heavy_io"],"queue":"source-heavy"}"#),
+            "source",
+        );
+
+        let keys = mutex_keys("capture", &config);
+
+        assert_eq!(
+            keys,
+            vec![
+                "exclude:capture::refresh".to_string(),
+                "tag:source:source-heavy:heavy_io".to_string()
+            ]
+        );
     }
 
     #[test]

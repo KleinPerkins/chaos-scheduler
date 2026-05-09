@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, types::Type, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -25,6 +25,7 @@ pub struct Workflow {
     #[serde(default = "default_utc")]
     pub timezone: String,
     pub trigger_config: Option<String>,
+    pub queue_config: Option<String>,
     pub last_run_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -128,6 +129,7 @@ impl Database {
                 async_mode INTEGER DEFAULT 0,
                 corpus TEXT NOT NULL DEFAULT 'source',
                 trigger_config TEXT,
+                queue_config TEXT,
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
             );
@@ -155,6 +157,38 @@ impl Database {
                 fired_at TEXT,
                 PRIMARY KEY (workflow_id, trigger_id)
             );
+            CREATE TABLE IF NOT EXISTS scheduler_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS queues (
+                name TEXT NOT NULL,
+                corpus TEXT NOT NULL,
+                capacity INTEGER NOT NULL DEFAULT 1,
+                tag_cap INTEGER,
+                max_queued INTEGER,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (name, corpus)
+            );
+            CREATE TABLE IF NOT EXISTS queued_runs (
+                id TEXT PRIMARY KEY,
+                run_id TEXT REFERENCES runs(id),
+                workflow_id TEXT NOT NULL REFERENCES workflows(id),
+                queue_name TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'queued',
+                queued_at TEXT NOT NULL,
+                admitted_at TEXT,
+                finished_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS workflow_mutex_locks (
+                mutex_key TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL REFERENCES workflows(id),
+                run_id TEXT REFERENCES runs(id),
+                acquired_at TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_runs_workflow ON runs(workflow_id);",
         )?;
         // Safe migration: add last_run_at if it doesn't exist
@@ -177,6 +211,7 @@ impl Database {
             "ALTER TABLE workflows ADD COLUMN corpus TEXT NOT NULL DEFAULT 'source';",
         );
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN trigger_config TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN queue_config TEXT;");
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN timezone TEXT DEFAULT 'UTC';");
         let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN trigger_kind TEXT;");
         let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN trigger_payload TEXT;");
@@ -197,13 +232,18 @@ impl Database {
             );
             INSERT OR IGNORE INTO email_config (id) VALUES (1);",
         )?;
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO scheduler_config (key, value) VALUES ('global_parallelism_cap', '4');
+             INSERT OR IGNORE INTO queues (name, corpus, capacity) VALUES ('source-default', 'source', 4);
+             INSERT OR IGNORE INTO queues (name, corpus, capacity) VALUES ('instance-default', 'instance', 2);",
+        )?;
         Ok(())
     }
 
     pub fn list_workflows(&self) -> rusqlite::Result<Vec<Workflow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, trigger_config FROM workflows ORDER BY corpus, name"
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, trigger_config, queue_config FROM workflows ORDER BY corpus, name"
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(Workflow {
@@ -225,6 +265,7 @@ impl Database {
                     .get::<_, String>(12)
                     .unwrap_or_else(|_| "source".to_string()),
                 trigger_config: row.get(13).unwrap_or(None),
+                queue_config: row.get(14).unwrap_or(None),
             })
         })?;
         rows.collect()
@@ -233,7 +274,7 @@ impl Database {
     pub fn get_workflow(&self, id: &str) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, trigger_config FROM workflows WHERE id = ?1",
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, trigger_config, queue_config FROM workflows WHERE id = ?1",
             params![id],
             |row| {
                 Ok(Workflow {
@@ -251,6 +292,7 @@ impl Database {
                     timezone: row.get::<_, String>(11).unwrap_or_else(|_| "UTC".to_string()),
                     corpus: row.get::<_, String>(12).unwrap_or_else(|_| "source".to_string()),
                     trigger_config: row.get(13).unwrap_or(None),
+                    queue_config: row.get(14).unwrap_or(None),
                 })
             },
         )
@@ -276,12 +318,13 @@ impl Database {
         timezone: &str,
         corpus: &str,
         trigger_config: Option<&str>,
+        queue_config: Option<&str>,
     ) -> rusqlite::Result<Workflow> {
         let id = uuid::Uuid::new_v4().to_string();
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO workflows (id, name, description, script_path, cron_schedule, async_mode, email_on_failure, timezone, corpus, trigger_config) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![id, name, description, script_path, cron_schedule, async_mode as i32, email_on_failure as i32, timezone, corpus, trigger_config],
+            "INSERT INTO workflows (id, name, description, script_path, cron_schedule, async_mode, email_on_failure, timezone, corpus, trigger_config, queue_config) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![id, name, description, script_path, cron_schedule, async_mode as i32, email_on_failure as i32, timezone, corpus, trigger_config, queue_config],
         )?;
         self.get_workflow(&id)
     }
@@ -299,11 +342,12 @@ impl Database {
         timezone: &str,
         corpus: &str,
         trigger_config: Option<&str>,
+        queue_config: Option<&str>,
     ) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
         conn.execute(
-            "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, corpus = ?10, trigger_config = ?11, updated_at = datetime('now') WHERE id = ?1",
-            params![id, name, description, script_path, cron_schedule, enabled as i32, async_mode as i32, email_on_failure as i32, timezone, corpus, trigger_config],
+            "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, corpus = ?10, trigger_config = ?11, queue_config = ?12, updated_at = datetime('now') WHERE id = ?1",
+            params![id, name, description, script_path, cron_schedule, enabled as i32, async_mode as i32, email_on_failure as i32, timezone, corpus, trigger_config, queue_config],
         )?;
         self.get_workflow(id)
     }
@@ -334,6 +378,26 @@ impl Database {
         self.get_run(&id)
     }
 
+    pub fn create_terminal_run_with_context(
+        &self,
+        workflow_id: &str,
+        status: &str,
+        trigger_kind: Option<&str>,
+        trigger_payload: Option<&str>,
+        upstream_run_id: Option<&str>,
+        input_json: Option<&str>,
+        rerun_of_run_id: Option<&str>,
+    ) -> rusqlite::Result<Run> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO runs (id, workflow_id, started_at, finished_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id) VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, workflow_id, now, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id],
+        )?;
+        self.get_run(&id)
+    }
+
     pub fn finish_run(
         &self,
         id: &str,
@@ -349,6 +413,24 @@ impl Database {
             "UPDATE runs SET finished_at = ?2, exit_code = ?3, stdout = ?4, stderr = ?5, result_url = ?6, status = ?7 WHERE id = ?1",
             params![id, now, exit_code, stdout, stderr, result_url, status],
         )?;
+        let _ = self.release_mutex_locks(id);
+        Ok(())
+    }
+
+    pub fn finish_run_with_status(
+        &self,
+        id: &str,
+        status: &str,
+        stdout: &str,
+        stderr: &str,
+    ) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE runs SET finished_at = ?2, stdout = ?3, stderr = ?4, status = ?5 WHERE id = ?1",
+            params![id, now, stdout, stderr, status],
+        )?;
+        let _ = self.release_mutex_locks(id);
         Ok(())
     }
 
@@ -438,6 +520,129 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(count as usize)
+    }
+
+    pub fn latest_run_status(&self, workflow_id: &str) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT status FROM runs WHERE workflow_id = ?1 ORDER BY started_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![workflow_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn queue_capacity(&self, queue_name: &str, corpus: &str) -> rusqlite::Result<i64> {
+        let conn = self.conn()?;
+        let mut stmt =
+            conn.prepare("SELECT capacity FROM queues WHERE name = ?1 AND corpus = ?2")?;
+        let mut rows = stmt.query(params![queue_name, corpus])?;
+        if let Some(row) = rows.next()? {
+            let capacity: i64 = row.get(0)?;
+            Ok(capacity.max(1))
+        } else {
+            Ok(1)
+        }
+    }
+
+    pub fn global_parallelism_cap(&self) -> rusqlite::Result<i64> {
+        let conn = self.conn()?;
+        let raw: String = conn.query_row(
+            "SELECT value FROM scheduler_config WHERE key = 'global_parallelism_cap'",
+            [],
+            |row| row.get(0),
+        )?;
+        raw.parse::<i64>()
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(e)))
+    }
+
+    pub fn validate_queue_cap_lattice(&self) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn()?;
+        let global_cap = self.global_parallelism_cap()?;
+        let mut errors = Vec::new();
+        if global_cap < 1 {
+            errors.push("global_parallelism_cap must be >= 1".to_string());
+        }
+        let mut stmt = conn
+            .prepare("SELECT name, corpus, capacity, tag_cap FROM queues ORDER BY corpus, name")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (name, corpus, capacity, tag_cap) = row?;
+            let label = format!("{}/{}", corpus, name);
+            if capacity < 1 {
+                errors.push(format!("queue {} capacity must be >= 1", label));
+            }
+            if capacity > global_cap {
+                errors.push(format!(
+                    "queue {} capacity {} exceeds global cap {}",
+                    label, capacity, global_cap
+                ));
+            }
+            if let Some(tag_cap) = tag_cap {
+                if tag_cap < 1 {
+                    errors.push(format!("queue {} tag_cap must be >= 1", label));
+                }
+                if tag_cap > capacity {
+                    errors.push(format!(
+                        "queue {} tag_cap {} exceeds queue capacity {}",
+                        label, tag_cap, capacity
+                    ));
+                }
+            }
+        }
+        Ok(errors)
+    }
+
+    pub fn acquire_mutex_locks(
+        &self,
+        workflow_id: &str,
+        run_id: &str,
+        mutex_keys: &[String],
+    ) -> rusqlite::Result<bool> {
+        if mutex_keys.is_empty() {
+            return Ok(true);
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        for key in mutex_keys {
+            let exists: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM workflow_mutex_locks WHERE mutex_key = ?1",
+                params![key],
+                |row| row.get(0),
+            )?;
+            if exists > 0 {
+                tx.rollback()?;
+                return Ok(false);
+            }
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        for key in mutex_keys {
+            tx.execute(
+                "INSERT INTO workflow_mutex_locks (mutex_key, workflow_id, run_id, acquired_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![key, workflow_id, run_id, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn release_mutex_locks(&self, run_id: &str) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM workflow_mutex_locks WHERE run_id = ?1",
+            params![run_id],
+        )
     }
 
     pub fn get_running_runs(&self) -> rusqlite::Result<Vec<Run>> {
@@ -545,5 +750,90 @@ SUMMARY_JSON:{\"title\":\"current\"}
 ";
         let summary = extract_summary(stdout).expect("summary should parse");
         assert_eq!(summary["title"], "current");
+    }
+
+    #[test]
+    fn queue_capacity_defaults_are_seeded() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        assert_eq!(db.global_parallelism_cap().unwrap(), 4);
+        assert_eq!(db.queue_capacity("source-default", "source").unwrap(), 4);
+        assert_eq!(
+            db.queue_capacity("instance-default", "instance").unwrap(),
+            2
+        );
+        assert_eq!(db.queue_capacity("missing", "source").unwrap(), 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cap_lattice_validation_rejects_invalid_caps() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let conn = db.conn().unwrap();
+        conn.execute(
+            "UPDATE scheduler_config SET value = '3' WHERE key = 'global_parallelism_cap'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO queues (name, corpus, capacity, tag_cap) VALUES ('too-big', 'source', 5, 6)",
+            [],
+        )
+        .unwrap();
+
+        let errors = db.validate_queue_cap_lattice().unwrap();
+
+        assert!(errors.iter().any(|e| e.contains("exceeds global cap")));
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("tag_cap 6 exceeds queue capacity 5")));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mutex_locks_are_acquired_and_released_by_run() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = db
+            .create_workflow(
+                "Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                None,
+                None,
+            )
+            .unwrap();
+        let run = db
+            .create_run_with_context(&workflow.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        let other_run = db
+            .create_run_with_context(&workflow.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        let keys = vec!["tag:source:source-default:heavy_io".to_string()];
+
+        assert!(db
+            .acquire_mutex_locks(&workflow.id, &run.id, &keys)
+            .unwrap());
+        assert!(!db
+            .acquire_mutex_locks(&workflow.id, &other_run.id, &keys)
+            .unwrap());
+        assert_eq!(db.release_mutex_locks(&run.id).unwrap(), 1);
+        assert!(db
+            .acquire_mutex_locks(&workflow.id, &other_run.id, &keys)
+            .unwrap());
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
