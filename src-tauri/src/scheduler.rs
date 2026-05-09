@@ -6,11 +6,17 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Output, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::unix::io::FromRawFd;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -616,20 +622,20 @@ pub fn execute_workflow_with_context(
         return Err(reason);
     }
 
-    let output = build_workflow_command(
+    let output = run_workflow_command(build_workflow_command(
         &workflow.script_path,
         chaos_labs_root,
         python_path,
         &run.id,
         input_json,
-    )
-    .output();
+    ));
 
     match output {
-        Ok(output) => {
+        Ok((output, task_events_raw)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let exit_code = output.status.code().unwrap_or(-1);
+            let stdout = stdout_with_task_events(stdout, &task_events_raw);
 
             let result_url = extract_result_url(&stdout);
 
@@ -912,6 +918,97 @@ fn build_workflow_command(
         }
         cmd
     }
+}
+
+#[cfg(unix)]
+fn run_workflow_command(mut cmd: Command) -> std::io::Result<(Output, String)> {
+    let mut fds = [0; 2];
+    let pipe_result = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if pipe_result == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let read_fd = fds[0];
+    let write_fd = fds[1];
+
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("CHAOS_LABS_TASK_CHANNEL_FD", "3");
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::dup2(write_fd, 3) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if write_fd != 3 {
+                libc::close(write_fd);
+            }
+            if read_fd != 3 {
+                libc::close(read_fd);
+            }
+            Ok(())
+        });
+    }
+
+    let child = cmd.spawn();
+    unsafe {
+        libc::close(write_fd);
+    }
+    let child = match child {
+        Ok(child) => child,
+        Err(e) => {
+            unsafe {
+                libc::close(read_fd);
+            }
+            return Err(e);
+        }
+    };
+
+    let task_reader = std::thread::spawn(move || {
+        let mut file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+        let mut task_events = String::new();
+        let _ = file.read_to_string(&mut task_events);
+        task_events
+    });
+    let output = child.wait_with_output()?;
+    let task_events = task_reader.join().unwrap_or_default();
+    Ok((output, task_events))
+}
+
+#[cfg(not(unix))]
+fn run_workflow_command(mut cmd: Command) -> std::io::Result<(Output, String)> {
+    cmd.output().map(|output| (output, String::new()))
+}
+
+fn stdout_with_task_events(mut stdout: String, raw_events: &str) -> String {
+    let events = valid_task_event_lines(raw_events);
+    if events.is_empty() {
+        return stdout;
+    }
+    if !stdout.ends_with('\n') {
+        stdout.push('\n');
+    }
+    for event in events {
+        stdout.push_str("TASK_EVENT_JSON: ");
+        stdout.push_str(&event);
+        stdout.push('\n');
+    }
+    stdout
+}
+
+fn valid_task_event_lines(raw_events: &str) -> Vec<String> {
+    raw_events
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let parsed: Value = serde_json::from_str(trimmed).ok()?;
+            let has_required = parsed.get("ts").and_then(Value::as_str).is_some()
+                && parsed.get("task_id").and_then(Value::as_str).is_some()
+                && parsed.get("status").and_then(Value::as_str).is_some();
+            has_required.then(|| parsed.to_string())
+        })
+        .collect()
 }
 
 fn extract_result_url(stdout: &str) -> Option<String> {
@@ -1932,6 +2029,31 @@ mod tests {
         assert_eq!(config.waits_for, vec!["gmail"]);
         assert_eq!(config.queue, "source-heavy");
         assert_eq!(config.priority, 7);
+    }
+
+    #[test]
+    fn task_event_lines_require_transition_fields() {
+        let raw = r#"
+{"schema_version":"scheduler.task_event.v1","ts":"2026-05-09T23:00:00Z","task_id":"discover","status":"started"}
+{"schema_version":"scheduler.task_event.v1","task_id":"bad","status":"started"}
+not json
+"#;
+
+        let events = valid_task_event_lines(raw);
+
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("\"task_id\":\"discover\""));
+    }
+
+    #[test]
+    fn stdout_appends_valid_task_event_lines() {
+        let stdout = stdout_with_task_events(
+            "Log: /tmp/run.log\n".to_string(),
+            r#"{"ts":"2026-05-09T23:00:00Z","task_id":"summarize","status":"succeeded"}"#,
+        );
+
+        assert!(stdout.contains("TASK_EVENT_JSON:"));
+        assert!(stdout.contains("\"task_id\":\"summarize\""));
     }
 
     #[test]
