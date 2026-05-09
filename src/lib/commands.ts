@@ -54,6 +54,32 @@ export interface SchedulerStatus {
   recent_runs: Run[];
 }
 
+export interface QueueInfo {
+  name: string;
+  corpus: WorkflowCorpus;
+  capacity: number;
+  tag_cap?: number | null;
+  max_queued?: number | null;
+  active_count: number;
+  queued_count: number;
+  global_parallelism_cap: number;
+  updated_at: string;
+}
+
+export interface QueuedRun {
+  id: string;
+  run_id?: string | null;
+  workflow_id: string;
+  workflow_name?: string | null;
+  queue_name: string;
+  corpus: WorkflowCorpus;
+  priority: number;
+  status: string;
+  queued_at: string;
+  admitted_at?: string | null;
+  finished_at?: string | null;
+}
+
 export interface AvailableScript {
   name: string;
   path: string;
@@ -144,6 +170,28 @@ export function getRunLog(runId: string): Promise<Run> {
 
 export function getSchedulerStatus(): Promise<SchedulerStatus> {
   return invoke("get_scheduler_status");
+}
+
+export function listQueues(): Promise<QueueInfo[]> {
+  return invoke("list_queues");
+}
+
+export function updateQueue(
+  name: string,
+  corpus: WorkflowCorpus,
+  capacity: number,
+  tagCap?: number | null,
+  maxQueued?: number | null,
+): Promise<QueueInfo> {
+  return invoke("update_queue", { name, corpus, capacity, tagCap, maxQueued });
+}
+
+export function listQueuedRuns(limit?: number): Promise<QueuedRun[]> {
+  return invoke("list_queued_runs", { limit });
+}
+
+export function cancelQueuedRun(id: string): Promise<void> {
+  return invoke("cancel_queued_run", { id });
 }
 
 export function listAvailableScripts(): Promise<AvailableScript[]> {

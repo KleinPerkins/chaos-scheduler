@@ -4,12 +4,13 @@ import WorkflowList from "./WorkflowList";
 import WorkflowEditor from "./WorkflowEditor";
 import RunHistory from "./RunHistory";
 import RunDetail from "./RunDetail";
+import QueueView from "./QueueView";
 import Settings from "./Settings";
 import { getWorkflow } from "../lib/commands";
 import type { Workflow } from "../lib/commands";
 import "./Dashboard.css";
 
-type View = "workflows" | "editor" | "history" | "detail" | "settings";
+type View = "workflows" | "editor" | "history" | "detail" | "queues" | "settings";
 
 interface NavState {
   view: View;
@@ -52,6 +53,13 @@ export default function Dashboard() {
           >
             <span className="sidebar-icon">&#9776;</span>
             Workflows
+          </button>
+          <button
+            className={`sidebar-link ${nav.view === "queues" ? "active" : ""}`}
+            onClick={() => setNav({ view: "queues" })}
+          >
+            <span className="sidebar-icon">&#8644;</span>
+            Queues
           </button>
           <button
             className={`sidebar-link ${nav.view === "settings" ? "active" : ""}`}
@@ -102,6 +110,7 @@ export default function Dashboard() {
             }
           />
         )}
+        {nav.view === "queues" && <QueueView />}
         {nav.view === "settings" && <Settings />}
       </main>
     </div>

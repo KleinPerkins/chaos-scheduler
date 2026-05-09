@@ -191,6 +191,11 @@ impl WorkflowScheduler {
                         workflow.id,
                         queue_config.queue
                     );
+                    let _ = self.db.upsert_queued_run(
+                        &workflow.id,
+                        &queue_config.queue,
+                        queue_config.priority,
+                    );
                     false
                 }
                 Err(e) => {
@@ -208,6 +213,11 @@ impl WorkflowScheduler {
                     workflow.id,
                     queue_config.queue,
                     reason
+                );
+                let _ = self.db.upsert_queued_run(
+                    &workflow.id,
+                    &queue_config.queue,
+                    queue_config.priority,
                 );
                 false
             }
@@ -574,6 +584,7 @@ pub fn execute_workflow_with_context(
         .map_err(|e| format!("Failed to read queue capacity: {}", e))?;
     let running = running_count_for_queue(db, &queue_config.queue, &queue_config.corpus)?;
     if running >= capacity {
+        let _ = db.upsert_queued_run(&workflow.id, &queue_config.queue, queue_config.priority);
         return Err(format!(
             "Queue {} is at capacity ({}/{})",
             queue_config.queue, running, capacity
@@ -591,6 +602,7 @@ pub fn execute_workflow_with_context(
             rerun_of_run_id,
         )
         .map_err(|e| format!("Failed to create run record: {}", e))?;
+    let _ = db.mark_queued_run_admitted(&workflow.id, &run.id);
 
     let acquired = db
         .acquire_mutex_locks(&workflow.id, &run.id, &mutex_keys)

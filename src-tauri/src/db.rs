@@ -64,6 +64,34 @@ pub struct SchedulerStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueInfo {
+    pub name: String,
+    pub corpus: String,
+    pub capacity: i64,
+    pub tag_cap: Option<i64>,
+    pub max_queued: Option<i64>,
+    pub active_count: i64,
+    pub queued_count: i64,
+    pub global_parallelism_cap: i64,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedRun {
+    pub id: String,
+    pub run_id: Option<String>,
+    pub workflow_id: String,
+    pub workflow_name: Option<String>,
+    pub queue_name: String,
+    pub corpus: String,
+    pub priority: i64,
+    pub status: String,
+    pub queued_at: String,
+    pub admitted_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NextRun {
     pub workflow_id: String,
     pub workflow_name: String,
@@ -413,6 +441,10 @@ impl Database {
             "UPDATE runs SET finished_at = ?2, exit_code = ?3, stdout = ?4, stderr = ?5, result_url = ?6, status = ?7 WHERE id = ?1",
             params![id, now, exit_code, stdout, stderr, result_url, status],
         )?;
+        conn.execute(
+            "UPDATE queued_runs SET status = ?2, finished_at = ?3 WHERE run_id = ?1",
+            params![id, status, now],
+        )?;
         let _ = self.release_mutex_locks(id);
         Ok(())
     }
@@ -429,6 +461,10 @@ impl Database {
         conn.execute(
             "UPDATE runs SET finished_at = ?2, stdout = ?3, stderr = ?4, status = ?5 WHERE id = ?1",
             params![id, now, stdout, stderr, status],
+        )?;
+        conn.execute(
+            "UPDATE queued_runs SET status = ?2, finished_at = ?3 WHERE run_id = ?1",
+            params![id, status, now],
         )?;
         let _ = self.release_mutex_locks(id);
         Ok(())
@@ -603,6 +639,216 @@ impl Database {
         Ok(errors)
     }
 
+    pub fn list_queues(&self) -> rusqlite::Result<Vec<QueueInfo>> {
+        let conn = self.conn()?;
+        let global_cap = self.global_parallelism_cap()?;
+        let mut stmt = conn.prepare(
+            "SELECT name, corpus, capacity, tag_cap, max_queued, updated_at FROM queues ORDER BY corpus, name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let name: String = row.get(0)?;
+            let corpus: String = row.get(1)?;
+            Ok(QueueInfo {
+                active_count: self.running_count_for_queue(&name, &corpus)?,
+                queued_count: self.queued_count_for_queue(&name, &corpus)?,
+                name,
+                corpus,
+                capacity: row.get(2)?,
+                tag_cap: row.get(3)?,
+                max_queued: row.get(4)?,
+                global_parallelism_cap: global_cap,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn upsert_queue(
+        &self,
+        name: &str,
+        corpus: &str,
+        capacity: i64,
+        tag_cap: Option<i64>,
+        max_queued: Option<i64>,
+    ) -> rusqlite::Result<QueueInfo> {
+        validate_queue_values(
+            name,
+            corpus,
+            capacity,
+            tag_cap,
+            max_queued,
+            self.global_parallelism_cap()?,
+        )?;
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO queues (name, corpus, capacity, tag_cap, max_queued, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
+             ON CONFLICT(name, corpus) DO UPDATE SET
+               capacity = excluded.capacity,
+               tag_cap = excluded.tag_cap,
+               max_queued = excluded.max_queued,
+               updated_at = datetime('now')",
+            params![name, corpus, capacity, tag_cap, max_queued],
+        )?;
+        self.get_queue(name, corpus)
+    }
+
+    pub fn get_queue(&self, name: &str, corpus: &str) -> rusqlite::Result<QueueInfo> {
+        let global_cap = self.global_parallelism_cap()?;
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT name, corpus, capacity, tag_cap, max_queued, updated_at FROM queues WHERE name = ?1 AND corpus = ?2",
+            params![name, corpus],
+            |row| {
+                Ok(QueueInfo {
+                    name: row.get(0)?,
+                    corpus: row.get(1)?,
+                    capacity: row.get(2)?,
+                    tag_cap: row.get(3)?,
+                    max_queued: row.get(4)?,
+                    active_count: self.running_count_for_queue(name, corpus)?,
+                    queued_count: self.queued_count_for_queue(name, corpus)?,
+                    global_parallelism_cap: global_cap,
+                    updated_at: row.get(5)?,
+                })
+            },
+        )
+    }
+
+    pub fn list_queued_runs(&self, limit: i64) -> rusqlite::Result<Vec<QueuedRun>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, w.corpus, q.priority, q.status, q.queued_at, q.admitted_at, q.finished_at
+             FROM queued_runs q
+             LEFT JOIN workflows w ON q.workflow_id = w.id
+             ORDER BY
+               CASE q.status WHEN 'queued' THEN 0 WHEN 'admitted' THEN 1 ELSE 2 END,
+               q.priority DESC,
+               q.queued_at ASC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok(QueuedRun {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                workflow_id: row.get(2)?,
+                workflow_name: row.get(3)?,
+                queue_name: row.get(4)?,
+                corpus: row
+                    .get::<_, Option<String>>(5)?
+                    .unwrap_or_else(|| "source".to_string()),
+                priority: row.get(6)?,
+                status: row.get(7)?,
+                queued_at: row.get(8)?,
+                admitted_at: row.get(9)?,
+                finished_at: row.get(10)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn upsert_queued_run(
+        &self,
+        workflow_id: &str,
+        queue_name: &str,
+        priority: i64,
+    ) -> rusqlite::Result<String> {
+        let conn = self.conn()?;
+        let existing: rusqlite::Result<String> = conn.query_row(
+            "SELECT id FROM queued_runs WHERE workflow_id = ?1 AND status = 'queued' ORDER BY queued_at ASC LIMIT 1",
+            params![workflow_id],
+            |row| row.get(0),
+        );
+        if let Ok(id) = existing {
+            conn.execute(
+                "UPDATE queued_runs SET queue_name = ?2, priority = ?3 WHERE id = ?1",
+                params![id, queue_name, priority],
+            )?;
+            return Ok(id);
+        }
+
+        let workflow = self.get_workflow(workflow_id)?;
+        let max_queued: Option<i64> = conn
+            .query_row(
+                "SELECT max_queued FROM queues WHERE name = ?1 AND corpus = ?2",
+                params![queue_name, workflow.corpus],
+                |row| row.get(0),
+            )
+            .unwrap_or(None);
+        if let Some(max_queued) = max_queued {
+            if self.queued_count_for_queue(queue_name, &workflow.corpus)? >= max_queued {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "queue {} max queued threshold {} reached",
+                    queue_name, max_queued
+                )));
+            }
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO queued_runs (id, workflow_id, queue_name, priority, status, queued_at)
+             VALUES (?1, ?2, ?3, ?4, 'queued', ?5)",
+            params![id, workflow_id, queue_name, priority, now],
+        )?;
+        Ok(id)
+    }
+
+    pub fn mark_queued_run_admitted(
+        &self,
+        workflow_id: &str,
+        run_id: &str,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        let id: rusqlite::Result<String> = conn.query_row(
+            "SELECT id FROM queued_runs WHERE workflow_id = ?1 AND status = 'queued' ORDER BY priority DESC, queued_at ASC LIMIT 1",
+            params![workflow_id],
+            |row| row.get(0),
+        );
+        let Ok(id) = id else {
+            return Ok(0);
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE queued_runs SET run_id = ?2, status = 'admitted', admitted_at = ?3 WHERE id = ?1",
+            params![id, run_id, now],
+        )
+    }
+
+    pub fn cancel_queued_run(&self, id: &str) -> rusqlite::Result<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE queued_runs SET status = 'cancelled', finished_at = ?2 WHERE id = ?1 AND status = 'queued'",
+            params![id, now],
+        )
+    }
+
+    fn running_count_for_queue(&self, queue_name: &str, corpus: &str) -> rusqlite::Result<i64> {
+        let mut count = 0;
+        for run in self.get_running_runs()? {
+            let workflow = self.get_workflow(&run.workflow_id)?;
+            let (run_queue, run_corpus) =
+                queue_identity_from_config(workflow.queue_config.as_deref(), &workflow.corpus);
+            if run_queue == queue_name && run_corpus == corpus {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    fn queued_count_for_queue(&self, queue_name: &str, corpus: &str) -> rusqlite::Result<i64> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT COUNT(*)
+             FROM queued_runs q
+             LEFT JOIN workflows w ON q.workflow_id = w.id
+             WHERE q.queue_name = ?1 AND COALESCE(w.corpus, 'source') = ?2 AND q.status = 'queued'",
+            params![queue_name, corpus],
+            |row| row.get(0),
+        )
+    }
+
     pub fn acquire_mutex_locks(
         &self,
         workflow_id: &str,
@@ -737,6 +983,73 @@ pub fn extract_summary(stdout: &str) -> Option<serde_json::Value> {
     None
 }
 
+fn validate_queue_values(
+    name: &str,
+    corpus: &str,
+    capacity: i64,
+    tag_cap: Option<i64>,
+    max_queued: Option<i64>,
+    global_cap: i64,
+) -> rusqlite::Result<()> {
+    if name.trim().is_empty() {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "queue name must not be empty".to_string(),
+        ));
+    }
+    if !matches!(corpus, "source" | "instance") {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "queue corpus must be source or instance".to_string(),
+        ));
+    }
+    if capacity < 1 {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "queue capacity must be >= 1".to_string(),
+        ));
+    }
+    if capacity > global_cap {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "queue capacity {} exceeds global cap {}",
+            capacity, global_cap
+        )));
+    }
+    if let Some(tag_cap) = tag_cap {
+        if tag_cap < 1 {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "tag cap must be >= 1".to_string(),
+            ));
+        }
+        if tag_cap > capacity {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "tag cap {} exceeds queue capacity {}",
+                tag_cap, capacity
+            )));
+        }
+    }
+    if let Some(max_queued) = max_queued {
+        if max_queued < 0 {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "max queued must be >= 0".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn queue_identity_from_config(queue_config: Option<&str>, corpus: &str) -> (String, String) {
+    let default_queue = format!("{}-default", corpus);
+    let queue = queue_config
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| {
+            value
+                .get("queue")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|queue| !queue.trim().is_empty())
+        .unwrap_or(default_queue);
+    (queue, corpus.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -833,6 +1146,77 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert!(db
             .acquire_mutex_locks(&workflow.id, &other_run.id, &keys)
             .unwrap());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn queue_admin_rejects_cap_lattice_violations() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        assert!(db
+            .upsert_queue("too-large", "source", 9, Some(1), None)
+            .is_err());
+        assert!(db
+            .upsert_queue("bad-tag", "source", 2, Some(3), None)
+            .is_err());
+        assert!(db
+            .upsert_queue("source-heavy", "source", 2, Some(1), Some(10))
+            .is_ok());
+
+        let queue = db.get_queue("source-heavy", "source").unwrap();
+        assert_eq!(queue.capacity, 2);
+        assert_eq!(queue.tag_cap, Some(1));
+        assert_eq!(queue.max_queued, Some(10));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn queued_runs_can_be_listed_admitted_and_cancelled() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = db
+            .create_workflow(
+                "Queued Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                None,
+                Some(r#"{"queue":"source-default","priority":5}"#),
+            )
+            .unwrap();
+
+        let queued_id = db
+            .upsert_queued_run(&workflow.id, "source-default", 5)
+            .unwrap();
+        assert_eq!(db.list_queued_runs(10).unwrap().len(), 1);
+
+        let run = db
+            .create_run_with_context(&workflow.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        assert_eq!(
+            db.mark_queued_run_admitted(&workflow.id, &run.id).unwrap(),
+            1
+        );
+        let rows = db.list_queued_runs(10).unwrap();
+        assert_eq!(rows[0].status, "admitted");
+        assert_eq!(rows[0].run_id.as_deref(), Some(run.id.as_str()));
+
+        let queued_id_2 = db
+            .upsert_queued_run(&workflow.id, "source-default", 4)
+            .unwrap();
+        assert_ne!(queued_id, queued_id_2);
+        assert_eq!(db.cancel_queued_run(&queued_id_2).unwrap(), 1);
+        let rows = db.list_queued_runs(10).unwrap();
+        assert!(rows.iter().any(|row| row.status == "cancelled"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

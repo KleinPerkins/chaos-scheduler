@@ -1,4 +1,6 @@
-use crate::db::{Database, EmailConfig, NextRun, Run, SchedulerStatus, Workflow};
+use crate::db::{
+    Database, EmailConfig, NextRun, QueueInfo, QueuedRun, Run, SchedulerStatus, Workflow,
+};
 use crate::scheduler::{self, WorkflowScheduler};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -212,6 +214,46 @@ pub fn get_scheduler_status(state: State<AppState>) -> Result<SchedulerStatus, S
         next_runs,
         recent_runs,
     })
+}
+
+#[tauri::command]
+pub fn list_queues(state: State<AppState>) -> Result<Vec<QueueInfo>, String> {
+    state.db.list_queues().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_queue(
+    state: State<AppState>,
+    name: String,
+    corpus: String,
+    capacity: i64,
+    tag_cap: Option<i64>,
+    max_queued: Option<i64>,
+) -> Result<QueueInfo, String> {
+    state
+        .db
+        .upsert_queue(&name, &corpus, capacity, tag_cap, max_queued)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_queued_runs(
+    state: State<AppState>,
+    limit: Option<i64>,
+) -> Result<Vec<QueuedRun>, String> {
+    state
+        .db
+        .list_queued_runs(limit.unwrap_or(50))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn cancel_queued_run(state: State<AppState>, id: String) -> Result<(), String> {
+    let updated = state.db.cancel_queued_run(&id).map_err(|e| e.to_string())?;
+    if updated == 0 {
+        return Err("Queued run is no longer cancellable".to_string());
+    }
+    Ok(())
 }
 
 #[tauri::command]
