@@ -6,6 +6,10 @@ fn default_utc() -> String {
     "UTC".to_string()
 }
 
+fn default_source_corpus() -> String {
+    "source".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workflow {
     pub id: String,
@@ -16,6 +20,8 @@ pub struct Workflow {
     pub enabled: bool,
     pub async_mode: bool,
     pub email_on_failure: bool,
+    #[serde(default = "default_source_corpus")]
+    pub corpus: String,
     #[serde(default = "default_utc")]
     pub timezone: String,
     pub last_run_at: Option<String>,
@@ -54,6 +60,7 @@ pub struct SchedulerStatus {
 pub struct NextRun {
     pub workflow_id: String,
     pub workflow_name: String,
+    pub corpus: String,
     pub next_time: String,
 }
 
@@ -113,6 +120,7 @@ impl Database {
                 cron_schedule TEXT NOT NULL,
                 enabled INTEGER DEFAULT 1,
                 async_mode INTEGER DEFAULT 0,
+                corpus TEXT NOT NULL DEFAULT 'source',
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
             );
@@ -145,6 +153,9 @@ impl Database {
         let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN error_analysis TEXT;");
         let _ = conn
             .execute_batch("ALTER TABLE workflows ADD COLUMN email_on_failure INTEGER DEFAULT 1;");
+        let _ = conn.execute_batch(
+            "ALTER TABLE workflows ADD COLUMN corpus TEXT NOT NULL DEFAULT 'source';",
+        );
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN timezone TEXT DEFAULT 'UTC';");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS email_config (
@@ -166,7 +177,7 @@ impl Database {
     pub fn list_workflows(&self) -> rusqlite::Result<Vec<Workflow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone FROM workflows ORDER BY name"
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus FROM workflows ORDER BY corpus, name"
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(Workflow {
@@ -184,6 +195,9 @@ impl Database {
                 timezone: row
                     .get::<_, String>(11)
                     .unwrap_or_else(|_| "UTC".to_string()),
+                corpus: row
+                    .get::<_, String>(12)
+                    .unwrap_or_else(|_| "source".to_string()),
             })
         })?;
         rows.collect()
@@ -192,7 +206,7 @@ impl Database {
     pub fn get_workflow(&self, id: &str) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone FROM workflows WHERE id = ?1",
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus FROM workflows WHERE id = ?1",
             params![id],
             |row| {
                 Ok(Workflow {
@@ -208,6 +222,7 @@ impl Database {
                     updated_at: row.get(9)?,
                     email_on_failure: row.get::<_, i32>(10).unwrap_or(1) != 0,
                     timezone: row.get::<_, String>(11).unwrap_or_else(|_| "UTC".to_string()),
+                    corpus: row.get::<_, String>(12).unwrap_or_else(|_| "source".to_string()),
                 })
             },
         )
@@ -231,12 +246,13 @@ impl Database {
         async_mode: bool,
         email_on_failure: bool,
         timezone: &str,
+        corpus: &str,
     ) -> rusqlite::Result<Workflow> {
         let id = uuid::Uuid::new_v4().to_string();
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO workflows (id, name, description, script_path, cron_schedule, async_mode, email_on_failure, timezone) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![id, name, description, script_path, cron_schedule, async_mode as i32, email_on_failure as i32, timezone],
+            "INSERT INTO workflows (id, name, description, script_path, cron_schedule, async_mode, email_on_failure, timezone, corpus) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, name, description, script_path, cron_schedule, async_mode as i32, email_on_failure as i32, timezone, corpus],
         )?;
         self.get_workflow(&id)
     }
@@ -252,11 +268,12 @@ impl Database {
         async_mode: bool,
         email_on_failure: bool,
         timezone: &str,
+        corpus: &str,
     ) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
         conn.execute(
-            "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, updated_at = datetime('now') WHERE id = ?1",
-            params![id, name, description, script_path, cron_schedule, enabled as i32, async_mode as i32, email_on_failure as i32, timezone],
+            "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, corpus = ?10, updated_at = datetime('now') WHERE id = ?1",
+            params![id, name, description, script_path, cron_schedule, enabled as i32, async_mode as i32, email_on_failure as i32, timezone, corpus],
         )?;
         self.get_workflow(id)
     }

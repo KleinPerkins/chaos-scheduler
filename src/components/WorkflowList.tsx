@@ -12,8 +12,10 @@ interface Props {
 }
 
 type FrequencyGroup = "Hourly" | "Daily" | "Weekly" | "Monthly";
+type CorpusFilter = "all" | "source" | "instance";
 
 const GROUP_ORDER: FrequencyGroup[] = ["Hourly", "Daily", "Weekly", "Monthly"];
+const CORPUS_FILTERS: CorpusFilter[] = ["all", "source", "instance"];
 
 function getFrequencyGroup(cronSchedule: string): FrequencyGroup {
   if (cronSchedule.includes(';')) {
@@ -46,6 +48,7 @@ function getFrequencyGroup(cronSchedule: string): FrequencyGroup {
 
 export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
   const { workflows, loading, refresh } = useWorkflows();
+  const [corpusFilter, setCorpusFilter] = useState<CorpusFilter>("all");
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [hoveredDescId, setHoveredDescId] = useState<string | null>(null);
   const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -54,9 +57,25 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
     return () => { clearTimeout(deleteTimerRef.current); };
   }, []);
 
+  const corpusCounts = useMemo(() => {
+    return workflows.reduce(
+      (counts, workflow) => {
+        const corpus = workflow.corpus === "instance" ? "instance" : "source";
+        counts[corpus] += 1;
+        return counts;
+      },
+      { source: 0, instance: 0 },
+    );
+  }, [workflows]);
+
+  const visibleWorkflows = useMemo(() => {
+    if (corpusFilter === "all") return workflows;
+    return workflows.filter((workflow) => (workflow.corpus ?? "source") === corpusFilter);
+  }, [workflows, corpusFilter]);
+
   const groupedWorkflows = useMemo(() => {
     const groups = new Map<FrequencyGroup, Workflow[]>();
-    for (const w of workflows) {
+    for (const w of visibleWorkflows) {
       const group = getFrequencyGroup(w.cron_schedule);
       if (!groups.has(group)) groups.set(group, []);
       groups.get(group)!.push(w);
@@ -64,7 +83,7 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
     return GROUP_ORDER
       .filter((g) => groups.has(g))
       .map((g) => ({ group: g, workflows: groups.get(g)! }));
-  }, [workflows]);
+  }, [visibleWorkflows]);
 
   const handleToggle = async (w: Workflow) => {
     await updateWorkflow({
@@ -74,6 +93,10 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
       scriptPath: w.script_path,
       cronSchedule: w.cron_schedule,
       enabled: !w.enabled,
+      asyncMode: w.async_mode,
+      emailOnFailure: w.email_on_failure,
+      timezone: w.timezone,
+      corpus: w.corpus ?? "source",
     });
     refresh();
   };
@@ -114,7 +137,12 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
   const renderCard = (w: Workflow) => (
     <div key={w.id} className={`wf-card ${!w.enabled ? "disabled" : ""}`}>
       <div className="wf-card-header">
-        <div className="wf-card-title">{w.name}</div>
+        <div className="wf-card-title-row">
+          <div className="wf-card-title">{w.name}</div>
+          <span className={`wf-corpus-badge ${w.corpus === "instance" ? "instance" : "source"}`}>
+            {w.corpus === "instance" ? "Instance" : "Source"}
+          </span>
+        </div>
         <label className="wf-toggle">
           <input
             type="checkbox"
@@ -189,20 +217,48 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
           </button>
         </div>
       ) : (
-        <div className="wf-groups">
-          {groupedWorkflows.map(({ group, workflows: groupWfs }) => (
-            <div key={group} className="wf-group">
-              <div className="wf-group-header">
-                <span className="wf-group-label">{group}</span>
-                <span className="wf-group-count">{groupWfs.length}</span>
-                <span className="wf-group-divider" />
-              </div>
-              <div className="wf-grid">
-                {groupWfs.map(renderCard)}
-              </div>
+        <>
+          <div className="wf-corpus-filter" aria-label="Workflow corpus filter">
+            {CORPUS_FILTERS.map((filter) => (
+              <button
+                key={filter}
+                className={`wf-corpus-pill ${corpusFilter === filter ? "active" : ""}`}
+                onClick={() => setCorpusFilter(filter)}
+              >
+                {filter === "all" ? "All" : filter === "source" ? "Source" : "Instance"}
+                <span>
+                  {filter === "all" ? workflows.length : corpusCounts[filter]}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {visibleWorkflows.length === 0 ? (
+            <div className="wf-empty wf-empty-compact">
+              <p className="wf-empty-title">No {corpusFilter} workflows</p>
+              <p className="wf-empty-sub">
+                {corpusFilter === "instance"
+                  ? "Instance-specific workflow code has not been added yet."
+                  : "No workflows match this corpus filter."}
+              </p>
             </div>
-          ))}
-        </div>
+          ) : (
+            <div className="wf-groups">
+              {groupedWorkflows.map(({ group, workflows: groupWfs }) => (
+                <div key={group} className="wf-group">
+                  <div className="wf-group-header">
+                    <span className="wf-group-label">{group}</span>
+                    <span className="wf-group-count">{groupWfs.length}</span>
+                    <span className="wf-group-divider" />
+                  </div>
+                  <div className="wf-grid">
+                    {groupWfs.map(renderCard)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

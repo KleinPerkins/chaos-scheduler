@@ -92,6 +92,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           asyncMode,
           emailOnFailure,
           timezone: LOCAL_TZ,
+          corpus: workflow.corpus ?? "source",
         });
       } else {
         await createWorkflow({
@@ -102,6 +103,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           asyncMode,
           emailOnFailure,
           timezone: LOCAL_TZ,
+          corpus: "instance",
         });
       }
       onSaved();

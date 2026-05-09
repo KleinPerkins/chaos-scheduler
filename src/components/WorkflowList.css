@@ -26,6 +26,45 @@
   margin-bottom: 20px;
 }
 
+.wf-empty-compact {
+  padding: 32px 20px;
+}
+
+.wf-corpus-filter {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 18px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.wf-corpus-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.wf-corpus-pill:hover,
+.wf-corpus-pill.active {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.wf-corpus-pill span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 /* Frequency groups */
 .wf-groups {
   display: flex;
@@ -97,6 +136,32 @@
 .wf-card-title {
   font-size: 15px;
   font-weight: 600;
+}
+
+.wf-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wf-corpus-badge {
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+
+.wf-corpus-badge.source {
+  background: rgba(124, 108, 255, 0.12);
+  color: var(--accent);
+}
+
+.wf-corpus-badge.instance {
+  background: rgba(61, 220, 151, 0.12);
+  color: var(--success);
 }
 
 /* Description with truncation and tooltip */

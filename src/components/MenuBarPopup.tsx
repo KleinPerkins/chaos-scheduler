@@ -21,6 +21,10 @@ function formatTime(isoTime: string): string {
   });
 }
 
+function corpusFor(nextRun: { corpus?: string }): "source" | "instance" {
+  return nextRun.corpus === "instance" ? "instance" : "source";
+}
+
 export default function MenuBarPopup() {
   const { status, refresh } = useSchedulerStatus(30000);
   const showTime = useRef(0);
@@ -60,6 +64,11 @@ export default function MenuBarPopup() {
     );
   }
 
+  const nextRunsByCorpus = {
+    source: status.next_runs.filter((nr) => corpusFor(nr) === "source"),
+    instance: status.next_runs.filter((nr) => corpusFor(nr) === "instance"),
+  };
+
   return (
     <div className="popup">
       <div className="popup-header">
@@ -81,25 +90,41 @@ export default function MenuBarPopup() {
           {status.next_runs.length === 0 ? (
             <div className="popup-empty">No scheduled workflows</div>
           ) : (
-            <div className="popup-list">
-              {status.next_runs.map((nr) => (
-                <div key={nr.workflow_id} className="popup-item">
-                  <div className="popup-item-info">
-                    <span className="popup-item-name">{nr.workflow_name}</span>
-                    <span className="popup-item-time">
-                      in {formatTimeUntil(nr.next_time)}
-                    </span>
+            <>
+              {(["source", "instance"] as const).map((corpus) => (
+                <div key={corpus} className="popup-corpus-group">
+                  <div className="popup-corpus-title">
+                    {corpus === "source" ? "Source Workflows" : "Instance Workflows"}
+                    <span>{nextRunsByCorpus[corpus].length}</span>
                   </div>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => handleRun(nr.workflow_id)}
-                    title="Run now"
-                  >
-                    &#9654;
-                  </button>
+                  {nextRunsByCorpus[corpus].length === 0 ? (
+                    <div className="popup-empty popup-empty-inline">
+                      {corpus === "instance" ? "No instance workflows" : "None scheduled"}
+                    </div>
+                  ) : (
+                    <div className="popup-list">
+                      {nextRunsByCorpus[corpus].map((nr) => (
+                        <div key={nr.workflow_id} className="popup-item">
+                          <div className="popup-item-info">
+                            <span className="popup-item-name">{nr.workflow_name}</span>
+                            <span className="popup-item-time">
+                              in {formatTimeUntil(nr.next_time)}
+                            </span>
+                          </div>
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => handleRun(nr.workflow_id)}
+                            title="Run now"
+                          >
+                            &#9654;
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
-            </div>
+            </>
           )}
         </div>
 

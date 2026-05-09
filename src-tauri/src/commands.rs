@@ -38,6 +38,7 @@ pub fn create_workflow(
     async_mode: Option<bool>,
     email_on_failure: Option<bool>,
     timezone: Option<String>,
+    corpus: Option<String>,
 ) -> Result<Workflow, String> {
     state
         .db
@@ -49,6 +50,7 @@ pub fn create_workflow(
             async_mode.unwrap_or(false),
             email_on_failure.unwrap_or(true),
             timezone.as_deref().unwrap_or("UTC"),
+            corpus.as_deref().unwrap_or("instance"),
         )
         .map_err(|e| e.to_string())
 }
@@ -65,7 +67,9 @@ pub fn update_workflow(
     async_mode: Option<bool>,
     email_on_failure: Option<bool>,
     timezone: Option<String>,
+    corpus: Option<String>,
 ) -> Result<Workflow, String> {
+    let existing = state.db.get_workflow(&id).map_err(|e| e.to_string())?;
     state
         .db
         .update_workflow(
@@ -78,6 +82,7 @@ pub fn update_workflow(
             async_mode.unwrap_or(false),
             email_on_failure.unwrap_or(true),
             timezone.as_deref().unwrap_or("UTC"),
+            corpus.as_deref().unwrap_or(&existing.corpus),
         )
         .map_err(|e| e.to_string())
 }
@@ -132,6 +137,7 @@ pub fn get_scheduler_status(state: State<AppState>) -> Result<SchedulerStatus, S
             scheduler::get_next_run_time(&w.cron_schedule, &w.timezone).map(|t| NextRun {
                 workflow_id: w.id.clone(),
                 workflow_name: w.name.clone(),
+                corpus: w.corpus.clone(),
                 next_time: t,
             })
         })

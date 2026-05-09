@@ -198,6 +198,7 @@ export default function RunDetail({ runId, onBack }: Props) {
   const hasSummary = summary && summary.sections && summary.sections.length > 0;
   const isFailed = run.status === "failed";
   const hasStderr = !!run.stderr;
+  const recommendedSteps = analysis?.recommended_steps ?? [];
 
   return (
     <div className="rd-page">
@@ -266,11 +267,11 @@ export default function RunDetail({ runId, onBack }: Props) {
             <span className="rd-analysis-cause-label">Likely cause:</span>{" "}
             {analysis.likely_cause}
           </div>
-          {analysis.recommended_steps?.length > 0 && (
+          {recommendedSteps.length > 0 && (
             <div className="rd-analysis-steps">
               <span className="rd-analysis-steps-label">Recommended steps:</span>
               <ol>
-                {analysis.recommended_steps.map((step, i) => (
+                {recommendedSteps.map((step, i) => (
                   <li key={i}>{step}</li>
                 ))}
               </ol>
