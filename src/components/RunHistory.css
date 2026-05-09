@@ -42,8 +42,15 @@
   color: var(--text-muted);
   font-size: 14px;
   transition: color 0.1s;
+  margin-left: 8px;
 }
 
 .rh-row-clickable:hover .rh-detail-arrow {
   color: var(--accent);
+}
+
+.rh-trigger-kind {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
 }

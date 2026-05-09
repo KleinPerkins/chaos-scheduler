@@ -13,6 +13,7 @@ export interface Workflow {
   email_on_failure: boolean;
   corpus: WorkflowCorpus;
   timezone: string;
+  trigger_config?: string | null;
   last_run_at: string | null;
   created_at: string;
   updated_at: string;
@@ -31,6 +32,11 @@ export interface Run {
   workflow_name?: string | null;
   summary?: unknown;
   error_analysis?: ErrorAnalysis | null;
+  trigger_kind?: string | null;
+  trigger_payload?: string | null;
+  upstream_run_id?: string | null;
+  input_json?: string | null;
+  rerun_of_run_id?: string | null;
 }
 
 export interface NextRun {
@@ -82,6 +88,7 @@ export interface WorkflowPayload {
   emailOnFailure?: boolean;
   timezone?: string;
   corpus?: WorkflowCorpus;
+  triggerConfig?: string;
 }
 
 export interface WorkflowUpdatePayload extends WorkflowPayload {
@@ -115,6 +122,14 @@ export function deleteWorkflow(id: string): Promise<void> {
 
 export function triggerWorkflow(id: string): Promise<string> {
   return invoke("trigger_workflow", { id });
+}
+
+export function rerunWorkflow(
+  workflowId: string,
+  sourceRunId?: string,
+  inputOverrideJson?: string,
+): Promise<string> {
+  return invoke("rerun_workflow", { workflowId, sourceRunId, inputOverrideJson });
 }
 
 export function getRunHistory(workflowId: string, limit?: number): Promise<Run[]> {

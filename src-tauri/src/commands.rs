@@ -39,6 +39,7 @@ pub fn create_workflow(
     email_on_failure: Option<bool>,
     timezone: Option<String>,
     corpus: Option<String>,
+    trigger_config: Option<String>,
 ) -> Result<Workflow, String> {
     state
         .db
@@ -51,6 +52,7 @@ pub fn create_workflow(
             email_on_failure.unwrap_or(true),
             timezone.as_deref().unwrap_or("UTC"),
             corpus.as_deref().unwrap_or("instance"),
+            trigger_config.as_deref(),
         )
         .map_err(|e| e.to_string())
 }
@@ -68,6 +70,7 @@ pub fn update_workflow(
     email_on_failure: Option<bool>,
     timezone: Option<String>,
     corpus: Option<String>,
+    trigger_config: Option<String>,
 ) -> Result<Workflow, String> {
     let existing = state.db.get_workflow(&id).map_err(|e| e.to_string())?;
     state
@@ -83,6 +86,9 @@ pub fn update_workflow(
             email_on_failure.unwrap_or(true),
             timezone.as_deref().unwrap_or("UTC"),
             corpus.as_deref().unwrap_or(&existing.corpus),
+            trigger_config
+                .as_deref()
+                .or(existing.trigger_config.as_deref()),
         )
         .map_err(|e| e.to_string())
 }
@@ -94,7 +100,7 @@ pub fn delete_workflow(state: State<AppState>, id: String) -> Result<(), String>
 
 #[tauri::command]
 pub fn trigger_workflow(state: State<AppState>, id: String) -> Result<String, String> {
-    let result = scheduler::execute_workflow(
+    let result = scheduler::execute_workflow_with_context(
         &state.db,
         &state.chaos_labs_root,
         &state.python_path,
@@ -102,6 +108,57 @@ pub fn trigger_workflow(state: State<AppState>, id: String) -> Result<String, St
         true,
         true,
         false,
+        Some("manual"),
+        None,
+        None,
+        None,
+        None,
+    )?;
+    if result.completed {
+        scheduler::trigger_on_completion(
+            &state.db,
+            &state.chaos_labs_root,
+            &state.python_path,
+            &id,
+            &result.run_id,
+            result.success,
+            true,
+            true,
+            false,
+        );
+    }
+    Ok(result.run_id)
+}
+
+#[tauri::command]
+pub fn rerun_workflow(
+    state: State<AppState>,
+    workflow_id: String,
+    source_run_id: Option<String>,
+    input_override_json: Option<String>,
+) -> Result<String, String> {
+    if let Some(input) = &input_override_json {
+        serde_json::from_str::<serde_json::Value>(input)
+            .map_err(|e| format!("Invalid input override JSON: {}", e))?;
+    }
+    let payload = serde_json::json!({
+        "source_run_id": source_run_id,
+        "input_override": input_override_json.as_ref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
+    })
+    .to_string();
+    let result = scheduler::execute_workflow_with_context(
+        &state.db,
+        &state.chaos_labs_root,
+        &state.python_path,
+        &workflow_id,
+        true,
+        true,
+        false,
+        Some("manual"),
+        Some(&payload),
+        None,
+        input_override_json.as_deref(),
+        source_run_id.as_deref(),
     )?;
     Ok(result.run_id)
 }

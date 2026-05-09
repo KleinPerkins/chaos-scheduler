@@ -24,6 +24,7 @@ pub struct Workflow {
     pub corpus: String,
     #[serde(default = "default_utc")]
     pub timezone: String,
+    pub trigger_config: Option<String>,
     pub last_run_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -46,6 +47,11 @@ pub struct Run {
     pub summary: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_analysis: Option<serde_json::Value>,
+    pub trigger_kind: Option<String>,
+    pub trigger_payload: Option<String>,
+    pub upstream_run_id: Option<String>,
+    pub input_json: Option<String>,
+    pub rerun_of_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +127,7 @@ impl Database {
                 enabled INTEGER DEFAULT 1,
                 async_mode INTEGER DEFAULT 0,
                 corpus TEXT NOT NULL DEFAULT 'source',
+                trigger_config TEXT,
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
             );
@@ -133,7 +140,20 @@ impl Database {
                 stdout TEXT,
                 stderr TEXT,
                 result_url TEXT,
+                trigger_kind TEXT,
+                trigger_payload TEXT,
+                upstream_run_id TEXT,
+                input_json TEXT,
+                rerun_of_run_id TEXT,
                 status TEXT DEFAULT 'running'
+            );
+            CREATE TABLE IF NOT EXISTS workflow_trigger_state (
+                workflow_id TEXT NOT NULL,
+                trigger_id TEXT NOT NULL,
+                fingerprint TEXT,
+                observed_at TEXT NOT NULL,
+                fired_at TEXT,
+                PRIMARY KEY (workflow_id, trigger_id)
             );
             CREATE INDEX IF NOT EXISTS idx_runs_workflow ON runs(workflow_id);",
         )?;
@@ -156,7 +176,13 @@ impl Database {
         let _ = conn.execute_batch(
             "ALTER TABLE workflows ADD COLUMN corpus TEXT NOT NULL DEFAULT 'source';",
         );
+        let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN trigger_config TEXT;");
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN timezone TEXT DEFAULT 'UTC';");
+        let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN trigger_kind TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN trigger_payload TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN upstream_run_id TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN input_json TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN rerun_of_run_id TEXT;");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS email_config (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -177,7 +203,7 @@ impl Database {
     pub fn list_workflows(&self) -> rusqlite::Result<Vec<Workflow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus FROM workflows ORDER BY corpus, name"
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, trigger_config FROM workflows ORDER BY corpus, name"
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(Workflow {
@@ -198,6 +224,7 @@ impl Database {
                 corpus: row
                     .get::<_, String>(12)
                     .unwrap_or_else(|_| "source".to_string()),
+                trigger_config: row.get(13).unwrap_or(None),
             })
         })?;
         rows.collect()
@@ -206,7 +233,7 @@ impl Database {
     pub fn get_workflow(&self, id: &str) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus FROM workflows WHERE id = ?1",
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, trigger_config FROM workflows WHERE id = ?1",
             params![id],
             |row| {
                 Ok(Workflow {
@@ -223,6 +250,7 @@ impl Database {
                     email_on_failure: row.get::<_, i32>(10).unwrap_or(1) != 0,
                     timezone: row.get::<_, String>(11).unwrap_or_else(|_| "UTC".to_string()),
                     corpus: row.get::<_, String>(12).unwrap_or_else(|_| "source".to_string()),
+                    trigger_config: row.get(13).unwrap_or(None),
                 })
             },
         )
@@ -247,12 +275,13 @@ impl Database {
         email_on_failure: bool,
         timezone: &str,
         corpus: &str,
+        trigger_config: Option<&str>,
     ) -> rusqlite::Result<Workflow> {
         let id = uuid::Uuid::new_v4().to_string();
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO workflows (id, name, description, script_path, cron_schedule, async_mode, email_on_failure, timezone, corpus) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![id, name, description, script_path, cron_schedule, async_mode as i32, email_on_failure as i32, timezone, corpus],
+            "INSERT INTO workflows (id, name, description, script_path, cron_schedule, async_mode, email_on_failure, timezone, corpus, trigger_config) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![id, name, description, script_path, cron_schedule, async_mode as i32, email_on_failure as i32, timezone, corpus, trigger_config],
         )?;
         self.get_workflow(&id)
     }
@@ -269,11 +298,12 @@ impl Database {
         email_on_failure: bool,
         timezone: &str,
         corpus: &str,
+        trigger_config: Option<&str>,
     ) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
         conn.execute(
-            "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, corpus = ?10, updated_at = datetime('now') WHERE id = ?1",
-            params![id, name, description, script_path, cron_schedule, enabled as i32, async_mode as i32, email_on_failure as i32, timezone, corpus],
+            "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, corpus = ?10, trigger_config = ?11, updated_at = datetime('now') WHERE id = ?1",
+            params![id, name, description, script_path, cron_schedule, enabled as i32, async_mode as i32, email_on_failure as i32, timezone, corpus, trigger_config],
         )?;
         self.get_workflow(id)
     }
@@ -285,13 +315,21 @@ impl Database {
         Ok(())
     }
 
-    pub fn create_run(&self, workflow_id: &str) -> rusqlite::Result<Run> {
+    pub fn create_run_with_context(
+        &self,
+        workflow_id: &str,
+        trigger_kind: Option<&str>,
+        trigger_payload: Option<&str>,
+        upstream_run_id: Option<&str>,
+        input_json: Option<&str>,
+        rerun_of_run_id: Option<&str>,
+    ) -> rusqlite::Result<Run> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO runs (id, workflow_id, started_at, status) VALUES (?1, ?2, ?3, 'running')",
-            params![id, workflow_id, now],
+            "INSERT INTO runs (id, workflow_id, started_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id) VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8)",
+            params![id, workflow_id, now, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id],
         )?;
         self.get_run(&id)
     }
@@ -317,7 +355,7 @@ impl Database {
     pub fn get_run(&self, id: &str) -> rusqlite::Result<Run> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis
+            "SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis, r.trigger_kind, r.trigger_payload, r.upstream_run_id, r.input_json, r.rerun_of_run_id
              FROM runs r LEFT JOIN workflows w ON r.workflow_id = w.id WHERE r.id = ?1",
             params![id],
             |row| Ok(run_from_row(row)),
@@ -327,7 +365,7 @@ impl Database {
     pub fn get_run_history(&self, workflow_id: &str, limit: i64) -> rusqlite::Result<Vec<Run>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis
+            "SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis, r.trigger_kind, r.trigger_payload, r.upstream_run_id, r.input_json, r.rerun_of_run_id
              FROM runs r LEFT JOIN workflows w ON r.workflow_id = w.id WHERE r.workflow_id = ?1 ORDER BY r.started_at DESC LIMIT ?2"
         )?;
         let rows = stmt.query_map(params![workflow_id, limit], |row| Ok(run_from_row(row)))?;
@@ -337,7 +375,7 @@ impl Database {
     pub fn get_recent_runs(&self, limit: i64) -> rusqlite::Result<Vec<Run>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis
+            "SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis, r.trigger_kind, r.trigger_payload, r.upstream_run_id, r.input_json, r.rerun_of_run_id
              FROM runs r LEFT JOIN workflows w ON r.workflow_id = w.id ORDER BY r.started_at DESC LIMIT ?1"
         )?;
         let rows = stmt.query_map(params![limit], |row| Ok(run_from_row(row)))?;
@@ -349,6 +387,45 @@ impl Database {
         conn.execute(
             "UPDATE runs SET error_analysis = ?2 WHERE id = ?1",
             params![run_id, analysis_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_trigger_fingerprint(
+        &self,
+        workflow_id: &str,
+        trigger_id: &str,
+    ) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT fingerprint FROM workflow_trigger_state WHERE workflow_id = ?1 AND trigger_id = ?2",
+        )?;
+        let mut rows = stmt.query(params![workflow_id, trigger_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(row.get(0)?)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn set_trigger_state(
+        &self,
+        workflow_id: &str,
+        trigger_id: &str,
+        fingerprint: &str,
+        fired: bool,
+    ) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let fired_at: Option<&str> = if fired { Some(&now) } else { None };
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO workflow_trigger_state (workflow_id, trigger_id, fingerprint, observed_at, fired_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(workflow_id, trigger_id) DO UPDATE SET
+               fingerprint = excluded.fingerprint,
+               observed_at = excluded.observed_at,
+               fired_at = COALESCE(excluded.fired_at, workflow_trigger_state.fired_at)",
+            params![workflow_id, trigger_id, fingerprint, now, fired_at],
         )?;
         Ok(())
     }
@@ -366,7 +443,7 @@ impl Database {
     pub fn get_running_runs(&self) -> rusqlite::Result<Vec<Run>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis
+            "SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis, r.trigger_kind, r.trigger_payload, r.upstream_run_id, r.input_json, r.rerun_of_run_id
              FROM runs r LEFT JOIN workflows w ON r.workflow_id = w.id WHERE r.status = 'running' ORDER BY r.started_at DESC"
         )?;
         let rows = stmt.query_map([], |row| Ok(run_from_row(row)))?;
@@ -432,6 +509,11 @@ fn run_from_row(row: &rusqlite::Row) -> Run {
         workflow_name: row.get(9).unwrap_or(None),
         summary,
         error_analysis,
+        trigger_kind: row.get(11).unwrap_or(None),
+        trigger_payload: row.get(12).unwrap_or(None),
+        upstream_run_id: row.get(13).unwrap_or(None),
+        input_json: row.get(14).unwrap_or(None),
+        rerun_of_run_id: row.get(15).unwrap_or(None),
     }
 }
 

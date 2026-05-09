@@ -205,6 +205,7 @@ pub fn run() {
             commands::update_workflow,
             commands::delete_workflow,
             commands::trigger_workflow,
+            commands::rerun_workflow,
             commands::get_run_history,
             commands::get_run_log,
             commands::get_scheduler_status,

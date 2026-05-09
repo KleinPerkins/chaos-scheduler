@@ -3,6 +3,9 @@ use chrono::Utc;
 use chrono_tz::Tz;
 use cron::Schedule;
 use serde::Deserialize;
+use serde_json::Value;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,7 +53,7 @@ impl WorkflowScheduler {
         self.email_on_failure.load(Ordering::Relaxed)
     }
 
-    pub fn find_due_workflows(&self) -> Vec<DueWorkflow> {
+    pub fn find_due_workflows(&self, chaos_labs_root: &str) -> Vec<DueWorkflow> {
         let workflows = match self.db.list_workflows() {
             Ok(w) => w,
             Err(e) => {
@@ -67,44 +70,123 @@ impl WorkflowScheduler {
                 continue;
             }
 
-            let tz = parse_tz(&workflow.timezone);
-            let since = now - chrono::Duration::days(2);
-            let Some(scheduled_time) =
-                latest_scheduled_multi(&workflow.cron_schedule, tz, since, now)
-            else {
-                continue;
+            let trigger_config = parse_trigger_config(workflow.trigger_config.as_deref());
+            let has_explicit_triggers = !trigger_config.is_empty();
+            let cron_triggers: Vec<String> = if has_explicit_triggers {
+                trigger_config
+                    .iter()
+                    .filter(|trigger| trigger.get("kind").and_then(Value::as_str) == Some("cron"))
+                    .filter_map(|trigger| {
+                        trigger
+                            .get("cron")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .collect()
+            } else {
+                vec![workflow.cron_schedule.clone()]
             };
 
-            let last_run = workflow.last_run_at.as_ref().and_then(|s| {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .ok()
-                    .map(|d| d.with_timezone(&Utc))
-            });
+            if !cron_triggers.is_empty() {
+                let cron_expr = cron_triggers.join("; ");
+                let tz = parse_tz(&workflow.timezone);
+                let since = now - chrono::Duration::days(2);
+                if let Some(scheduled_time) = latest_scheduled_multi(&cron_expr, tz, since, now) {
+                    let last_run = workflow.last_run_at.as_ref().and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(s)
+                            .ok()
+                            .map(|d| d.with_timezone(&Utc))
+                    });
 
-            if let Some(last) = last_run {
-                if last >= scheduled_time {
-                    continue;
+                    if last_run.map(|last| last < scheduled_time).unwrap_or(true) {
+                        log::info!(
+                            "Running due workflow: {} (scheduled for {})",
+                            workflow.name,
+                            scheduled_time
+                        );
+                        let now_str = now.to_rfc3339();
+                        let _ = self.db.set_last_run_at(&workflow.id, &now_str);
+                        due.push(DueWorkflow {
+                            id: workflow.id.clone(),
+                            trigger_kind: Some("cron".to_string()),
+                            trigger_payload: Some(
+                                serde_json::json!({
+                                    "scheduled_time": scheduled_time.to_rfc3339()
+                                })
+                                .to_string(),
+                            ),
+                        });
+                        continue;
+                    }
                 }
             }
 
-            log::info!(
-                "Running due workflow: {} (scheduled for {})",
-                workflow.name,
-                scheduled_time
-            );
-            let now_str = now.to_rfc3339();
-            let _ = self.db.set_last_run_at(&workflow.id, &now_str);
-            due.push(DueWorkflow {
-                id: workflow.id.clone(),
-            });
+            for trigger in trigger_config.iter().filter(|trigger| {
+                trigger.get("kind").and_then(Value::as_str) == Some("file_arrival")
+            }) {
+                if let Some(reason) =
+                    self.evaluate_file_arrival_trigger(&workflow.id, trigger, chaos_labs_root)
+                {
+                    due.push(DueWorkflow {
+                        id: workflow.id.clone(),
+                        trigger_kind: Some("file_arrival".to_string()),
+                        trigger_payload: Some(reason.to_string()),
+                    });
+                    break;
+                }
+            }
         }
 
         due
+    }
+
+    fn evaluate_file_arrival_trigger(
+        &self,
+        workflow_id: &str,
+        trigger: &Value,
+        chaos_labs_root: &str,
+    ) -> Option<Value> {
+        let path = trigger.get("path")?.as_str()?;
+        let mode = trigger
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("mtime_changed");
+        let trigger_id = trigger
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("file:{}:{}", path, mode));
+        let Some((matched_path, fingerprint)) =
+            fingerprint_file_sensor(path, mode, chaos_labs_root)
+        else {
+            return None;
+        };
+        let prior = self
+            .db
+            .get_trigger_fingerprint(workflow_id, &trigger_id)
+            .ok()
+            .flatten();
+        let changed = prior.as_deref() != Some(fingerprint.as_str());
+        let _ = self
+            .db
+            .set_trigger_state(workflow_id, &trigger_id, &fingerprint, changed);
+        if changed {
+            Some(serde_json::json!({
+                "trigger_id": trigger_id,
+                "path": matched_path,
+                "mode": mode,
+                "fingerprint": fingerprint,
+            }))
+        } else {
+            None
+        }
     }
 }
 
 pub struct DueWorkflow {
     pub id: String,
+    pub trigger_kind: Option<String>,
+    pub trigger_payload: Option<String>,
 }
 
 /// Compute the next run time for a cron expression in the given timezone.
@@ -114,8 +196,90 @@ pub fn get_next_run_time(cron_expr: &str, timezone: &str) -> Option<String> {
     next_run_multi(cron_expr, tz).map(|t| t.to_rfc3339())
 }
 
+fn parse_trigger_config(trigger_config: Option<&str>) -> Vec<Value> {
+    let Some(raw) = trigger_config.filter(|s| !s.trim().is_empty()) else {
+        return vec![];
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(raw) else {
+        log::warn!("Ignoring invalid trigger_config JSON");
+        return vec![];
+    };
+    if let Some(triggers) = parsed.as_array() {
+        return triggers.clone();
+    }
+    parsed
+        .get("triggers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn fingerprint_file_sensor(
+    path: &str,
+    mode: &str,
+    chaos_labs_root: &str,
+) -> Option<(String, String)> {
+    let resolved = resolve_sensor_path(path, chaos_labs_root)?;
+    let meta = std::fs::metadata(&resolved).ok()?;
+    let fingerprint = match mode {
+        "size_changed" => format!("size:{}", meta.len()),
+        "content_hash_changed" => {
+            let content = std::fs::read(&resolved).ok()?;
+            let mut hasher = DefaultHasher::new();
+            content.hash(&mut hasher);
+            format!("hash:{:x}", hasher.finish())
+        }
+        _ => {
+            let modified = meta.modified().ok()?;
+            let nanos = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            format!("mtime:{}:{}", nanos, meta.len())
+        }
+    };
+    Some((resolved, fingerprint))
+}
+
+fn resolve_sensor_path(path: &str, chaos_labs_root: &str) -> Option<String> {
+    let expanded = if std::path::Path::new(path).is_absolute() {
+        path.to_string()
+    } else {
+        format!("{}/{}", chaos_labs_root, path)
+    };
+    if !expanded.contains('*') {
+        return std::path::Path::new(&expanded).exists().then_some(expanded);
+    }
+
+    let path_obj = std::path::Path::new(&expanded);
+    let parent = path_obj.parent()?;
+    let pattern = path_obj.file_name()?.to_string_lossy().to_string();
+    let mut matches: Vec<String> = std::fs::read_dir(parent)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            simple_wildcard_match(&pattern, &name)
+                .then(|| entry.path().to_string_lossy().to_string())
+        })
+        .collect();
+    matches.sort();
+    matches.pop()
+}
+
+fn simple_wildcard_match(pattern: &str, candidate: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    let Some((prefix, suffix)) = pattern.split_once('*') else {
+        return pattern == candidate;
+    };
+    candidate.starts_with(prefix) && candidate.ends_with(suffix)
+}
+
 /// Execute a workflow subprocess. Does not require the scheduler mutex.
-pub fn execute_workflow(
+pub fn execute_workflow_with_context(
     db: &Arc<Database>,
     chaos_labs_root: &str,
     python_path: &str,
@@ -123,18 +287,35 @@ pub fn execute_workflow(
     notify_on_success: bool,
     notify_on_failure: bool,
     email_on_failure_enabled: bool,
+    trigger_kind: Option<&str>,
+    trigger_payload: Option<&str>,
+    upstream_run_id: Option<&str>,
+    input_json: Option<&str>,
+    rerun_of_run_id: Option<&str>,
 ) -> Result<RunResult, String> {
     let workflow = db
         .get_workflow(workflow_id)
         .map_err(|e| format!("Failed to get workflow: {}", e))?;
 
     let run = db
-        .create_run(&workflow.id)
+        .create_run_with_context(
+            &workflow.id,
+            trigger_kind,
+            trigger_payload,
+            upstream_run_id,
+            input_json,
+            rerun_of_run_id,
+        )
         .map_err(|e| format!("Failed to create run record: {}", e))?;
 
-    let output =
-        build_workflow_command(&workflow.script_path, chaos_labs_root, python_path, &run.id)
-            .output();
+    let output = build_workflow_command(
+        &workflow.script_path,
+        chaos_labs_root,
+        python_path,
+        &run.id,
+        input_json,
+    )
+    .output();
 
     match output {
         Ok(output) => {
@@ -153,7 +334,11 @@ pub fn execute_workflow(
                 let wf_script = workflow.script_path.clone();
                 let wf_email = workflow.email_on_failure;
                 let root = chaos_labs_root.to_string();
+                let py = python_path.to_string();
                 let email_enabled = email_on_failure_enabled;
+                let notify_success = notify_on_success;
+                let notify_failure = notify_on_failure;
+                let workflow_id = workflow.id.clone();
 
                 let bg_log = extract_log_path(&stdout);
                 let log_start_offset = extract_log_start_offset(&stdout);
@@ -169,6 +354,10 @@ pub fn execute_workflow(
                         log_start_offset,
                         email_enabled && wf_email,
                         &db,
+                        &py,
+                        &workflow_id,
+                        notify_success,
+                        notify_failure,
                     );
                 });
 
@@ -177,6 +366,7 @@ pub fn execute_workflow(
                     workflow_name: workflow.name,
                     script_path: workflow.script_path.clone(),
                     success: true,
+                    completed: false,
                     should_notify: false,
                     email_on_failure: workflow.email_on_failure,
                 });
@@ -191,6 +381,7 @@ pub fn execute_workflow(
                 workflow_name: workflow.name,
                 script_path: workflow.script_path.clone(),
                 success,
+                completed: true,
                 should_notify: if success {
                     notify_on_success
                 } else {
@@ -206,11 +397,88 @@ pub fn execute_workflow(
     }
 }
 
+pub fn trigger_on_completion(
+    db: &Arc<Database>,
+    chaos_labs_root: &str,
+    python_path: &str,
+    upstream_workflow_id: &str,
+    upstream_run_id: &str,
+    upstream_success: bool,
+    notify_on_success: bool,
+    notify_on_failure: bool,
+    email_on_failure_enabled: bool,
+) {
+    let status = if upstream_success {
+        "success"
+    } else {
+        "failed"
+    };
+    let workflows = match db.list_workflows() {
+        Ok(w) => w,
+        Err(e) => {
+            log::warn!("Failed to list workflows for completion triggers: {}", e);
+            return;
+        }
+    };
+    for workflow in workflows {
+        if !workflow.enabled || workflow.id == upstream_workflow_id {
+            continue;
+        }
+        let triggers = parse_trigger_config(workflow.trigger_config.as_deref());
+        let should_run = triggers.iter().any(|trigger| {
+            if trigger.get("kind").and_then(Value::as_str) != Some("on_completion") {
+                return false;
+            }
+            if trigger.get("upstream_workflow_id").and_then(Value::as_str)
+                != Some(upstream_workflow_id)
+            {
+                return false;
+            }
+            let statuses = trigger
+                .get("status_filter")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_else(|| vec![Value::String("success".to_string())]);
+            statuses.iter().any(|s| s.as_str() == Some(status))
+        });
+        if !should_run {
+            continue;
+        }
+        let payload = serde_json::json!({
+            "upstream_workflow_id": upstream_workflow_id,
+            "upstream_run_id": upstream_run_id,
+            "status": status,
+        })
+        .to_string();
+        if let Err(e) = execute_workflow_with_context(
+            db,
+            chaos_labs_root,
+            python_path,
+            &workflow.id,
+            notify_on_success,
+            notify_on_failure,
+            email_on_failure_enabled,
+            Some("on_completion"),
+            Some(&payload),
+            Some(upstream_run_id),
+            None,
+            None,
+        ) {
+            log::error!(
+                "Completion trigger failed for downstream workflow {}: {}",
+                workflow.id,
+                e
+            );
+        }
+    }
+}
+
 pub struct RunResult {
     pub run_id: String,
     pub workflow_name: String,
     pub script_path: String,
     pub success: bool,
+    pub completed: bool,
     pub should_notify: bool,
     pub email_on_failure: bool,
 }
@@ -301,6 +569,7 @@ fn build_workflow_command(
     chaos_labs_root: &str,
     python_path: &str,
     run_id: &str,
+    input_json: Option<&str>,
 ) -> Command {
     let is_shell_cmd = script_path.contains('=') || script_path.contains("/bin/python");
 
@@ -311,6 +580,9 @@ fn build_workflow_command(
             .current_dir(chaos_labs_root)
             .env("CHAOS_LABS_ROOT", chaos_labs_root)
             .env("CHAOS_LABS_SCHEDULER_RUN_ID", run_id);
+        if let Some(input) = input_json {
+            cmd.env("CHAOS_LABS_WORKFLOW_INPUT_JSON", input);
+        }
         cmd
     } else {
         let parts: Vec<&str> = script_path.split_whitespace().collect();
@@ -327,6 +599,9 @@ fn build_workflow_command(
         cmd.current_dir(chaos_labs_root)
             .env("CHAOS_LABS_ROOT", chaos_labs_root)
             .env("CHAOS_LABS_SCHEDULER_RUN_ID", run_id);
+        if let Some(input) = input_json {
+            cmd.env("CHAOS_LABS_WORKFLOW_INPUT_JSON", input);
+        }
         cmd
     }
 }
@@ -434,7 +709,11 @@ fn monitor_background_pid(
     bg_log_path: Option<&str>,
     log_start_offset: Option<u64>,
     email_enabled: bool,
-    db: &Database,
+    db: &Arc<Database>,
+    python_path: &str,
+    workflow_id: &str,
+    notify_on_success: bool,
+    notify_on_failure: bool,
 ) {
     log::info!(
         "Monitoring background PID {} for workflow '{}'",
@@ -506,10 +785,25 @@ fn monitor_background_pid(
             workflow_name: wf_name.to_string(),
             script_path: wf_script.to_string(),
             success: false,
+            completed: true,
             should_notify: true,
             email_on_failure: true,
         };
         send_failure_email(db, chaos_labs_root, &result);
+    }
+
+    if exit_code == 0 {
+        trigger_on_completion(
+            db,
+            chaos_labs_root,
+            python_path,
+            workflow_id,
+            run_id,
+            true,
+            notify_on_success,
+            notify_on_failure,
+            email_enabled,
+        );
     }
 }
 
@@ -692,7 +986,7 @@ pub fn start_scheduler_loop(
                 // Phase 1 (locked): evaluate cron, find due workflows, read prefs
                 let (due, notify_success, notify_failure, email_enabled) = {
                     let sched = scheduler.lock().unwrap();
-                    let due = sched.find_due_workflows();
+                    let due = sched.find_due_workflows(&chaos_labs_root);
                     let ns = sched.notify_on_success.load(Ordering::Relaxed);
                     let nf = sched.notify_on_failure.load(Ordering::Relaxed);
                     let ef = sched.should_email_on_failure();
@@ -703,7 +997,7 @@ pub fn start_scheduler_loop(
                 // Phase 2 (unlocked): execute workflows
                 let mut results = vec![];
                 for wf in &due {
-                    match execute_workflow(
+                    match execute_workflow_with_context(
                         &db,
                         &chaos_labs_root,
                         &python_path,
@@ -711,8 +1005,28 @@ pub fn start_scheduler_loop(
                         notify_success,
                         notify_failure,
                         email_enabled,
+                        wf.trigger_kind.as_deref(),
+                        wf.trigger_payload.as_deref(),
+                        None,
+                        None,
+                        None,
                     ) {
-                        Ok(result) => results.push(result),
+                        Ok(result) => {
+                            if result.completed {
+                                trigger_on_completion(
+                                    &db,
+                                    &chaos_labs_root,
+                                    &python_path,
+                                    &wf.id,
+                                    &result.run_id,
+                                    result.success,
+                                    notify_success,
+                                    notify_failure,
+                                    email_enabled,
+                                );
+                            }
+                            results.push(result)
+                        }
                         Err(e) => log::error!("Workflow {} failed: {}", wf.id, e),
                     }
                 }
@@ -1241,5 +1555,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
 
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn trigger_config_accepts_wrapped_trigger_list() {
+        let triggers = parse_trigger_config(Some(
+            r#"{"triggers":[{"kind":"file_arrival","path":"data/inbox/*.json"}]}"#,
+        ));
+
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(triggers[0]["kind"], "file_arrival");
+    }
+
+    #[test]
+    fn file_sensor_fingerprint_resolves_simple_glob() {
+        let dir = std::env::temp_dir().join(format!("chaos-file-trigger-{}", uuid::Uuid::new_v4()));
+        let inbox = dir.join("data").join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(inbox.join("sample.json"), br#"{"ok":true}"#).unwrap();
+
+        let fingerprint = fingerprint_file_sensor(
+            "data/inbox/*.json",
+            "content_hash_changed",
+            dir.to_str().unwrap(),
+        );
+        let _ = std::fs::remove_dir_all(dir);
+
+        assert!(fingerprint.is_some());
+        let (path, value) = fingerprint.unwrap();
+        assert!(path.ends_with("sample.json"));
+        assert!(value.starts_with("hash:"));
     }
 }

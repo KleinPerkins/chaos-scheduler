@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { getRunHistory, openUrl } from "../lib/commands";
+import { getRunHistory, openUrl, rerunWorkflow } from "../lib/commands";
 import type { Run, Workflow } from "../lib/commands";
 import "./RunHistory.css";
 
@@ -28,12 +28,39 @@ function formatDate(iso: string): string {
 export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
   const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(true);
+  const [rerunning, setRerunning] = useState<string | null>(null);
 
-  useEffect(() => {
-    getRunHistory(workflow.id, 50)
+  const refreshRuns = () => {
+    setLoading(true);
+    return getRunHistory(workflow.id, 50)
       .then(setRuns)
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    refreshRuns();
   }, [workflow.id]);
+
+  const handleRerun = async (run: Run) => {
+    const input = window.prompt(
+      "Optional input override JSON for this rerun",
+      run.input_json ?? "{}",
+    );
+    if (input === null) return;
+    try {
+      JSON.parse(input || "{}");
+    } catch (err) {
+      window.alert(`Input override must be valid JSON: ${err}`);
+      return;
+    }
+    setRerunning(run.id);
+    try {
+      await rerunWorkflow(workflow.id, run.id, input || "{}");
+      await refreshRuns();
+    } finally {
+      setRerunning(null);
+    }
+  };
 
   return (
     <div>
@@ -59,6 +86,7 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
               <th>Started</th>
               <th>Duration</th>
               <th>Exit Code</th>
+              <th>Trigger</th>
               <th>Result</th>
               <th></th>
             </tr>
@@ -77,6 +105,9 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
                   {run.exit_code !== null ? run.exit_code : "—"}
                 </td>
                 <td>
+                  <span className="rh-trigger-kind">{run.trigger_kind ?? "cron"}</span>
+                </td>
+                <td>
                   {run.result_url ? (
                     <button
                       className="btn btn-ghost btn-sm"
@@ -92,6 +123,16 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
                   )}
                 </td>
                 <td>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    disabled={rerunning === run.id || run.status === "running"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleRerun(run);
+                    }}
+                  >
+                    {rerunning === run.id ? "Rerunning..." : "Rerun"}
+                  </button>
                   <span className="rh-detail-arrow">→</span>
                 </td>
               </tr>
