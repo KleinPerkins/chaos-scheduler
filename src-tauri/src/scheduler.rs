@@ -4,7 +4,7 @@ use chrono_tz::Tz;
 use cron::Schedule;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::process::{Command, Output, Stdio};
@@ -636,6 +636,7 @@ pub fn execute_workflow_with_context(
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let exit_code = output.status.code().unwrap_or(-1);
             let stdout = stdout_with_task_events(stdout, &task_events_raw);
+            persist_task_events(db, &run.id, &workflow.id, &task_events_raw);
 
             let result_url = extract_result_url(&stdout);
 
@@ -1009,6 +1010,144 @@ fn valid_task_event_lines(raw_events: &str) -> Vec<String> {
             has_required.then(|| parsed.to_string())
         })
         .collect()
+}
+
+fn persist_task_events(db: &Arc<Database>, run_id: &str, workflow_id: &str, raw_events: &str) {
+    let mut attempts: HashMap<(String, i64), String> = HashMap::new();
+    let mut task_rows: HashMap<(String, i64), String> = HashMap::new();
+
+    for event_line in valid_task_event_lines(raw_events) {
+        let Ok(event) = serde_json::from_str::<Value>(&event_line) else {
+            continue;
+        };
+        let Some(task_id) = event.get("task_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(status) = event.get("status").and_then(Value::as_str) else {
+            continue;
+        };
+        let attempt_number = event.get("attempt").and_then(Value::as_i64).unwrap_or(0);
+        let details = event.get("details").cloned();
+
+        match status {
+            "started" => {
+                let _ = ensure_task_attempt(
+                    db,
+                    run_id,
+                    task_id,
+                    attempt_number,
+                    details.as_ref(),
+                    &mut attempts,
+                    &mut task_rows,
+                );
+            }
+            "failed" => {
+                if let Ok((attempt_id, task_row_id)) = ensure_task_attempt(
+                    db,
+                    run_id,
+                    task_id,
+                    attempt_number,
+                    details.as_ref(),
+                    &mut attempts,
+                    &mut task_rows,
+                ) {
+                    let error_type = details
+                        .as_ref()
+                        .and_then(|d| d.get("error_type"))
+                        .and_then(Value::as_str);
+                    let error_message = details
+                        .as_ref()
+                        .and_then(|d| d.get("error"))
+                        .and_then(Value::as_str);
+                    let _ = db.finish_run_attempt(
+                        &attempt_id,
+                        "failed",
+                        None,
+                        error_type,
+                        error_message,
+                    );
+                    let _ = db.finish_run_task(
+                        &task_row_id,
+                        "failed",
+                        error_type,
+                        error_message,
+                        details.as_ref(),
+                    );
+                }
+            }
+            "succeeded" => {
+                if let Ok((attempt_id, task_row_id)) = ensure_task_attempt(
+                    db,
+                    run_id,
+                    task_id,
+                    attempt_number,
+                    details.as_ref(),
+                    &mut attempts,
+                    &mut task_rows,
+                ) {
+                    let _ = db.finish_run_attempt(&attempt_id, "succeeded", Some(0), None, None);
+                    let _ =
+                        db.finish_run_task(&task_row_id, "succeeded", None, None, details.as_ref());
+                }
+            }
+            "dead_lettered" => {
+                let last_attempt_id = attempts
+                    .get(&(task_id.to_string(), attempt_number))
+                    .map(String::as_str);
+                let last_exception = details
+                    .as_ref()
+                    .and_then(|d| d.get("error"))
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        details
+                            .as_ref()
+                            .and_then(|d| d.get("error_type"))
+                            .and_then(Value::as_str)
+                    })
+                    .unwrap_or("task retry budget exhausted");
+                let _ = db.upsert_scheduler_dead_letter(
+                    run_id,
+                    workflow_id,
+                    Some(task_id),
+                    last_attempt_id,
+                    last_exception,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn ensure_task_attempt(
+    db: &Arc<Database>,
+    run_id: &str,
+    task_id: &str,
+    attempt_number: i64,
+    details: Option<&Value>,
+    attempts: &mut HashMap<(String, i64), String>,
+    task_rows: &mut HashMap<(String, i64), String>,
+) -> Result<(String, String), String> {
+    let key = (task_id.to_string(), attempt_number);
+    if let (Some(attempt_id), Some(task_row_id)) = (attempts.get(&key), task_rows.get(&key)) {
+        return Ok((attempt_id.clone(), task_row_id.clone()));
+    }
+    let retry_reason = (attempt_number > 0).then_some("retry");
+    let attempt_id = db
+        .insert_run_attempt(run_id, task_id, attempt_number, "running", retry_reason)
+        .map_err(|e| format!("insert run attempt failed: {}", e))?;
+    let task_row_id = db
+        .insert_run_task(
+            run_id,
+            Some(&attempt_id),
+            task_id,
+            "started",
+            attempt_number,
+            details,
+        )
+        .map_err(|e| format!("insert run task failed: {}", e))?;
+    attempts.insert(key.clone(), attempt_id.clone());
+    task_rows.insert(key, task_row_id.clone());
+    Ok((attempt_id, task_row_id))
 }
 
 fn extract_result_url(stdout: &str) -> Option<String> {
