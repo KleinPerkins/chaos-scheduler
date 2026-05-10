@@ -31,6 +31,96 @@
   font-size: 12px;
 }
 
+.rd-observability-card {
+  padding: 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.rd-task-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+
+.rd-task-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 240px) 1fr;
+  gap: 12px;
+  align-items: center;
+}
+
+.rd-task-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.rd-task-attempt {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.status-dot.succeeded,
+.status-dot.success {
+  background: var(--success);
+}
+
+.status-dot.running,
+.status-dot.started {
+  background: var(--running);
+}
+
+.status-dot.failed,
+.status-dot.dead_lettered {
+  background: var(--error);
+}
+
+.rd-task-bar-wrap {
+  min-width: 0;
+  background: var(--bg-tertiary);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.rd-task-bar {
+  min-width: 72px;
+  max-width: 100%;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.rd-task-bar.succeeded {
+  background: rgba(40, 167, 69, 0.18);
+  color: var(--success);
+}
+
+.rd-task-bar.failed,
+.rd-task-bar.dead_lettered {
+  background: rgba(220, 53, 69, 0.18);
+  color: var(--error);
+}
+
+.rd-attempt-table {
+  margin-top: 8px;
+}
+
 .rd-description {
   color: var(--text-secondary);
   font-size: 14px;

@@ -6,6 +6,8 @@ use commands::AppState;
 use db::Database;
 use scheduler::{start_scheduler_loop, WorkflowScheduler};
 use std::{
+    io::{Read, Write},
+    net::TcpListener,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -84,6 +86,41 @@ fn migrate_legacy_scheduler_db(app_data_dir: &Path) {
     }
 }
 
+fn start_metrics_endpoint(db: Arc<Database>) {
+    std::thread::spawn(move || {
+        let Ok(listener) = TcpListener::bind("127.0.0.1:9617") else {
+            log::warn!("Failed to bind Scheduler metrics endpoint on 127.0.0.1:9617");
+            return;
+        };
+        log::info!("Scheduler metrics endpoint listening on 127.0.0.1:9617");
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                continue;
+            };
+            let mut buffer = [0_u8; 512];
+            let _ = stream.read(&mut buffer);
+            let request = String::from_utf8_lossy(&buffer);
+            if !request.starts_with("GET /metrics ") {
+                let body = "not found\n";
+                let response = format!(
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                continue;
+            }
+            let body = db
+                .prometheus_metrics()
+                .unwrap_or_else(|e| format!("# scheduler_metrics_error {}\n", e));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain; version=0.0.4\r\n\r\n{}",
+                body.len(), body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -110,6 +147,7 @@ pub fn run() {
 
             let db = Arc::new(Database::new(&app_data_dir));
             let scheduler = Arc::new(Mutex::new(WorkflowScheduler::new(db.clone())));
+            start_metrics_endpoint(db.clone());
 
             app.manage(AppState {
                 db: db.clone(),
@@ -208,6 +246,11 @@ pub fn run() {
             commands::rerun_workflow,
             commands::get_run_history,
             commands::get_run_log,
+            commands::get_run_tasks,
+            commands::get_run_attempts,
+            commands::get_run_metrics,
+            commands::get_workflow_history_buckets,
+            commands::get_sla_violations,
             commands::get_scheduler_status,
             commands::list_queues,
             commands::update_queue,

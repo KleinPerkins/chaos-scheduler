@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
-import { getRunLog, openUrl, analyzeRunError } from "../lib/commands";
-import type { Run, ErrorAnalysis } from "../lib/commands";
+import { getRunLog, getRunTasks, getRunAttempts, getRunMetrics, openUrl, analyzeRunError } from "../lib/commands";
+import type { Run, RunTask, RunAttempt, RunMetric, ErrorAnalysis } from "../lib/commands";
 import "./RunDetail.css";
 
 interface Props {
@@ -162,6 +162,9 @@ function SectionRenderer({ section }: { section: SummarySection }) {
 
 export default function RunDetail({ runId, onBack }: Props) {
   const [run, setRun] = useState<Run | null>(null);
+  const [tasks, setTasks] = useState<RunTask[]>([]);
+  const [attempts, setAttempts] = useState<RunAttempt[]>([]);
+  const [metrics, setMetrics] = useState<RunMetric[]>([]);
   const [showLogs, setShowLogs] = useState(false);
   const [logTab, setLogTab] = useState<"stdout" | "stderr">("stdout");
   const [analysis, setAnalysis] = useState<ErrorAnalysis | null>(null);
@@ -176,6 +179,9 @@ export default function RunDetail({ runId, onBack }: Props) {
         if (r.error_analysis) setAnalysis(r.error_analysis);
       }
     });
+    getRunTasks(runId).then(setTasks).catch(() => setTasks([]));
+    getRunAttempts(runId).then(setAttempts).catch(() => setAttempts([]));
+    getRunMetrics(runId).then(setMetrics).catch(() => setMetrics([]));
   }, [runId]);
 
   const handleAnalyze = async () => {
@@ -199,6 +205,10 @@ export default function RunDetail({ runId, onBack }: Props) {
   const isFailed = run.status === "failed";
   const hasStderr = !!run.stderr;
   const recommendedSteps = analysis?.recommended_steps ?? [];
+  const attemptsByTask = attempts.reduce<Record<string, RunAttempt[]>>((acc, attempt) => {
+    acc[attempt.task_id] = [...(acc[attempt.task_id] ?? []), attempt];
+    return acc;
+  }, {});
 
   return (
     <div className="rd-page">
@@ -239,6 +249,80 @@ export default function RunDetail({ runId, onBack }: Props) {
           </button>
         )}
       </div>
+
+      {tasks.length > 0 && (
+        <div className="rd-observability-card">
+          <h3 className="rd-section-title">Task Timeline</h3>
+          <div className="rd-task-timeline">
+            {tasks.map((task) => (
+              <div key={task.id} className="rd-task-row">
+                <div className="rd-task-label">
+                  <span className={`status-dot ${task.status}`} />
+                  <span>{task.task_id}</span>
+                  <span className="rd-task-attempt">attempt {task.attempt_number}</span>
+                </div>
+                <div className="rd-task-bar-wrap">
+                  <div className={`rd-task-bar ${task.status}`}>
+                    {task.started_at && task.finished_at
+                      ? formatDuration(task.started_at, task.finished_at)
+                      : task.status}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <table className="rd-table rd-attempt-table">
+            <thead>
+              <tr>
+                <th>Task</th>
+                <th>Attempt</th>
+                <th>Status</th>
+                <th>Duration</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(attemptsByTask).flatMap(([taskId, rows]) =>
+                rows.map((attempt) => (
+                  <tr key={attempt.id}>
+                    <td>{taskId}</td>
+                    <td>{attempt.attempt_number}</td>
+                    <td><span className={`status-badge ${attempt.status}`}>{attempt.status}</span></td>
+                    <td>{formatDuration(attempt.started_at, attempt.finished_at ?? null)}</td>
+                    <td>{attempt.error_message ?? attempt.error_type ?? "—"}</td>
+                  </tr>
+                )),
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {metrics.length > 0 && (
+        <div className="rd-observability-card">
+          <h3 className="rd-section-title">Run Metrics</h3>
+          <table className="rd-table">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>Task</th>
+                <th>Value</th>
+                <th>Emitted</th>
+              </tr>
+            </thead>
+            <tbody>
+              {metrics.map((metric) => (
+                <tr key={metric.id}>
+                  <td>{metric.metric_name}</td>
+                  <td>{metric.task_id ?? "workflow"}</td>
+                  <td>{metric.metric_value}{metric.metric_unit ? ` ${metric.metric_unit}` : ""}</td>
+                  <td>{formatDate(metric.emitted_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Prominent error output for failed runs */}
       {isFailed && hasStderr && (

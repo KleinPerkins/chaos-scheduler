@@ -41,6 +41,62 @@ export interface Run {
   rerun_of_run_id?: string | null;
 }
 
+export interface RunTask {
+  id: string;
+  run_id: string;
+  attempt_id?: string | null;
+  task_id: string;
+  status: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  attempt_number: number;
+  parent_task_id?: string | null;
+  error_type?: string | null;
+  error_message?: string | null;
+  details?: unknown;
+}
+
+export interface RunAttempt {
+  id: string;
+  run_id: string;
+  task_id: string;
+  attempt_number: number;
+  status: string;
+  started_at: string;
+  finished_at?: string | null;
+  exit_code?: number | null;
+  retry_reason?: string | null;
+  error_type?: string | null;
+  error_message?: string | null;
+  trigger_kind?: string | null;
+}
+
+export interface RunMetric {
+  id: string;
+  run_id: string;
+  task_id?: string | null;
+  metric_name: string;
+  metric_value: number;
+  metric_unit?: string | null;
+  emitted_at: string;
+  labels?: unknown;
+}
+
+export interface WorkflowHistoryBucket {
+  day: string;
+  total: number;
+  failed: number;
+  succeeded: number;
+}
+
+export interface SlaViolation {
+  workflow_id: string;
+  workflow_name: string;
+  violation_type: string;
+  message: string;
+  severity: string;
+}
+
 export interface NextRun {
   workflow_id: string;
   workflow_name: string;
@@ -168,6 +224,29 @@ export function getRunHistory(workflowId: string, limit?: number): Promise<Run[]
 
 export function getRunLog(runId: string): Promise<Run> {
   return invoke("get_run_log", { runId });
+}
+
+export function getRunTasks(runId: string): Promise<RunTask[]> {
+  return invoke("get_run_tasks", { runId });
+}
+
+export function getRunAttempts(runId: string): Promise<RunAttempt[]> {
+  return invoke("get_run_attempts", { runId });
+}
+
+export function getRunMetrics(runId: string): Promise<RunMetric[]> {
+  return invoke("get_run_metrics", { runId });
+}
+
+export function getWorkflowHistoryBuckets(
+  workflowId: string,
+  days = 30,
+): Promise<WorkflowHistoryBucket[]> {
+  return invoke("get_workflow_history_buckets", { workflowId, days });
+}
+
+export function getSlaViolations(): Promise<SlaViolation[]> {
+  return invoke("get_sla_violations");
 }
 
 export function getSchedulerStatus(): Promise<SchedulerStatus> {

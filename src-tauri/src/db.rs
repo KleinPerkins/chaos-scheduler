@@ -140,6 +140,23 @@ pub struct RunMetric {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowHistoryBucket {
+    pub day: String,
+    pub total: i64,
+    pub failed: i64,
+    pub succeeded: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlaViolation {
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub violation_type: String,
+    pub message: String,
+    pub severity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct RunIoValue {
     pub id: String,
@@ -1291,6 +1308,198 @@ impl Database {
         rows.collect()
     }
 
+    pub fn get_run_tasks(&self, run_id: &str) -> rusqlite::Result<Vec<RunTask>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, attempt_id, task_id, status, started_at, finished_at, attempt_number, parent_task_id, error_type, error_message, details_json
+             FROM run_tasks WHERE run_id = ?1 ORDER BY started_at ASC, task_id ASC, attempt_number ASC",
+        )?;
+        let rows = stmt.query_map(params![run_id], |row| Ok(run_task_from_row(row)))?;
+        rows.collect()
+    }
+
+    pub fn get_run_attempts(&self, run_id: &str) -> rusqlite::Result<Vec<RunAttempt>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, task_id, attempt_number, status, started_at, finished_at, exit_code, retry_reason, error_type, error_message, trigger_kind
+             FROM run_attempts WHERE run_id = ?1 ORDER BY started_at ASC, task_id ASC, attempt_number ASC",
+        )?;
+        let rows = stmt.query_map(params![run_id], |row| Ok(run_attempt_from_row(row)))?;
+        rows.collect()
+    }
+
+    pub fn get_run_metrics(&self, run_id: &str) -> rusqlite::Result<Vec<RunMetric>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, task_id, metric_name, metric_value, metric_unit, emitted_at, labels_json
+             FROM run_metrics WHERE run_id = ?1 ORDER BY emitted_at ASC, metric_name ASC",
+        )?;
+        let rows = stmt.query_map(params![run_id], |row| Ok(run_metric_from_row(row)))?;
+        rows.collect()
+    }
+
+    pub fn workflow_history_buckets(
+        &self,
+        workflow_id: &str,
+        days: i64,
+    ) -> rusqlite::Result<Vec<WorkflowHistoryBucket>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT substr(started_at, 1, 10) AS day,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status = 'failed' OR status = 'dead_letter' THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded
+             FROM runs
+             WHERE workflow_id = ?1 AND datetime(started_at) >= datetime('now', ?2)
+             GROUP BY day
+             ORDER BY day ASC",
+        )?;
+        let window = format!("-{} days", days.max(1));
+        let rows = stmt.query_map(params![workflow_id, window], |row| {
+            Ok(WorkflowHistoryBucket {
+                day: row.get(0)?,
+                total: row.get(1)?,
+                failed: row.get(2)?,
+                succeeded: row.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn prometheus_metrics(&self) -> rusqlite::Result<String> {
+        let conn = self.conn()?;
+        let mut out = String::new();
+        out.push_str("# HELP scheduler_workflow_runs_total Workflow runs by workflow and status\n");
+        out.push_str("# TYPE scheduler_workflow_runs_total counter\n");
+        let mut stmt = conn.prepare(
+            "SELECT workflow_id, status, COUNT(*) FROM runs GROUP BY workflow_id, status",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (workflow_id, status, count) = row?;
+            out.push_str(&format!(
+                "scheduler_workflow_runs_total{{workflow_id=\"{}\",status=\"{}\"}} {}\n",
+                metric_label(&workflow_id),
+                metric_label(&status),
+                count
+            ));
+        }
+
+        out.push_str("# HELP scheduler_task_runs_total Task runs by workflow, task, and status\n");
+        out.push_str("# TYPE scheduler_task_runs_total counter\n");
+        let mut stmt = conn.prepare(
+            "SELECT r.workflow_id, t.task_id, t.status, COUNT(*)
+             FROM run_tasks t JOIN runs r ON r.id = t.run_id
+             GROUP BY r.workflow_id, t.task_id, t.status",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (workflow_id, task_id, status, count) = row?;
+            out.push_str(&format!(
+                "scheduler_task_runs_total{{workflow_id=\"{}\",task_id=\"{}\",status=\"{}\"}} {}\n",
+                metric_label(&workflow_id),
+                metric_label(&task_id),
+                metric_label(&status),
+                count
+            ));
+        }
+
+        out.push_str("# HELP scheduler_dead_letter_runs Dead-letter rows by workflow\n");
+        out.push_str("# TYPE scheduler_dead_letter_runs gauge\n");
+        let mut stmt = conn.prepare(
+            "SELECT workflow_id, COUNT(*) FROM scheduler_dead_letters WHERE acknowledged_at IS NULL GROUP BY workflow_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (workflow_id, count) = row?;
+            out.push_str(&format!(
+                "scheduler_dead_letter_runs{{workflow_id=\"{}\"}} {}\n",
+                metric_label(&workflow_id),
+                count
+            ));
+        }
+        Ok(out)
+    }
+
+    pub fn evaluate_sla_violations(&self) -> rusqlite::Result<Vec<SlaViolation>> {
+        let workflows = self.list_workflows()?;
+        let mut violations = Vec::new();
+        for workflow in workflows.into_iter().filter(|w| w.enabled) {
+            let Some(queue_config) = workflow.queue_config.as_deref() else {
+                continue;
+            };
+            let Ok(config) = serde_json::from_str::<serde_json::Value>(queue_config) else {
+                continue;
+            };
+            let Some(sla) = config.get("sla") else {
+                continue;
+            };
+            if let Some(max_runtime) = sla.get("max_runtime_seconds").and_then(|v| v.as_i64()) {
+                for run in self
+                    .get_running_runs()?
+                    .into_iter()
+                    .filter(|r| r.workflow_id == workflow.id)
+                {
+                    if run_age_seconds(&run.started_at) > max_runtime {
+                        violations.push(SlaViolation {
+                            workflow_id: workflow.id.clone(),
+                            workflow_name: workflow.name.clone(),
+                            violation_type: "max_runtime_seconds".to_string(),
+                            message: format!(
+                                "{} has been running longer than {}s",
+                                workflow.name, max_runtime
+                            ),
+                            severity: "warning".to_string(),
+                        });
+                    }
+                }
+            }
+            if let Some(min_rate) = sla.get("min_success_rate_24h").and_then(|v| v.as_f64()) {
+                let conn = self.conn()?;
+                let (total, succeeded): (i64, i64) = conn.query_row(
+                    "SELECT COUNT(*), SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END)
+                     FROM runs
+                     WHERE workflow_id = ?1 AND datetime(started_at) >= datetime('now', '-1 day')",
+                    params![workflow.id],
+                    |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+                )?;
+                if total > 0 {
+                    let rate = succeeded as f64 / total as f64;
+                    if rate < min_rate {
+                        violations.push(SlaViolation {
+                            workflow_id: workflow.id.clone(),
+                            workflow_name: workflow.name.clone(),
+                            violation_type: "min_success_rate_24h".to_string(),
+                            message: format!(
+                                "{} 24h success rate {:.0}% is below {:.0}%",
+                                workflow.name,
+                                rate * 100.0,
+                                min_rate * 100.0
+                            ),
+                            severity: "warning".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(violations)
+    }
+
     pub fn set_error_analysis(&self, run_id: &str, analysis_json: &str) -> rusqlite::Result<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -1768,6 +1977,69 @@ fn run_from_row(row: &rusqlite::Row) -> Run {
         input_json: row.get(14).unwrap_or(None),
         rerun_of_run_id: row.get(15).unwrap_or(None),
     }
+}
+
+fn run_task_from_row(row: &rusqlite::Row) -> RunTask {
+    let details_str: Option<String> = row.get(11).unwrap_or(None);
+    RunTask {
+        id: row.get(0).unwrap_or_default(),
+        run_id: row.get(1).unwrap_or_default(),
+        attempt_id: row.get(2).unwrap_or(None),
+        task_id: row.get(3).unwrap_or_default(),
+        status: row.get(4).unwrap_or_default(),
+        started_at: row.get(5).unwrap_or(None),
+        finished_at: row.get(6).unwrap_or(None),
+        attempt_number: row.get(7).unwrap_or_default(),
+        parent_task_id: row.get(8).unwrap_or(None),
+        error_type: row.get(9).unwrap_or(None),
+        error_message: row.get(10).unwrap_or(None),
+        details: details_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok()),
+    }
+}
+
+fn run_attempt_from_row(row: &rusqlite::Row) -> RunAttempt {
+    RunAttempt {
+        id: row.get(0).unwrap_or_default(),
+        run_id: row.get(1).unwrap_or_default(),
+        task_id: row.get(2).unwrap_or_default(),
+        attempt_number: row.get(3).unwrap_or_default(),
+        status: row.get(4).unwrap_or_default(),
+        started_at: row.get(5).unwrap_or_default(),
+        finished_at: row.get(6).unwrap_or(None),
+        exit_code: row.get(7).unwrap_or(None),
+        retry_reason: row.get(8).unwrap_or(None),
+        error_type: row.get(9).unwrap_or(None),
+        error_message: row.get(10).unwrap_or(None),
+        trigger_kind: row.get(11).unwrap_or(None),
+    }
+}
+
+fn run_metric_from_row(row: &rusqlite::Row) -> RunMetric {
+    let labels_str: Option<String> = row.get(7).unwrap_or(None);
+    RunMetric {
+        id: row.get(0).unwrap_or_default(),
+        run_id: row.get(1).unwrap_or_default(),
+        task_id: row.get(2).unwrap_or(None),
+        metric_name: row.get(3).unwrap_or_default(),
+        metric_value: row.get(4).unwrap_or_default(),
+        metric_unit: row.get(5).unwrap_or(None),
+        emitted_at: row.get(6).unwrap_or_default(),
+        labels: labels_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok()),
+    }
+}
+
+fn metric_label(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn run_age_seconds(started_at: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(started_at)
+        .map(|started| (chrono::Utc::now() - started.with_timezone(&chrono::Utc)).num_seconds())
+        .unwrap_or(0)
 }
 
 /// Extract the latest SUMMARY_JSON:{...} line from workflow stdout.

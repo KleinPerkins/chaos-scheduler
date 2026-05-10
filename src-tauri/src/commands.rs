@@ -1,5 +1,6 @@
 use crate::db::{
-    Database, EmailConfig, NextRun, QueueInfo, QueuedRun, Run, SchedulerStatus, Workflow,
+    Database, EmailConfig, NextRun, QueueInfo, QueuedRun, Run, RunAttempt, RunMetric, RunTask,
+    SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use std::sync::{Arc, Mutex};
@@ -188,6 +189,44 @@ pub fn get_run_history(
 #[tauri::command]
 pub fn get_run_log(state: State<AppState>, run_id: String) -> Result<Run, String> {
     state.db.get_run(&run_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_run_tasks(state: State<AppState>, run_id: String) -> Result<Vec<RunTask>, String> {
+    state.db.get_run_tasks(&run_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_run_attempts(state: State<AppState>, run_id: String) -> Result<Vec<RunAttempt>, String> {
+    state
+        .db
+        .get_run_attempts(&run_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_run_metrics(state: State<AppState>, run_id: String) -> Result<Vec<RunMetric>, String> {
+    state.db.get_run_metrics(&run_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_workflow_history_buckets(
+    state: State<AppState>,
+    workflow_id: String,
+    days: Option<i64>,
+) -> Result<Vec<WorkflowHistoryBucket>, String> {
+    state
+        .db
+        .workflow_history_buckets(&workflow_id, days.unwrap_or(30))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_sla_violations(state: State<AppState>) -> Result<Vec<SlaViolation>, String> {
+    state
+        .db
+        .evaluate_sla_violations()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

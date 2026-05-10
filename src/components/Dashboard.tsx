@@ -6,8 +6,8 @@ import RunHistory from "./RunHistory";
 import RunDetail from "./RunDetail";
 import QueueView from "./QueueView";
 import Settings from "./Settings";
-import { getWorkflow } from "../lib/commands";
-import type { Workflow } from "../lib/commands";
+import { getSchedulerStatus, getSlaViolations, getWorkflow } from "../lib/commands";
+import type { SchedulerStatus, SlaViolation, Workflow } from "../lib/commands";
 import "./Dashboard.css";
 
 type View = "workflows" | "editor" | "history" | "detail" | "queues" | "settings";
@@ -21,6 +21,8 @@ interface NavState {
 export default function Dashboard() {
   const [nav, setNav] = useState<NavState>({ view: "workflows" });
   const [refreshKey, setRefreshKey] = useState(0);
+  const [status, setStatus] = useState<SchedulerStatus | null>(null);
+  const [slaViolations, setSlaViolations] = useState<SlaViolation[]>([]);
 
   const triggerRefresh = () => setRefreshKey((k) => k + 1);
 
@@ -38,6 +40,12 @@ export default function Dashboard() {
     );
     return () => { unlisten.then((fn) => fn()); };
   }, []);
+
+  useEffect(() => {
+    if (nav.view !== "workflows") return;
+    getSchedulerStatus().then(setStatus).catch(() => setStatus(null));
+    getSlaViolations().then(setSlaViolations).catch(() => setSlaViolations([]));
+  }, [nav.view, refreshKey]);
 
   return (
     <div className="dashboard">
@@ -76,12 +84,44 @@ export default function Dashboard() {
 
       <main className="dashboard-main">
         {nav.view === "workflows" && (
-          <WorkflowList
-            key={refreshKey}
-            onEdit={(w) => setNav({ view: "editor", workflow: w })}
-            onNew={() => setNav({ view: "editor" })}
-            onHistory={(w) => setNav({ view: "history", workflow: w })}
-          />
+          <>
+            {status && (
+              <div className="dashboard-status-grid">
+                <div className="dashboard-status-card">
+                  <span className="dashboard-status-value">{status.active_workflows}</span>
+                  <span className="dashboard-status-label">Active workflows</span>
+                </div>
+                <div className="dashboard-status-card">
+                  <span className="dashboard-status-value">{status.running_count}</span>
+                  <span className="dashboard-status-label">Running now</span>
+                </div>
+                <div className="dashboard-status-card">
+                  <span className="dashboard-status-value">{status.recent_runs.filter((run) => run.status === "failed").length}</span>
+                  <span className="dashboard-status-label">Recent failures</span>
+                </div>
+                <div className={`dashboard-status-card ${slaViolations.length ? "warning" : ""}`}>
+                  <span className="dashboard-status-value">{slaViolations.length}</span>
+                  <span className="dashboard-status-label">SLA violations</span>
+                </div>
+              </div>
+            )}
+            {slaViolations.length > 0 && (
+              <div className="dashboard-alert-list">
+                {slaViolations.slice(0, 3).map((violation) => (
+                  <div key={`${violation.workflow_id}-${violation.violation_type}`} className="dashboard-alert">
+                    <strong>{violation.workflow_name}</strong>
+                    <span>{violation.message}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <WorkflowList
+              key={refreshKey}
+              onEdit={(w) => setNav({ view: "editor", workflow: w })}
+              onNew={() => setNav({ view: "editor" })}
+              onHistory={(w) => setNav({ view: "history", workflow: w })}
+            />
+          </>
         )}
         {nav.view === "editor" && (
           <WorkflowEditor

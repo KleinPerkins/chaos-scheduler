@@ -10,7 +10,7 @@ use std::io::Read;
 use std::process::{Command, Output, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -19,6 +19,7 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::process::CommandExt;
 
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+static SLA_NOTIFICATION_CACHE: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
 
 pub struct WorkflowScheduler {
     db: Arc<Database>,
@@ -1113,6 +1114,26 @@ fn persist_task_events(db: &Arc<Database>, run_id: &str, workflow_id: &str, raw_
                     last_exception,
                 );
             }
+            "metric" => {
+                if let Some(details) = details.as_ref() {
+                    if let Some(metric_name) = details.get("metric_name").and_then(Value::as_str) {
+                        if let Some(metric_value) =
+                            details.get("metric_value").and_then(Value::as_f64)
+                        {
+                            let metric_unit = details.get("metric_unit").and_then(Value::as_str);
+                            let labels = details.get("labels");
+                            let _ = db.insert_run_metric(
+                                run_id,
+                                Some(task_id),
+                                metric_name,
+                                metric_value,
+                                metric_unit,
+                                labels,
+                            );
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1580,6 +1601,7 @@ pub fn start_scheduler_loop(
                         send_notification(&app_handle, result);
                     }
                 }
+                send_sla_notifications(&app_handle, &db);
 
                 if email_enabled {
                     for result in results.iter().filter(|r| !r.success && r.email_on_failure) {
@@ -1614,6 +1636,39 @@ fn send_notification(app: &tauri::AppHandle, result: &RunResult) {
         .show()
     {
         log::warn!("Failed to send notification: {}", e);
+    }
+}
+
+fn send_sla_notifications(app: &tauri::AppHandle, db: &Arc<Database>) {
+    use tauri_plugin_notification::NotificationExt;
+
+    let Ok(violations) = db.evaluate_sla_violations() else {
+        return;
+    };
+    let cache = SLA_NOTIFICATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut cache) = cache.lock() else {
+        return;
+    };
+    let now = Utc::now().timestamp();
+    for violation in violations {
+        let key = format!("{}:{}", violation.workflow_id, violation.violation_type);
+        if cache
+            .get(&key)
+            .map(|last| now - *last < 4 * 60 * 60)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        cache.insert(key, now);
+        if let Err(e) = app
+            .notification()
+            .builder()
+            .title("Scheduler SLA violation")
+            .body(&violation.message)
+            .show()
+        {
+            log::warn!("Failed to send SLA notification: {}", e);
+        }
     }
 }
 
