@@ -289,7 +289,9 @@ impl Database {
     }
 
     fn conn(&self) -> rusqlite::Result<Connection> {
-        Connection::open(&self.path)
+        let conn = Connection::open(&self.path)?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        Ok(conn)
     }
 
     fn init(&self) -> rusqlite::Result<()> {
@@ -2396,6 +2398,176 @@ SUMMARY_JSON:{\"title\":\"current\"}
             )
             .unwrap();
         assert_eq!(dead_letter_exception, "boom again");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_5_detail_rows_follow_run_and_workflow_delete_semantics() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = db
+            .create_workflow(
+                "Delete Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                None,
+                Some(r#"{"queue":"source-default"}"#),
+            )
+            .unwrap();
+        let run = db
+            .create_run_with_context(&workflow.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        let attempt_id = db
+            .insert_run_attempt(&run.id, "cleanup", 0, "running", None)
+            .unwrap();
+        db.insert_run_task(&run.id, Some(&attempt_id), "cleanup", "started", 0, None)
+            .unwrap();
+        db.insert_run_metric(&run.id, Some("cleanup"), "rows", 1.0, None, None)
+            .unwrap();
+        db.insert_run_input(
+            &run.id,
+            Some("cleanup"),
+            "request",
+            &serde_json::json!({"delete": true}),
+            "1.0.0",
+        )
+        .unwrap();
+        db.insert_run_output(
+            &run.id,
+            Some("cleanup"),
+            "result",
+            &serde_json::json!({"ok": true}),
+            "1.0.0",
+        )
+        .unwrap();
+        db.insert_run_asset(
+            &run.id,
+            Some("cleanup"),
+            Some(&attempt_id),
+            "source",
+            "test",
+            "partition",
+            "write",
+            None,
+        )
+        .unwrap();
+        db.insert_run_lineage(
+            &run.id,
+            Some("cleanup"),
+            Some(&attempt_id),
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        db.insert_idempotency_key(
+            "delete-key",
+            Some(&run.id),
+            Some("cleanup"),
+            Some(&attempt_id),
+        )
+        .unwrap();
+        db.insert_scheduler_checkpoint(&run.id, "cleanup", Some(&attempt_id), "latest", b"state")
+            .unwrap();
+        db.upsert_scheduler_dead_letter(
+            &run.id,
+            &workflow.id,
+            Some("cleanup"),
+            Some(&attempt_id),
+            "boom",
+        )
+        .unwrap();
+        db.insert_queue_event(
+            "source-default",
+            "source",
+            Some(&workflow.id),
+            Some(&run.id),
+            "admitted",
+            None,
+            None,
+        )
+        .unwrap();
+        db.insert_workflow_resource_sample(&WorkflowResourceSample {
+            id: String::new(),
+            run_id: Some(run.id.clone()),
+            workflow_id: workflow.id.clone(),
+            queue_name: Some("source-default".to_string()),
+            corpus: "source".to_string(),
+            pid: Some(123),
+            sampled_at: chrono::Utc::now().to_rfc3339(),
+            cpu_percent: Some(1.0),
+            memory_rss_bytes: Some(1),
+            memory_vms_bytes: Some(1),
+            swap_bytes: Some(0),
+            labels: None,
+        })
+        .unwrap();
+        db.insert_workflow_token_usage(&WorkflowTokenUsage {
+            id: String::new(),
+            run_id: Some(run.id.clone()),
+            workflow_id: workflow.id.clone(),
+            task_id: Some("cleanup".to_string()),
+            provider: "anthropic".to_string(),
+            model: None,
+            token_kind: "input".to_string(),
+            token_count: 1,
+            emitted_at: chrono::Utc::now().to_rfc3339(),
+            labels: None,
+        })
+        .unwrap();
+
+        db.delete_workflow(&workflow.id).unwrap();
+        let conn = db.conn().unwrap();
+        for table in [
+            "runs",
+            "run_attempts",
+            "run_tasks",
+            "run_metrics",
+            "run_inputs",
+            "run_outputs",
+            "run_assets",
+            "run_lineage",
+            "scheduler_checkpoints",
+            "scheduler_dead_letters",
+            "workflow_resource_samples",
+            "workflow_token_usage",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "expected {table} to cascade-delete");
+        }
+        let idempotency_run_id: Option<String> = conn
+            .query_row(
+                "SELECT run_id FROM scheduler_idempotency_keys WHERE key = 'delete-key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idempotency_run_id, None);
+        let asset_writer_run_id: Option<String> = conn
+            .query_row(
+                "SELECT last_writer_run_id FROM scheduler_assets WHERE asset_kind = 'source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(asset_writer_run_id, None);
+        let queue_refs: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT workflow_id, run_id FROM queue_events WHERE event_type = 'admitted'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(queue_refs, (None, None));
 
         let _ = std::fs::remove_dir_all(dir);
     }
