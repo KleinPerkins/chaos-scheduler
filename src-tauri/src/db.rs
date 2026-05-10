@@ -92,6 +92,153 @@ pub struct QueuedRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct RunAttempt {
+    pub id: String,
+    pub run_id: String,
+    pub task_id: String,
+    pub attempt_number: i64,
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub exit_code: Option<i32>,
+    pub retry_reason: Option<String>,
+    pub error_type: Option<String>,
+    pub error_message: Option<String>,
+    pub trigger_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct RunTask {
+    pub id: String,
+    pub run_id: String,
+    pub attempt_id: Option<String>,
+    pub task_id: String,
+    pub status: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub attempt_number: i64,
+    pub parent_task_id: Option<String>,
+    pub error_type: Option<String>,
+    pub error_message: Option<String>,
+    pub details: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct RunMetric {
+    pub id: String,
+    pub run_id: String,
+    pub task_id: Option<String>,
+    pub metric_name: String,
+    pub metric_value: f64,
+    pub metric_unit: Option<String>,
+    pub emitted_at: String,
+    pub labels: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct RunIoValue {
+    pub id: String,
+    pub run_id: String,
+    pub task_id: Option<String>,
+    pub key: String,
+    pub value: serde_json::Value,
+    pub schema_version: String,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct SchedulerAsset {
+    pub asset_id: String,
+    pub asset_kind: String,
+    pub asset_namespace: String,
+    pub asset_partition: String,
+    pub last_action: Option<String>,
+    pub last_written_at: Option<String>,
+    pub last_writer_run_id: Option<String>,
+    pub freshness_policy: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct RunAsset {
+    pub id: String,
+    pub run_id: String,
+    pub task_id: Option<String>,
+    pub attempt_id: Option<String>,
+    pub asset_id: Option<String>,
+    pub asset_kind: String,
+    pub asset_namespace: String,
+    pub asset_partition: String,
+    pub action: String,
+    pub emitted_at: String,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct RunLineage {
+    pub id: String,
+    pub run_id: String,
+    pub task_id: Option<String>,
+    pub attempt_id: Option<String>,
+    pub openlineage_event: serde_json::Value,
+    pub emitted_at: String,
+    pub exported_at: Option<String>,
+    pub export_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct QueueEvent {
+    pub id: String,
+    pub queue_name: String,
+    pub corpus: String,
+    pub workflow_id: Option<String>,
+    pub run_id: Option<String>,
+    pub event_type: String,
+    pub reason: Option<String>,
+    pub emitted_at: String,
+    pub details: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct WorkflowResourceSample {
+    pub id: String,
+    pub run_id: Option<String>,
+    pub workflow_id: String,
+    pub queue_name: Option<String>,
+    pub corpus: String,
+    pub pid: Option<i64>,
+    pub sampled_at: String,
+    pub cpu_percent: Option<f64>,
+    pub memory_rss_bytes: Option<i64>,
+    pub memory_vms_bytes: Option<i64>,
+    pub swap_bytes: Option<i64>,
+    pub labels: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct WorkflowTokenUsage {
+    pub id: String,
+    pub run_id: Option<String>,
+    pub workflow_id: String,
+    pub task_id: Option<String>,
+    pub provider: String,
+    pub model: Option<String>,
+    pub token_kind: String,
+    pub token_count: i64,
+    pub emitted_at: String,
+    pub labels: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NextRun {
     pub workflow_id: String,
     pub workflow_name: String,
@@ -156,6 +303,7 @@ impl Database {
                 enabled INTEGER DEFAULT 1,
                 async_mode INTEGER DEFAULT 0,
                 corpus TEXT NOT NULL DEFAULT 'source',
+                domain TEXT,
                 trigger_config TEXT,
                 queue_config TEXT,
                 created_at TEXT DEFAULT (datetime('now')),
@@ -240,6 +388,7 @@ impl Database {
         );
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN trigger_config TEXT;");
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN queue_config TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN domain TEXT;");
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN timezone TEXT DEFAULT 'UTC';");
         let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN trigger_kind TEXT;");
         let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN trigger_payload TEXT;");
@@ -259,6 +408,198 @@ impl Database {
                 from_name TEXT DEFAULT 'Chaos Labs Scheduler'
             );
             INSERT OR IGNORE INTO email_config (id) VALUES (1);",
+        )?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS run_attempts (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                task_id TEXT NOT NULL,
+                attempt_number INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                exit_code INTEGER,
+                retry_reason TEXT,
+                error_type TEXT,
+                error_message TEXT,
+                trigger_kind TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(run_id, task_id, attempt_number)
+            );
+            CREATE TABLE IF NOT EXISTS run_tasks (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                attempt_id TEXT REFERENCES run_attempts(id) ON DELETE SET NULL,
+                task_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                attempt_number INTEGER NOT NULL DEFAULT 0,
+                parent_task_id TEXT,
+                error_type TEXT,
+                error_message TEXT,
+                details_json TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(run_id, task_id, attempt_number)
+            );
+            CREATE TABLE IF NOT EXISTS run_metrics (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                task_id TEXT,
+                metric_name TEXT NOT NULL,
+                metric_value REAL NOT NULL,
+                metric_unit TEXT,
+                emitted_at TEXT NOT NULL,
+                labels_json TEXT
+            );
+            CREATE TABLE IF NOT EXISTS run_inputs (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                task_id TEXT,
+                key TEXT NOT NULL,
+                value_json TEXT NOT NULL,
+                schema_version TEXT NOT NULL DEFAULT '1.0.0',
+                recorded_at TEXT NOT NULL,
+                UNIQUE(run_id, task_id, key)
+            );
+            CREATE TABLE IF NOT EXISTS run_outputs (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                task_id TEXT,
+                key TEXT NOT NULL,
+                value_json TEXT NOT NULL,
+                schema_version TEXT NOT NULL DEFAULT '1.0.0',
+                recorded_at TEXT NOT NULL,
+                UNIQUE(run_id, task_id, key)
+            );
+            CREATE TABLE IF NOT EXISTS scheduler_assets (
+                asset_id TEXT PRIMARY KEY,
+                asset_kind TEXT NOT NULL,
+                asset_namespace TEXT NOT NULL,
+                asset_partition TEXT NOT NULL DEFAULT '',
+                last_action TEXT,
+                last_written_at TEXT,
+                last_writer_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+                freshness_policy_json TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(asset_kind, asset_namespace, asset_partition)
+            );
+            CREATE TABLE IF NOT EXISTS run_assets (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                task_id TEXT,
+                attempt_id TEXT REFERENCES run_attempts(id) ON DELETE SET NULL,
+                asset_id TEXT REFERENCES scheduler_assets(asset_id) ON DELETE SET NULL,
+                asset_kind TEXT NOT NULL,
+                asset_namespace TEXT NOT NULL,
+                asset_partition TEXT NOT NULL DEFAULT '',
+                action TEXT NOT NULL CHECK (action IN ('read', 'write')),
+                emitted_at TEXT NOT NULL,
+                metadata_json TEXT
+            );
+            CREATE TABLE IF NOT EXISTS run_lineage (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                task_id TEXT,
+                attempt_id TEXT REFERENCES run_attempts(id) ON DELETE SET NULL,
+                openlineage_event_json TEXT NOT NULL,
+                emitted_at TEXT NOT NULL,
+                exported_at TEXT,
+                export_status TEXT
+            );
+            CREATE TABLE IF NOT EXISTS scheduler_idempotency_keys (
+                key TEXT PRIMARY KEY,
+                run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+                task_id TEXT,
+                attempt_id TEXT REFERENCES run_attempts(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS scheduler_checkpoints (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                task_id TEXT NOT NULL,
+                attempt_id TEXT REFERENCES run_attempts(id) ON DELETE SET NULL,
+                checkpoint_key TEXT NOT NULL,
+                state_blob BLOB NOT NULL,
+                state_size_bytes INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(run_id, task_id, checkpoint_key)
+            );
+            CREATE TABLE IF NOT EXISTS scheduler_dead_letters (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+                workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+                task_id TEXT,
+                last_attempt_id TEXT REFERENCES run_attempts(id) ON DELETE SET NULL,
+                last_failure_at TEXT NOT NULL,
+                last_exception TEXT NOT NULL,
+                acknowledged_at TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS queue_events (
+                id TEXT PRIMARY KEY,
+                queue_name TEXT NOT NULL,
+                corpus TEXT NOT NULL,
+                workflow_id TEXT REFERENCES workflows(id) ON DELETE SET NULL,
+                run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+                event_type TEXT NOT NULL,
+                reason TEXT,
+                emitted_at TEXT NOT NULL,
+                details_json TEXT
+            );
+            CREATE TABLE IF NOT EXISTS workflow_resource_samples (
+                id TEXT PRIMARY KEY,
+                run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+                workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+                queue_name TEXT,
+                corpus TEXT NOT NULL,
+                pid INTEGER,
+                sampled_at TEXT NOT NULL,
+                cpu_percent REAL,
+                memory_rss_bytes INTEGER,
+                memory_vms_bytes INTEGER,
+                swap_bytes INTEGER,
+                labels_json TEXT
+            );
+            CREATE TABLE IF NOT EXISTS workflow_token_usage (
+                id TEXT PRIMARY KEY,
+                run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+                workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+                task_id TEXT,
+                provider TEXT NOT NULL,
+                model TEXT,
+                token_kind TEXT NOT NULL,
+                token_count INTEGER NOT NULL,
+                emitted_at TEXT NOT NULL,
+                labels_json TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_runs_workflow_started ON runs(workflow_id, started_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_queued_runs_queue_status ON queued_runs(queue_name, status, priority DESC, queued_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_queued_runs_workflow_status ON queued_runs(workflow_id, status);
+            CREATE INDEX IF NOT EXISTS idx_workflow_mutex_locks_workflow ON workflow_mutex_locks(workflow_id);
+            CREATE INDEX IF NOT EXISTS idx_run_attempts_run_task ON run_attempts(run_id, task_id, attempt_number);
+            CREATE INDEX IF NOT EXISTS idx_run_tasks_run_task ON run_tasks(run_id, task_id);
+            CREATE INDEX IF NOT EXISTS idx_run_tasks_status ON run_tasks(status, started_at);
+            CREATE INDEX IF NOT EXISTS idx_run_metrics_run ON run_metrics(run_id);
+            CREATE INDEX IF NOT EXISTS idx_run_metrics_name_time ON run_metrics(metric_name, emitted_at);
+            CREATE INDEX IF NOT EXISTS idx_run_inputs_run ON run_inputs(run_id);
+            CREATE INDEX IF NOT EXISTS idx_run_outputs_run ON run_outputs(run_id);
+            CREATE INDEX IF NOT EXISTS idx_scheduler_assets_identity ON scheduler_assets(asset_kind, asset_namespace, asset_partition);
+            CREATE INDEX IF NOT EXISTS idx_run_assets_run ON run_assets(run_id);
+            CREATE INDEX IF NOT EXISTS idx_run_assets_identity_time ON run_assets(asset_kind, asset_namespace, asset_partition, emitted_at);
+            CREATE INDEX IF NOT EXISTS idx_run_lineage_run ON run_lineage(run_id);
+            CREATE INDEX IF NOT EXISTS idx_run_lineage_time ON run_lineage(emitted_at);
+            CREATE INDEX IF NOT EXISTS idx_idempotency_run_task ON scheduler_idempotency_keys(run_id, task_id);
+            CREATE INDEX IF NOT EXISTS idx_checkpoints_run_task ON scheduler_checkpoints(run_id, task_id);
+            CREATE INDEX IF NOT EXISTS idx_dead_letters_workflow ON scheduler_dead_letters(workflow_id, last_failure_at);
+            CREATE INDEX IF NOT EXISTS idx_queue_events_queue_time ON queue_events(queue_name, corpus, emitted_at);
+            CREATE INDEX IF NOT EXISTS idx_resource_samples_workflow_time ON workflow_resource_samples(workflow_id, sampled_at);
+            CREATE INDEX IF NOT EXISTS idx_resource_samples_run ON workflow_resource_samples(run_id);
+            CREATE INDEX IF NOT EXISTS idx_token_usage_workflow_time ON workflow_token_usage(workflow_id, emitted_at);
+            CREATE INDEX IF NOT EXISTS idx_token_usage_run ON workflow_token_usage(run_id);",
         )?;
         conn.execute_batch(
             "INSERT OR IGNORE INTO scheduler_config (key, value) VALUES ('global_parallelism_cap', '4');
@@ -469,7 +810,415 @@ impl Database {
         let _ = self.release_mutex_locks(id);
         Ok(())
     }
+}
 
+// Session 5 lands schema substrate before later sessions wire runtime callers.
+#[allow(dead_code)]
+impl Database {
+    pub fn insert_run_attempt(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        attempt_number: i64,
+        status: &str,
+        retry_reason: Option<&str>,
+    ) -> rusqlite::Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO run_attempts (id, run_id, task_id, attempt_number, status, started_at, retry_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, run_id, task_id, attempt_number, status, now, retry_reason],
+        )?;
+        Ok(id)
+    }
+
+    pub fn finish_run_attempt(
+        &self,
+        attempt_id: &str,
+        status: &str,
+        exit_code: Option<i32>,
+        error_type: Option<&str>,
+        error_message: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE run_attempts
+             SET status = ?2, finished_at = ?3, exit_code = ?4, error_type = ?5, error_message = ?6
+             WHERE id = ?1",
+            params![
+                attempt_id,
+                status,
+                now,
+                exit_code,
+                error_type,
+                error_message
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_run_task(
+        &self,
+        run_id: &str,
+        attempt_id: Option<&str>,
+        task_id: &str,
+        status: &str,
+        attempt_number: i64,
+        details: Option<&serde_json::Value>,
+    ) -> rusqlite::Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let details_json = json_to_string(details)?;
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO run_tasks (id, run_id, attempt_id, task_id, status, started_at, attempt_number, details_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, run_id, attempt_id, task_id, status, now, attempt_number, details_json],
+        )?;
+        Ok(id)
+    }
+
+    pub fn finish_run_task(
+        &self,
+        task_row_id: &str,
+        status: &str,
+        error_type: Option<&str>,
+        error_message: Option<&str>,
+        details: Option<&serde_json::Value>,
+    ) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let details_json = json_to_string(details)?;
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE run_tasks
+             SET status = ?2, finished_at = ?3, error_type = ?4, error_message = ?5, details_json = COALESCE(?6, details_json), updated_at = datetime('now')
+             WHERE id = ?1",
+            params![task_row_id, status, now, error_type, error_message, details_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_run_metric(
+        &self,
+        run_id: &str,
+        task_id: Option<&str>,
+        metric_name: &str,
+        metric_value: f64,
+        metric_unit: Option<&str>,
+        labels: Option<&serde_json::Value>,
+    ) -> rusqlite::Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let emitted_at = chrono::Utc::now().to_rfc3339();
+        let labels_json = json_to_string(labels)?;
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO run_metrics (id, run_id, task_id, metric_name, metric_value, metric_unit, emitted_at, labels_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, run_id, task_id, metric_name, metric_value, metric_unit, emitted_at, labels_json],
+        )?;
+        Ok(id)
+    }
+
+    pub fn insert_run_input(
+        &self,
+        run_id: &str,
+        task_id: Option<&str>,
+        key: &str,
+        value: &serde_json::Value,
+        schema_version: &str,
+    ) -> rusqlite::Result<String> {
+        self.insert_run_io_value("run_inputs", run_id, task_id, key, value, schema_version)
+    }
+
+    pub fn insert_run_output(
+        &self,
+        run_id: &str,
+        task_id: Option<&str>,
+        key: &str,
+        value: &serde_json::Value,
+        schema_version: &str,
+    ) -> rusqlite::Result<String> {
+        self.insert_run_io_value("run_outputs", run_id, task_id, key, value, schema_version)
+    }
+
+    fn insert_run_io_value(
+        &self,
+        table: &str,
+        run_id: &str,
+        task_id: Option<&str>,
+        key: &str,
+        value: &serde_json::Value,
+        schema_version: &str,
+    ) -> rusqlite::Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let recorded_at = chrono::Utc::now().to_rfc3339();
+        let value_json = serde_json::to_string(value)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let sql = format!(
+            "INSERT INTO {} (id, run_id, task_id, key, value_json, schema_version, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            table
+        );
+        let conn = self.conn()?;
+        conn.execute(
+            &sql,
+            params![
+                id,
+                run_id,
+                task_id,
+                key,
+                value_json,
+                schema_version,
+                recorded_at
+            ],
+        )?;
+        Ok(id)
+    }
+
+    pub fn upsert_scheduler_asset(
+        &self,
+        asset_kind: &str,
+        asset_namespace: &str,
+        asset_partition: &str,
+        last_action: Option<&str>,
+        last_writer_run_id: Option<&str>,
+        freshness_policy: Option<&serde_json::Value>,
+    ) -> rusqlite::Result<String> {
+        let asset_id = scheduler_asset_id(asset_kind, asset_namespace, asset_partition);
+        let now = chrono::Utc::now().to_rfc3339();
+        let freshness_policy_json = json_to_string(freshness_policy)?;
+        let last_written_at = last_action
+            .filter(|action| *action == "write")
+            .map(|_| now.clone());
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO scheduler_assets (
+                asset_id, asset_kind, asset_namespace, asset_partition, last_action, last_written_at, last_writer_run_id, freshness_policy_json, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))
+             ON CONFLICT(asset_kind, asset_namespace, asset_partition) DO UPDATE SET
+                last_action = COALESCE(excluded.last_action, scheduler_assets.last_action),
+                last_written_at = COALESCE(excluded.last_written_at, scheduler_assets.last_written_at),
+                last_writer_run_id = COALESCE(excluded.last_writer_run_id, scheduler_assets.last_writer_run_id),
+                freshness_policy_json = COALESCE(excluded.freshness_policy_json, scheduler_assets.freshness_policy_json),
+                updated_at = datetime('now')",
+            params![asset_id, asset_kind, asset_namespace, asset_partition, last_action, last_written_at, last_writer_run_id, freshness_policy_json],
+        )?;
+        Ok(asset_id)
+    }
+
+    pub fn insert_run_asset(
+        &self,
+        run_id: &str,
+        task_id: Option<&str>,
+        attempt_id: Option<&str>,
+        asset_kind: &str,
+        asset_namespace: &str,
+        asset_partition: &str,
+        action: &str,
+        metadata: Option<&serde_json::Value>,
+    ) -> rusqlite::Result<String> {
+        let asset_id = self.upsert_scheduler_asset(
+            asset_kind,
+            asset_namespace,
+            asset_partition,
+            Some(action),
+            Some(run_id),
+            None,
+        )?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let emitted_at = chrono::Utc::now().to_rfc3339();
+        let metadata_json = json_to_string(metadata)?;
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO run_assets (
+                id, run_id, task_id, attempt_id, asset_id, asset_kind, asset_namespace, asset_partition, action, emitted_at, metadata_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![id, run_id, task_id, attempt_id, asset_id, asset_kind, asset_namespace, asset_partition, action, emitted_at, metadata_json],
+        )?;
+        Ok(id)
+    }
+
+    pub fn insert_run_lineage(
+        &self,
+        run_id: &str,
+        task_id: Option<&str>,
+        attempt_id: Option<&str>,
+        openlineage_event: &serde_json::Value,
+    ) -> rusqlite::Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let emitted_at = chrono::Utc::now().to_rfc3339();
+        let openlineage_event_json = serde_json::to_string(openlineage_event)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO run_lineage (id, run_id, task_id, attempt_id, openlineage_event_json, emitted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, run_id, task_id, attempt_id, openlineage_event_json, emitted_at],
+        )?;
+        Ok(id)
+    }
+
+    pub fn insert_idempotency_key(
+        &self,
+        key: &str,
+        run_id: Option<&str>,
+        task_id: Option<&str>,
+        attempt_id: Option<&str>,
+    ) -> rusqlite::Result<bool> {
+        let created_at = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO scheduler_idempotency_keys (key, run_id, task_id, attempt_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![key, run_id, task_id, attempt_id, created_at],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    pub fn insert_scheduler_checkpoint(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        attempt_id: Option<&str>,
+        checkpoint_key: &str,
+        state_blob: &[u8],
+    ) -> rusqlite::Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let created_at = chrono::Utc::now().to_rfc3339();
+        let state_size_bytes = state_blob.len() as i64;
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO scheduler_checkpoints (
+                id, run_id, task_id, attempt_id, checkpoint_key, state_blob, state_size_bytes, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(run_id, task_id, checkpoint_key) DO UPDATE SET
+                attempt_id = excluded.attempt_id,
+                state_blob = excluded.state_blob,
+                state_size_bytes = excluded.state_size_bytes,
+                created_at = excluded.created_at",
+            params![id, run_id, task_id, attempt_id, checkpoint_key, state_blob, state_size_bytes, created_at],
+        )?;
+        Ok(id)
+    }
+
+    pub fn upsert_scheduler_dead_letter(
+        &self,
+        run_id: &str,
+        workflow_id: &str,
+        task_id: Option<&str>,
+        last_attempt_id: Option<&str>,
+        last_exception: &str,
+    ) -> rusqlite::Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let last_failure_at = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO scheduler_dead_letters (
+                id, run_id, workflow_id, task_id, last_attempt_id, last_failure_at, last_exception, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+             ON CONFLICT(run_id) DO UPDATE SET
+                task_id = excluded.task_id,
+                last_attempt_id = excluded.last_attempt_id,
+                last_failure_at = excluded.last_failure_at,
+                last_exception = excluded.last_exception,
+                acknowledged_at = NULL,
+                updated_at = datetime('now')",
+            params![id, run_id, workflow_id, task_id, last_attempt_id, last_failure_at, last_exception],
+        )?;
+        Ok(id)
+    }
+
+    pub fn insert_queue_event(
+        &self,
+        queue_name: &str,
+        corpus: &str,
+        workflow_id: Option<&str>,
+        run_id: Option<&str>,
+        event_type: &str,
+        reason: Option<&str>,
+        details: Option<&serde_json::Value>,
+    ) -> rusqlite::Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let emitted_at = chrono::Utc::now().to_rfc3339();
+        let details_json = json_to_string(details)?;
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO queue_events (id, queue_name, corpus, workflow_id, run_id, event_type, reason, emitted_at, details_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, queue_name, corpus, workflow_id, run_id, event_type, reason, emitted_at, details_json],
+        )?;
+        Ok(id)
+    }
+
+    pub fn insert_workflow_resource_sample(
+        &self,
+        sample: &WorkflowResourceSample,
+    ) -> rusqlite::Result<String> {
+        let id = if sample.id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            sample.id.clone()
+        };
+        let labels_json = json_to_string(sample.labels.as_ref())?;
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO workflow_resource_samples (
+                id, run_id, workflow_id, queue_name, corpus, pid, sampled_at, cpu_percent, memory_rss_bytes, memory_vms_bytes, swap_bytes, labels_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                id,
+                sample.run_id.as_deref(),
+                &sample.workflow_id,
+                sample.queue_name.as_deref(),
+                &sample.corpus,
+                sample.pid,
+                &sample.sampled_at,
+                sample.cpu_percent,
+                sample.memory_rss_bytes,
+                sample.memory_vms_bytes,
+                sample.swap_bytes,
+                labels_json
+            ],
+        )?;
+        Ok(id)
+    }
+
+    pub fn insert_workflow_token_usage(
+        &self,
+        usage: &WorkflowTokenUsage,
+    ) -> rusqlite::Result<String> {
+        let id = if usage.id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            usage.id.clone()
+        };
+        let labels_json = json_to_string(usage.labels.as_ref())?;
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO workflow_token_usage (
+                id, run_id, workflow_id, task_id, provider, model, token_kind, token_count, emitted_at, labels_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                id,
+                usage.run_id.as_deref(),
+                &usage.workflow_id,
+                usage.task_id.as_deref(),
+                &usage.provider,
+                usage.model.as_deref(),
+                &usage.token_kind,
+                usage.token_count,
+                &usage.emitted_at,
+                labels_json
+            ],
+        )?;
+        Ok(id)
+    }
+}
+
+impl Database {
     pub fn get_run(&self, id: &str) -> rusqlite::Result<Run> {
         let conn = self.conn()?;
         conn.query_row(
@@ -940,6 +1689,17 @@ impl Database {
     }
 }
 
+fn json_to_string(value: Option<&serde_json::Value>) -> rusqlite::Result<Option<String>> {
+    value
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+fn scheduler_asset_id(asset_kind: &str, asset_namespace: &str, asset_partition: &str) -> String {
+    format!("{}:{}:{}", asset_kind, asset_namespace, asset_partition)
+}
+
 fn run_from_row(row: &rusqlite::Row) -> Run {
     let stdout: Option<String> = row.get(5).unwrap_or(None);
     let summary = stdout.as_deref().and_then(extract_summary);
@@ -1217,6 +1977,330 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(db.cancel_queued_run(&queued_id_2).unwrap(), 1);
         let rows = db.list_queued_runs(10).unwrap();
         assert!(rows.iter().any(|row| row.status == "cancelled"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_5_schema_tables_and_indexes_are_created() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let conn = db.conn().unwrap();
+
+        let tables: std::collections::HashSet<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for table in [
+            "run_attempts",
+            "run_tasks",
+            "run_metrics",
+            "run_inputs",
+            "run_outputs",
+            "scheduler_assets",
+            "run_assets",
+            "run_lineage",
+            "scheduler_idempotency_keys",
+            "scheduler_checkpoints",
+            "scheduler_dead_letters",
+            "queue_events",
+            "workflow_resource_samples",
+            "workflow_token_usage",
+        ] {
+            assert!(tables.contains(table), "missing Session 5 table {table}");
+        }
+
+        let workflow_columns: std::collections::HashSet<String> = conn
+            .prepare("PRAGMA table_info(workflows)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(workflow_columns.contains("domain"));
+
+        let indexes: std::collections::HashSet<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for index in [
+            "idx_runs_workflow_started",
+            "idx_run_tasks_run_task",
+            "idx_run_attempts_run_task",
+            "idx_run_assets_identity_time",
+            "idx_queue_events_queue_time",
+            "idx_resource_samples_workflow_time",
+            "idx_token_usage_workflow_time",
+        ] {
+            assert!(indexes.contains(index), "missing Session 5 index {index}");
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_5_schema_migrates_existing_scheduler_db_without_data_loss() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE workflows (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    script_path TEXT NOT NULL,
+                    cron_schedule TEXT NOT NULL,
+                    enabled INTEGER DEFAULT 1,
+                    async_mode INTEGER DEFAULT 0,
+                    corpus TEXT NOT NULL DEFAULT 'source',
+                    trigger_config TEXT,
+                    queue_config TEXT,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    updated_at TEXT DEFAULT (datetime('now')),
+                    last_run_at TEXT,
+                    email_on_failure INTEGER DEFAULT 1,
+                    timezone TEXT DEFAULT 'UTC'
+                );
+                CREATE TABLE runs (
+                    id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL REFERENCES workflows(id),
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    exit_code INTEGER,
+                    stdout TEXT,
+                    stderr TEXT,
+                    result_url TEXT,
+                    trigger_kind TEXT,
+                    trigger_payload TEXT,
+                    upstream_run_id TEXT,
+                    input_json TEXT,
+                    rerun_of_run_id TEXT,
+                    status TEXT DEFAULT 'running',
+                    error_analysis TEXT
+                );
+                INSERT INTO workflows (id, name, script_path, cron_schedule)
+                VALUES ('wf-1', 'Existing Workflow', 'scripts/workflows/noop.py', '0 0 * * *');
+                INSERT INTO runs (id, workflow_id, started_at, status)
+                VALUES ('run-1', 'wf-1', '2026-05-09T00:00:00Z', 'success');",
+            )
+            .unwrap();
+        }
+
+        let db = Database::new(&dir);
+        let conn = db.conn().unwrap();
+        let run_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runs WHERE id = 'run-1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(run_count, 1);
+        let has_run_tasks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'run_tasks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_run_tasks, 1);
+        let has_domain: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('workflows') WHERE name = 'domain'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_domain, 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_5_insert_helpers_record_history_assets_and_instrumentation() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = db
+            .create_workflow(
+                "History Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                None,
+                Some(r#"{"queue":"source-default"}"#),
+            )
+            .unwrap();
+        let run = db
+            .create_run_with_context(&workflow.id, Some("manual"), None, None, None, None)
+            .unwrap();
+
+        let attempt_id = db
+            .insert_run_attempt(&run.id, "discover", 0, "running", None)
+            .unwrap();
+        let task_row_id = db
+            .insert_run_task(
+                &run.id,
+                Some(&attempt_id),
+                "discover",
+                "started",
+                0,
+                Some(&serde_json::json!({"phase": "start"})),
+            )
+            .unwrap();
+        db.finish_run_task(
+            &task_row_id,
+            "succeeded",
+            None,
+            None,
+            Some(&serde_json::json!({"phase": "done"})),
+        )
+        .unwrap();
+        db.finish_run_attempt(&attempt_id, "succeeded", Some(0), None, None)
+            .unwrap();
+        db.insert_run_metric(
+            &run.id,
+            Some("discover"),
+            "items_seen",
+            3.0,
+            Some("count"),
+            Some(&serde_json::json!({"source": "test"})),
+        )
+        .unwrap();
+        db.insert_run_input(
+            &run.id,
+            Some("discover"),
+            "request",
+            &serde_json::json!({"kind": "fixture"}),
+            "1.0.0",
+        )
+        .unwrap();
+        db.insert_run_output(
+            &run.id,
+            Some("discover"),
+            "result",
+            &serde_json::json!({"ok": true}),
+            "1.0.0",
+        )
+        .unwrap();
+        db.insert_run_asset(
+            &run.id,
+            Some("discover"),
+            Some(&attempt_id),
+            "source",
+            "slack",
+            "channel:C123",
+            "write",
+            Some(&serde_json::json!({"count": 3})),
+        )
+        .unwrap();
+        db.insert_run_lineage(
+            &run.id,
+            Some("discover"),
+            Some(&attempt_id),
+            &serde_json::json!({"eventType": "COMPLETE"}),
+        )
+        .unwrap();
+        assert!(db
+            .insert_idempotency_key(
+                "wf-1:run-1:discover:item-1",
+                Some(&run.id),
+                Some("discover"),
+                Some(&attempt_id)
+            )
+            .unwrap());
+        assert!(!db
+            .insert_idempotency_key(
+                "wf-1:run-1:discover:item-1",
+                Some(&run.id),
+                Some("discover"),
+                Some(&attempt_id)
+            )
+            .unwrap());
+        db.insert_scheduler_checkpoint(&run.id, "discover", Some(&attempt_id), "latest", b"state")
+            .unwrap();
+        db.upsert_scheduler_dead_letter(
+            &run.id,
+            &workflow.id,
+            Some("discover"),
+            Some(&attempt_id),
+            "boom",
+        )
+        .unwrap();
+        db.insert_queue_event(
+            "source-default",
+            "source",
+            Some(&workflow.id),
+            Some(&run.id),
+            "admitted",
+            None,
+            Some(&serde_json::json!({"priority": 0})),
+        )
+        .unwrap();
+        db.insert_workflow_resource_sample(&WorkflowResourceSample {
+            id: String::new(),
+            run_id: Some(run.id.clone()),
+            workflow_id: workflow.id.clone(),
+            queue_name: Some("source-default".to_string()),
+            corpus: "source".to_string(),
+            pid: Some(123),
+            sampled_at: chrono::Utc::now().to_rfc3339(),
+            cpu_percent: Some(1.25),
+            memory_rss_bytes: Some(1024),
+            memory_vms_bytes: Some(2048),
+            swap_bytes: Some(0),
+            labels: Some(serde_json::json!({"host": "local"})),
+        })
+        .unwrap();
+        db.insert_workflow_token_usage(&WorkflowTokenUsage {
+            id: String::new(),
+            run_id: Some(run.id.clone()),
+            workflow_id: workflow.id.clone(),
+            task_id: Some("discover".to_string()),
+            provider: "anthropic".to_string(),
+            model: Some("claude".to_string()),
+            token_kind: "input".to_string(),
+            token_count: 42,
+            emitted_at: chrono::Utc::now().to_rfc3339(),
+            labels: None,
+        })
+        .unwrap();
+
+        let conn = db.conn().unwrap();
+        for table in [
+            "run_attempts",
+            "run_tasks",
+            "run_metrics",
+            "run_inputs",
+            "run_outputs",
+            "scheduler_assets",
+            "run_assets",
+            "run_lineage",
+            "scheduler_idempotency_keys",
+            "scheduler_checkpoints",
+            "scheduler_dead_letters",
+            "queue_events",
+            "workflow_resource_samples",
+            "workflow_token_usage",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1, "expected one row in {table}");
+        }
 
         let _ = std::fs::remove_dir_all(dir);
     }
