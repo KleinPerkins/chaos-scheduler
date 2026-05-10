@@ -12,6 +12,7 @@ export interface Workflow {
   async_mode: boolean;
   email_on_failure: boolean;
   corpus: WorkflowCorpus;
+  domain?: string | null;
   timezone: string;
   trigger_config?: string | null;
   queue_config?: string | null;
@@ -115,6 +116,7 @@ export interface WorkflowPayload {
   emailOnFailure?: boolean;
   timezone?: string;
   corpus?: WorkflowCorpus;
+  domain?: string | null;
   triggerConfig?: string;
   queueConfig?: string;
 }

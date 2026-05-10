@@ -1997,6 +1997,7 @@ mod tests {
             "UTC",
             "source",
             None,
+            None,
             Some(r#"{"queue":"source-default"}"#),
         )
         .unwrap();

@@ -601,6 +601,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_checkpoints_run_task ON scheduler_checkpoints(run_id, task_id);
             CREATE INDEX IF NOT EXISTS idx_dead_letters_workflow ON scheduler_dead_letters(workflow_id, last_failure_at);
             CREATE INDEX IF NOT EXISTS idx_queue_events_queue_time ON queue_events(queue_name, corpus, emitted_at);
+            CREATE INDEX IF NOT EXISTS idx_queue_events_run ON queue_events(run_id);
             CREATE INDEX IF NOT EXISTS idx_resource_samples_workflow_time ON workflow_resource_samples(workflow_id, sampled_at);
             CREATE INDEX IF NOT EXISTS idx_resource_samples_run ON workflow_resource_samples(run_id);
             CREATE INDEX IF NOT EXISTS idx_token_usage_workflow_time ON workflow_token_usage(workflow_id, emitted_at);
@@ -693,14 +694,15 @@ impl Database {
         email_on_failure: bool,
         timezone: &str,
         corpus: &str,
+        domain: Option<&str>,
         trigger_config: Option<&str>,
         queue_config: Option<&str>,
     ) -> rusqlite::Result<Workflow> {
         let id = uuid::Uuid::new_v4().to_string();
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO workflows (id, name, description, script_path, cron_schedule, async_mode, email_on_failure, timezone, corpus, trigger_config, queue_config) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![id, name, description, script_path, cron_schedule, async_mode as i32, email_on_failure as i32, timezone, corpus, trigger_config, queue_config],
+            "INSERT INTO workflows (id, name, description, script_path, cron_schedule, async_mode, email_on_failure, timezone, corpus, domain, trigger_config, queue_config) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![id, name, description, script_path, cron_schedule, async_mode as i32, email_on_failure as i32, timezone, corpus, domain, trigger_config, queue_config],
         )?;
         self.get_workflow(&id)
     }
@@ -717,21 +719,36 @@ impl Database {
         email_on_failure: bool,
         timezone: &str,
         corpus: &str,
+        domain: Option<&str>,
         trigger_config: Option<&str>,
         queue_config: Option<&str>,
     ) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
         conn.execute(
-            "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, corpus = ?10, trigger_config = ?11, queue_config = ?12, updated_at = datetime('now') WHERE id = ?1",
-            params![id, name, description, script_path, cron_schedule, enabled as i32, async_mode as i32, email_on_failure as i32, timezone, corpus, trigger_config, queue_config],
+            "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, corpus = ?10, domain = ?11, trigger_config = ?12, queue_config = ?13, updated_at = datetime('now') WHERE id = ?1",
+            params![id, name, description, script_path, cron_schedule, enabled as i32, async_mode as i32, email_on_failure as i32, timezone, corpus, domain, trigger_config, queue_config],
         )?;
         self.get_workflow(id)
     }
 
     pub fn delete_workflow(&self, id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn()?;
-        conn.execute("DELETE FROM runs WHERE workflow_id = ?1", params![id])?;
-        conn.execute("DELETE FROM workflows WHERE id = ?1", params![id])?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM workflow_mutex_locks WHERE workflow_id = ?1 OR run_id IN (SELECT id FROM runs WHERE workflow_id = ?1)",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM queued_runs WHERE workflow_id = ?1 OR run_id IN (SELECT id FROM runs WHERE workflow_id = ?1)",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM workflow_trigger_state WHERE workflow_id = ?1",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM runs WHERE workflow_id = ?1", params![id])?;
+        tx.execute("DELETE FROM workflows WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1911,6 +1928,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 "source",
                 None,
                 None,
+                None,
             )
             .unwrap();
         let run = db
@@ -1960,6 +1978,51 @@ SUMMARY_JSON:{\"title\":\"current\"}
     }
 
     #[test]
+    fn workflow_domain_round_trips_through_write_helpers() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        let workflow = db
+            .create_workflow(
+                "Owned Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(workflow.domain.as_deref(), Some("scheduler"));
+
+        let updated = db
+            .update_workflow(
+                &workflow.id,
+                "Owned Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 1 * * *",
+                true,
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("agent-ecosystem"),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(updated.domain.as_deref(), Some("agent-ecosystem"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn queued_runs_can_be_listed_admitted_and_cancelled() {
         let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1974,6 +2037,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 true,
                 "UTC",
                 "source",
+                None,
                 None,
                 Some(r#"{"queue":"source-default","priority":5}"#),
             )
@@ -2063,6 +2127,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
             "idx_run_outputs_unique_key",
             "idx_run_assets_identity_time",
             "idx_queue_events_queue_time",
+            "idx_queue_events_run",
             "idx_resource_samples_workflow_time",
             "idx_token_usage_workflow_time",
         ] {
@@ -2165,6 +2230,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 true,
                 "UTC",
                 "source",
+                None,
                 None,
                 Some(r#"{"queue":"source-default"}"#),
             )
@@ -2418,12 +2484,20 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 "UTC",
                 "source",
                 None,
+                None,
                 Some(r#"{"queue":"source-default"}"#),
             )
             .unwrap();
         let run = db
             .create_run_with_context(&workflow.id, Some("manual"), None, None, None, None)
             .unwrap();
+        db.upsert_queued_run(&workflow.id, "source-default", 0)
+            .unwrap();
+        db.mark_queued_run_admitted(&workflow.id, &run.id).unwrap();
+        let mutex_keys = vec!["tag:source:source-default:cleanup".to_string()];
+        assert!(db
+            .acquire_mutex_locks(&workflow.id, &run.id, &mutex_keys)
+            .unwrap());
         let attempt_id = db
             .insert_run_attempt(&run.id, "cleanup", 0, "running", None)
             .unwrap();
@@ -2536,6 +2610,8 @@ SUMMARY_JSON:{\"title\":\"current\"}
             "scheduler_dead_letters",
             "workflow_resource_samples",
             "workflow_token_usage",
+            "queued_runs",
+            "workflow_mutex_locks",
         ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |row| {

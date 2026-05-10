@@ -93,6 +93,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           emailOnFailure,
           timezone: LOCAL_TZ,
           corpus: workflow.corpus ?? "source",
+          domain: workflow.domain,
         });
       } else {
         await createWorkflow({

@@ -97,6 +97,7 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
       emailOnFailure: w.email_on_failure,
       timezone: w.timezone,
       corpus: w.corpus ?? "source",
+      domain: w.domain,
     });
     refresh();
   };

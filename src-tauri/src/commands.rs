@@ -41,6 +41,7 @@ pub fn create_workflow(
     email_on_failure: Option<bool>,
     timezone: Option<String>,
     corpus: Option<String>,
+    domain: Option<String>,
     trigger_config: Option<String>,
     queue_config: Option<String>,
 ) -> Result<Workflow, String> {
@@ -55,6 +56,7 @@ pub fn create_workflow(
             email_on_failure.unwrap_or(true),
             timezone.as_deref().unwrap_or("UTC"),
             corpus.as_deref().unwrap_or("instance"),
+            domain.as_deref(),
             trigger_config.as_deref(),
             queue_config.as_deref(),
         )
@@ -74,6 +76,7 @@ pub fn update_workflow(
     email_on_failure: Option<bool>,
     timezone: Option<String>,
     corpus: Option<String>,
+    domain: Option<String>,
     trigger_config: Option<String>,
     queue_config: Option<String>,
 ) -> Result<Workflow, String> {
@@ -91,6 +94,7 @@ pub fn update_workflow(
             email_on_failure.unwrap_or(true),
             timezone.as_deref().unwrap_or("UTC"),
             corpus.as_deref().unwrap_or(&existing.corpus),
+            domain.as_deref().or(existing.domain.as_deref()),
             trigger_config
                 .as_deref()
                 .or(existing.trigger_config.as_deref()),
