@@ -22,6 +22,7 @@ pub struct Workflow {
     pub email_on_failure: bool,
     #[serde(default = "default_source_corpus")]
     pub corpus: String,
+    pub domain: Option<String>,
     #[serde(default = "default_utc")]
     pub timezone: String,
     pub trigger_config: Option<String>,
@@ -586,7 +587,9 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_run_metrics_run ON run_metrics(run_id);
             CREATE INDEX IF NOT EXISTS idx_run_metrics_name_time ON run_metrics(metric_name, emitted_at);
             CREATE INDEX IF NOT EXISTS idx_run_inputs_run ON run_inputs(run_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_run_inputs_unique_key ON run_inputs(run_id, COALESCE(task_id, ''), key);
             CREATE INDEX IF NOT EXISTS idx_run_outputs_run ON run_outputs(run_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_run_outputs_unique_key ON run_outputs(run_id, COALESCE(task_id, ''), key);
             CREATE INDEX IF NOT EXISTS idx_scheduler_assets_identity ON scheduler_assets(asset_kind, asset_namespace, asset_partition);
             CREATE INDEX IF NOT EXISTS idx_run_assets_run ON run_assets(run_id);
             CREATE INDEX IF NOT EXISTS idx_run_assets_identity_time ON run_assets(asset_kind, asset_namespace, asset_partition, emitted_at);
@@ -612,7 +615,7 @@ impl Database {
     pub fn list_workflows(&self) -> rusqlite::Result<Vec<Workflow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, trigger_config, queue_config FROM workflows ORDER BY corpus, name"
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config FROM workflows ORDER BY corpus, name"
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(Workflow {
@@ -633,8 +636,9 @@ impl Database {
                 corpus: row
                     .get::<_, String>(12)
                     .unwrap_or_else(|_| "source".to_string()),
-                trigger_config: row.get(13).unwrap_or(None),
-                queue_config: row.get(14).unwrap_or(None),
+                domain: row.get(13).unwrap_or(None),
+                trigger_config: row.get(14).unwrap_or(None),
+                queue_config: row.get(15).unwrap_or(None),
             })
         })?;
         rows.collect()
@@ -643,7 +647,7 @@ impl Database {
     pub fn get_workflow(&self, id: &str) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, trigger_config, queue_config FROM workflows WHERE id = ?1",
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config FROM workflows WHERE id = ?1",
             params![id],
             |row| {
                 Ok(Workflow {
@@ -660,8 +664,9 @@ impl Database {
                     email_on_failure: row.get::<_, i32>(10).unwrap_or(1) != 0,
                     timezone: row.get::<_, String>(11).unwrap_or_else(|_| "UTC".to_string()),
                     corpus: row.get::<_, String>(12).unwrap_or_else(|_| "source".to_string()),
-                    trigger_config: row.get(13).unwrap_or(None),
-                    queue_config: row.get(14).unwrap_or(None),
+                    domain: row.get(13).unwrap_or(None),
+                    trigger_config: row.get(14).unwrap_or(None),
+                    queue_config: row.get(15).unwrap_or(None),
                 })
             },
         )
@@ -993,6 +998,11 @@ impl Database {
         let last_written_at = last_action
             .filter(|action| *action == "write")
             .map(|_| now.clone());
+        let last_writer_run_id = if last_written_at.is_some() {
+            last_writer_run_id
+        } else {
+            None
+        };
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO scheduler_assets (
@@ -1020,6 +1030,11 @@ impl Database {
         action: &str,
         metadata: Option<&serde_json::Value>,
     ) -> rusqlite::Result<String> {
+        if !matches!(action, "read" | "write") {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "asset action must be read or write".to_string(),
+            ));
+        }
         let asset_id = self.upsert_scheduler_asset(
             asset_kind,
             asset_namespace,
@@ -1101,7 +1116,11 @@ impl Database {
                 created_at = excluded.created_at",
             params![id, run_id, task_id, attempt_id, checkpoint_key, state_blob, state_size_bytes, created_at],
         )?;
-        Ok(id)
+        conn.query_row(
+            "SELECT id FROM scheduler_checkpoints WHERE run_id = ?1 AND task_id = ?2 AND checkpoint_key = ?3",
+            params![run_id, task_id, checkpoint_key],
+            |row| row.get(0),
+        )
     }
 
     pub fn upsert_scheduler_dead_letter(
@@ -1128,7 +1147,11 @@ impl Database {
                 updated_at = datetime('now')",
             params![id, run_id, workflow_id, task_id, last_attempt_id, last_failure_at, last_exception],
         )?;
-        Ok(id)
+        conn.query_row(
+            "SELECT id FROM scheduler_dead_letters WHERE run_id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )
     }
 
     pub fn insert_queue_event(
@@ -2034,6 +2057,8 @@ SUMMARY_JSON:{\"title\":\"current\"}
             "idx_runs_workflow_started",
             "idx_run_tasks_run_task",
             "idx_run_attempts_run_task",
+            "idx_run_inputs_unique_key",
+            "idx_run_outputs_unique_key",
             "idx_run_assets_identity_time",
             "idx_queue_events_queue_time",
             "idx_resource_samples_workflow_time",
@@ -2180,15 +2205,24 @@ SUMMARY_JSON:{\"title\":\"current\"}
         .unwrap();
         db.insert_run_input(
             &run.id,
-            Some("discover"),
+            None,
             "request",
             &serde_json::json!({"kind": "fixture"}),
             "1.0.0",
         )
         .unwrap();
+        assert!(db
+            .insert_run_input(
+                &run.id,
+                None,
+                "request",
+                &serde_json::json!({"kind": "duplicate"}),
+                "1.0.0",
+            )
+            .is_err());
         db.insert_run_output(
             &run.id,
-            Some("discover"),
+            None,
             "result",
             &serde_json::json!({"ok": true}),
             "1.0.0",
@@ -2203,6 +2237,20 @@ SUMMARY_JSON:{\"title\":\"current\"}
             "channel:C123",
             "write",
             Some(&serde_json::json!({"count": 3})),
+        )
+        .unwrap();
+        let read_run = db
+            .create_run_with_context(&workflow.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        db.insert_run_asset(
+            &read_run.id,
+            Some("discover"),
+            Some(&attempt_id),
+            "source",
+            "slack",
+            "channel:C123",
+            "read",
+            None,
         )
         .unwrap();
         db.insert_run_lineage(
@@ -2228,16 +2276,38 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 Some(&attempt_id)
             )
             .unwrap());
-        db.insert_scheduler_checkpoint(&run.id, "discover", Some(&attempt_id), "latest", b"state")
+        let checkpoint_id = db
+            .insert_scheduler_checkpoint(&run.id, "discover", Some(&attempt_id), "latest", b"state")
             .unwrap();
-        db.upsert_scheduler_dead_letter(
-            &run.id,
-            &workflow.id,
-            Some("discover"),
-            Some(&attempt_id),
-            "boom",
-        )
-        .unwrap();
+        let checkpoint_id_2 = db
+            .insert_scheduler_checkpoint(
+                &run.id,
+                "discover",
+                Some(&attempt_id),
+                "latest",
+                b"new-state",
+            )
+            .unwrap();
+        assert_eq!(checkpoint_id, checkpoint_id_2);
+        let dead_letter_id = db
+            .upsert_scheduler_dead_letter(
+                &run.id,
+                &workflow.id,
+                Some("discover"),
+                Some(&attempt_id),
+                "boom",
+            )
+            .unwrap();
+        let dead_letter_id_2 = db
+            .upsert_scheduler_dead_letter(
+                &run.id,
+                &workflow.id,
+                Some("discover"),
+                Some(&attempt_id),
+                "boom again",
+            )
+            .unwrap();
+        assert_eq!(dead_letter_id, dead_letter_id_2);
         db.insert_queue_event(
             "source-default",
             "source",
@@ -2278,29 +2348,54 @@ SUMMARY_JSON:{\"title\":\"current\"}
         .unwrap();
 
         let conn = db.conn().unwrap();
-        for table in [
-            "run_attempts",
-            "run_tasks",
-            "run_metrics",
-            "run_inputs",
-            "run_outputs",
-            "scheduler_assets",
-            "run_assets",
-            "run_lineage",
-            "scheduler_idempotency_keys",
-            "scheduler_checkpoints",
-            "scheduler_dead_letters",
-            "queue_events",
-            "workflow_resource_samples",
-            "workflow_token_usage",
+        for (table, expected_count) in [
+            ("run_attempts", 1),
+            ("run_tasks", 1),
+            ("run_metrics", 1),
+            ("run_inputs", 1),
+            ("run_outputs", 1),
+            ("scheduler_assets", 1),
+            ("run_assets", 2),
+            ("run_lineage", 1),
+            ("scheduler_idempotency_keys", 1),
+            ("scheduler_checkpoints", 1),
+            ("scheduler_dead_letters", 1),
+            ("queue_events", 1),
+            ("workflow_resource_samples", 1),
+            ("workflow_token_usage", 1),
         ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |row| {
                     row.get(0)
                 })
                 .unwrap();
-            assert_eq!(count, 1, "expected one row in {table}");
+            assert_eq!(count, expected_count, "unexpected row count in {table}");
         }
+        let asset_state: (String, String) = conn
+            .query_row(
+                "SELECT last_action, last_writer_run_id FROM scheduler_assets WHERE asset_kind = 'source' AND asset_namespace = 'slack'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(asset_state.0, "read");
+        assert_eq!(asset_state.1, run.id);
+        let checkpoint_blob: Vec<u8> = conn
+            .query_row(
+                "SELECT state_blob FROM scheduler_checkpoints WHERE id = ?1",
+                params![checkpoint_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(checkpoint_blob, b"new-state");
+        let dead_letter_exception: String = conn
+            .query_row(
+                "SELECT last_exception FROM scheduler_dead_letters WHERE id = ?1",
+                params![dead_letter_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dead_letter_exception, "boom again");
 
         let _ = std::fs::remove_dir_all(dir);
     }
