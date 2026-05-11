@@ -97,6 +97,45 @@ export interface SlaViolation {
   severity: string;
 }
 
+
+export interface WorkflowResourceSample {
+  id: string;
+  run_id?: string | null;
+  workflow_id: string;
+  queue_name?: string | null;
+  corpus: WorkflowCorpus;
+  pid?: number | null;
+  sampled_at: string;
+  cpu_percent?: number | null;
+  memory_rss_bytes?: number | null;
+  memory_vms_bytes?: number | null;
+  swap_bytes?: number | null;
+  labels?: unknown;
+}
+
+export interface WorkflowTokenUsageRollup {
+  time_bucket?: string | null;
+  workflow_id?: string | null;
+  corpus?: string | null;
+  domain?: string | null;
+  queue_name?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  token_kind?: string | null;
+  total_tokens: number;
+  call_count: number;
+}
+
+export type TokenRollupDimension =
+  | "time_bucket"
+  | "workflow_id"
+  | "corpus"
+  | "domain"
+  | "queue_name"
+  | "provider"
+  | "model"
+  | "token_kind";
+
 export interface NextRun {
   workflow_id: string;
   workflow_name: string;
@@ -247,6 +286,22 @@ export function getWorkflowHistoryBuckets(
 
 export function getSlaViolations(): Promise<SlaViolation[]> {
   return invoke("get_sla_violations");
+}
+
+
+export function queryResourceSamples(
+  workflowId: string,
+  timeWindow = "24h",
+): Promise<WorkflowResourceSample[]> {
+  return invoke("query_resource_samples", { workflowId, timeWindow });
+}
+
+export function queryTokenUsageRollup(
+  groupBy?: TokenRollupDimension[],
+  timeWindow = "24h",
+  timeBucket: "minute" | "hour" | "day" = "hour",
+): Promise<WorkflowTokenUsageRollup[]> {
+  return invoke("query_token_usage_rollup", { groupBy, timeWindow, timeBucket });
 }
 
 export function getSchedulerStatus(): Promise<SchedulerStatus> {

@@ -1,16 +1,16 @@
-use crate::db::Database;
+use crate::db::{Database, WorkflowResourceSample};
 use chrono::Utc;
 use chrono_tz::Tz;
 use cron::Schedule;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::process::{Command, Output, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -20,6 +20,31 @@ use std::os::unix::process::CommandExt;
 
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static SLA_NOTIFICATION_CACHE: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+
+const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Clone)]
+struct ResourceSampleMetadata {
+    db: Arc<Database>,
+    run_id: String,
+    workflow_id: String,
+    queue_name: Option<String>,
+    corpus: String,
+}
+
+struct ResourceSamplerHandle {
+    stop_tx: mpsc::Sender<()>,
+    join: std::thread::JoinHandle<()>,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessStat {
+    pid: i64,
+    ppid: i64,
+    cpu_percent: f64,
+    rss_kb: i64,
+    vms_kb: i64,
+}
 
 pub struct WorkflowScheduler {
     db: Arc<Database>,
@@ -623,13 +648,29 @@ pub fn execute_workflow_with_context(
         return Err(reason);
     }
 
-    let output = run_workflow_command(build_workflow_command(
-        &workflow.script_path,
-        chaos_labs_root,
-        python_path,
-        &run.id,
-        input_json,
-    ));
+    let sample_metadata = ResourceSampleMetadata {
+        db: Arc::clone(db),
+        run_id: run.id.clone(),
+        workflow_id: workflow.id.clone(),
+        queue_name: Some(queue_config.queue.clone()),
+        corpus: queue_config.corpus.clone(),
+    };
+
+    let output = run_workflow_command(
+        build_workflow_command(
+            &workflow.script_path,
+            chaos_labs_root,
+            python_path,
+            &run.id,
+            &workflow.id,
+            &queue_config.queue,
+            &queue_config.corpus,
+            workflow.domain.as_deref(),
+            db.path(),
+            input_json,
+        ),
+        Some(sample_metadata.clone()),
+    );
 
     match output {
         Ok((output, task_events_raw)) => {
@@ -672,6 +713,7 @@ pub fn execute_workflow_with_context(
                         &db,
                         &py,
                         &workflow_id,
+                        sample_metadata,
                         notify_success,
                         notify_failure,
                     );
@@ -885,6 +927,11 @@ fn build_workflow_command(
     chaos_labs_root: &str,
     python_path: &str,
     run_id: &str,
+    workflow_id: &str,
+    queue_name: &str,
+    corpus: &str,
+    domain: Option<&str>,
+    scheduler_db_path: &str,
     input_json: Option<&str>,
 ) -> Command {
     let is_shell_cmd = script_path.contains('=') || script_path.contains("/bin/python");
@@ -895,7 +942,14 @@ fn build_workflow_command(
             .arg(script_path)
             .current_dir(chaos_labs_root)
             .env("CHAOS_LABS_ROOT", chaos_labs_root)
-            .env("CHAOS_LABS_SCHEDULER_RUN_ID", run_id);
+            .env("CHAOS_LABS_SCHEDULER_RUN_ID", run_id)
+            .env("CHAOS_LABS_SCHEDULER_WORKFLOW_ID", workflow_id)
+            .env("CHAOS_LABS_SCHEDULER_QUEUE", queue_name)
+            .env("CHAOS_LABS_SCHEDULER_CORPUS", corpus)
+            .env("CHAOS_LABS_SCHEDULER_DB_PATH", scheduler_db_path);
+        if let Some(domain) = domain {
+            cmd.env("CHAOS_LABS_SCHEDULER_DOMAIN", domain);
+        }
         if let Some(input) = input_json {
             cmd.env("CHAOS_LABS_WORKFLOW_INPUT_JSON", input);
         }
@@ -914,7 +968,14 @@ fn build_workflow_command(
         }
         cmd.current_dir(chaos_labs_root)
             .env("CHAOS_LABS_ROOT", chaos_labs_root)
-            .env("CHAOS_LABS_SCHEDULER_RUN_ID", run_id);
+            .env("CHAOS_LABS_SCHEDULER_RUN_ID", run_id)
+            .env("CHAOS_LABS_SCHEDULER_WORKFLOW_ID", workflow_id)
+            .env("CHAOS_LABS_SCHEDULER_QUEUE", queue_name)
+            .env("CHAOS_LABS_SCHEDULER_CORPUS", corpus)
+            .env("CHAOS_LABS_SCHEDULER_DB_PATH", scheduler_db_path);
+        if let Some(domain) = domain {
+            cmd.env("CHAOS_LABS_SCHEDULER_DOMAIN", domain);
+        }
         if let Some(input) = input_json {
             cmd.env("CHAOS_LABS_WORKFLOW_INPUT_JSON", input);
         }
@@ -923,7 +984,10 @@ fn build_workflow_command(
 }
 
 #[cfg(unix)]
-fn run_workflow_command(mut cmd: Command) -> std::io::Result<(Output, String)> {
+fn run_workflow_command(
+    mut cmd: Command,
+    sample_metadata: Option<ResourceSampleMetadata>,
+) -> std::io::Result<(Output, String)> {
     let mut fds = [0; 2];
     let pipe_result = unsafe { libc::pipe(fds.as_mut_ptr()) };
     if pipe_result == -1 {
@@ -964,6 +1028,7 @@ fn run_workflow_command(mut cmd: Command) -> std::io::Result<(Output, String)> {
         }
     };
 
+    let sampler = sample_metadata.map(|metadata| spawn_resource_sampler(metadata, child.id()));
     let task_reader = std::thread::spawn(move || {
         let mut file = unsafe { std::fs::File::from_raw_fd(read_fd) };
         let mut task_events = String::new();
@@ -971,13 +1036,129 @@ fn run_workflow_command(mut cmd: Command) -> std::io::Result<(Output, String)> {
         task_events
     });
     let output = child.wait_with_output()?;
+    stop_resource_sampler(sampler);
     let task_events = task_reader.join().unwrap_or_default();
     Ok((output, task_events))
 }
 
 #[cfg(not(unix))]
-fn run_workflow_command(mut cmd: Command) -> std::io::Result<(Output, String)> {
+fn run_workflow_command(
+    mut cmd: Command,
+    _sample_metadata: Option<ResourceSampleMetadata>,
+) -> std::io::Result<(Output, String)> {
     cmd.output().map(|output| (output, String::new()))
+}
+
+fn spawn_resource_sampler(
+    metadata: ResourceSampleMetadata,
+    root_pid: u32,
+) -> ResourceSamplerHandle {
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let join = std::thread::spawn(move || loop {
+        persist_resource_sample(&metadata, root_pid);
+        match stop_rx.recv_timeout(RESOURCE_SAMPLE_INTERVAL) {
+            Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+        }
+    });
+    ResourceSamplerHandle { stop_tx, join }
+}
+
+fn stop_resource_sampler(handle: Option<ResourceSamplerHandle>) {
+    if let Some(handle) = handle {
+        let _ = handle.stop_tx.send(());
+        let _ = handle.join.join();
+    }
+}
+
+fn persist_resource_sample(metadata: &ResourceSampleMetadata, root_pid: u32) {
+    let Some(sample) = collect_resource_sample(metadata, root_pid) else {
+        return;
+    };
+    if let Err(err) = metadata.db.insert_workflow_resource_sample(&sample) {
+        log::warn!(
+            "Failed to persist workflow resource sample for {}: {}",
+            metadata.workflow_id,
+            err
+        );
+    }
+}
+
+fn collect_resource_sample(
+    metadata: &ResourceSampleMetadata,
+    root_pid: u32,
+) -> Option<WorkflowResourceSample> {
+    let processes = read_process_table().ok()?;
+    let selected = select_process_tree(root_pid as i64, &processes);
+    if selected.is_empty() {
+        return None;
+    }
+    let mut cpu_percent = 0.0;
+    let mut memory_rss_bytes = 0_i64;
+    let mut memory_vms_bytes = 0_i64;
+    for process in processes.iter().filter(|p| selected.contains(&p.pid)) {
+        cpu_percent += process.cpu_percent;
+        memory_rss_bytes += process.rss_kb.saturating_mul(1024);
+        memory_vms_bytes += process.vms_kb.saturating_mul(1024);
+    }
+    Some(WorkflowResourceSample {
+        id: String::new(),
+        run_id: Some(metadata.run_id.clone()),
+        workflow_id: metadata.workflow_id.clone(),
+        queue_name: metadata.queue_name.clone(),
+        corpus: metadata.corpus.clone(),
+        pid: Some(root_pid as i64),
+        sampled_at: Utc::now().to_rfc3339(),
+        cpu_percent: Some(cpu_percent),
+        memory_rss_bytes: Some(memory_rss_bytes),
+        memory_vms_bytes: Some(memory_vms_bytes),
+        swap_bytes: None,
+        labels: Some(serde_json::json!({
+            "root_pid": root_pid,
+            "pid_count": selected.len(),
+            "sampler": "ps-pid-tree-v1"
+        })),
+    })
+}
+
+fn read_process_table() -> std::io::Result<Vec<ProcessStat>> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,%cpu=,rss=,vsz="])
+        .output()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(text.lines().filter_map(parse_process_stat).collect())
+}
+
+fn parse_process_stat(line: &str) -> Option<ProcessStat> {
+    let mut parts = line.split_whitespace();
+    let pid = parts.next()?.parse().ok()?;
+    let ppid = parts.next()?.parse().ok()?;
+    let cpu_percent = parts.next()?.parse().ok()?;
+    let rss_kb = parts.next()?.parse().ok()?;
+    let vms_kb = parts.next()?.parse().ok()?;
+    Some(ProcessStat {
+        pid,
+        ppid,
+        cpu_percent,
+        rss_kb,
+        vms_kb,
+    })
+}
+
+fn select_process_tree(root_pid: i64, processes: &[ProcessStat]) -> HashSet<i64> {
+    let mut selected = HashSet::from([root_pid]);
+    loop {
+        let before = selected.len();
+        for process in processes {
+            if selected.contains(&process.ppid) {
+                selected.insert(process.pid);
+            }
+        }
+        if selected.len() == before {
+            break;
+        }
+    }
+    selected
 }
 
 fn stdout_with_task_events(mut stdout: String, raw_events: &str) -> String {
@@ -1277,6 +1458,7 @@ fn monitor_background_pid(
     db: &Arc<Database>,
     python_path: &str,
     workflow_id: &str,
+    sample_metadata: ResourceSampleMetadata,
     notify_on_success: bool,
     notify_on_failure: bool,
 ) {
@@ -1285,6 +1467,7 @@ fn monitor_background_pid(
         pid,
         wf_name
     );
+    let sampler = spawn_resource_sampler(sample_metadata, pid);
 
     loop {
         std::thread::sleep(Duration::from_secs(10));
@@ -1294,6 +1477,8 @@ fn monitor_background_pid(
             break;
         }
     }
+
+    stop_resource_sampler(Some(sampler));
 
     log::info!(
         "Background PID {} for workflow '{}' has exited",

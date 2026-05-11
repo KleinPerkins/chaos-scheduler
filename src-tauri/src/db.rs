@@ -257,6 +257,20 @@ pub struct WorkflowTokenUsage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowTokenUsageRollup {
+    pub time_bucket: Option<String>,
+    pub workflow_id: Option<String>,
+    pub corpus: Option<String>,
+    pub domain: Option<String>,
+    pub queue_name: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub token_kind: Option<String>,
+    pub total_tokens: i64,
+    pub call_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NextRun {
     pub workflow_id: String,
     pub workflow_name: String,
@@ -303,6 +317,10 @@ impl Database {
         };
         db.init().expect("Failed to initialize database");
         db
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
     }
 
     fn conn(&self) -> rusqlite::Result<Connection> {
@@ -1338,6 +1356,110 @@ impl Database {
         rows.collect()
     }
 
+    pub fn query_workflow_resource_samples(
+        &self,
+        workflow_id: &str,
+        window_modifier: &str,
+    ) -> rusqlite::Result<Vec<WorkflowResourceSample>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, workflow_id, queue_name, corpus, pid, sampled_at, cpu_percent, memory_rss_bytes, memory_vms_bytes, swap_bytes, labels_json
+             FROM workflow_resource_samples
+             WHERE workflow_id = ?1 AND datetime(sampled_at) >= datetime('now', ?2)
+             ORDER BY sampled_at ASC",
+        )?;
+        let rows = stmt.query_map(params![workflow_id, window_modifier], |row| {
+            Ok(workflow_resource_sample_from_row(row))
+        })?;
+        rows.collect()
+    }
+
+    pub fn query_token_usage_rollup(
+        &self,
+        group_by: &[String],
+        window_modifier: &str,
+        time_bucket: &str,
+    ) -> rusqlite::Result<Vec<WorkflowTokenUsageRollup>> {
+        let selected: std::collections::HashSet<String> = group_by
+            .iter()
+            .map(|item| normalize_rollup_dimension(item))
+            .collect();
+        let time_expr = if selected.contains("time_bucket") {
+            token_time_bucket_expr(time_bucket)
+        } else {
+            "NULL".to_string()
+        };
+        let workflow_expr = if selected.contains("workflow_id") {
+            "workflow_id".to_string()
+        } else {
+            "NULL".to_string()
+        };
+        let corpus_expr = if selected.contains("corpus") {
+            "json_extract(labels_json, '$.corpus')".to_string()
+        } else {
+            "NULL".to_string()
+        };
+        let domain_expr = if selected.contains("domain") {
+            "json_extract(labels_json, '$.domain')".to_string()
+        } else {
+            "NULL".to_string()
+        };
+        let queue_expr = if selected.contains("queue_name") {
+            "COALESCE(json_extract(labels_json, '$.queue_name'), json_extract(labels_json, '$.queue'))".to_string()
+        } else {
+            "NULL".to_string()
+        };
+        let provider_expr = if selected.contains("provider") {
+            "provider".to_string()
+        } else {
+            "NULL".to_string()
+        };
+        let model_expr = if selected.contains("model") {
+            "model".to_string()
+        } else {
+            "NULL".to_string()
+        };
+        let token_kind_expr = if selected.contains("token_kind") {
+            "token_kind".to_string()
+        } else {
+            "NULL".to_string()
+        };
+
+        let sql = format!(
+            "SELECT {time_expr} AS time_bucket,
+                    {workflow_expr} AS workflow_id,
+                    {corpus_expr} AS corpus,
+                    {domain_expr} AS domain,
+                    {queue_expr} AS queue_name,
+                    {provider_expr} AS provider,
+                    {model_expr} AS model,
+                    {token_kind_expr} AS token_kind,
+                    SUM(token_count) AS total_tokens,
+                    COUNT(*) AS call_count
+             FROM workflow_token_usage
+             WHERE datetime(emitted_at) >= datetime('now', ?1)
+             GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+             ORDER BY time_bucket ASC, workflow_id ASC, provider ASC, model ASC, token_kind ASC"
+        );
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![window_modifier], |row| {
+            Ok(WorkflowTokenUsageRollup {
+                time_bucket: row.get(0)?,
+                workflow_id: row.get(1)?,
+                corpus: row.get(2)?,
+                domain: row.get(3)?,
+                queue_name: row.get(4)?,
+                provider: row.get(5)?,
+                model: row.get(6)?,
+                token_kind: row.get(7)?,
+                total_tokens: row.get::<_, Option<i64>>(8)?.unwrap_or(0),
+                call_count: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     pub fn workflow_history_buckets(
         &self,
         workflow_id: &str,
@@ -1945,6 +2067,44 @@ fn json_to_string(value: Option<&serde_json::Value>) -> rusqlite::Result<Option<
         .map(serde_json::to_string)
         .transpose()
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+fn workflow_resource_sample_from_row(row: &rusqlite::Row) -> WorkflowResourceSample {
+    let labels_str: Option<String> = row.get(11).unwrap_or(None);
+    WorkflowResourceSample {
+        id: row.get(0).unwrap_or_default(),
+        run_id: row.get(1).unwrap_or(None),
+        workflow_id: row.get(2).unwrap_or_default(),
+        queue_name: row.get(3).unwrap_or(None),
+        corpus: row.get(4).unwrap_or_default(),
+        pid: row.get(5).unwrap_or(None),
+        sampled_at: row.get(6).unwrap_or_default(),
+        cpu_percent: row.get(7).unwrap_or(None),
+        memory_rss_bytes: row.get(8).unwrap_or(None),
+        memory_vms_bytes: row.get(9).unwrap_or(None),
+        swap_bytes: row.get(10).unwrap_or(None),
+        labels: labels_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok()),
+    }
+}
+
+fn normalize_rollup_dimension(item: &str) -> String {
+    match item.trim().to_ascii_lowercase().as_str() {
+        "time" | "bucket" | "time_bucket" => "time_bucket".to_string(),
+        "workflow" | "workflow_id" => "workflow_id".to_string(),
+        "queue" | "queue_name" => "queue_name".to_string(),
+        "kind" | "token" | "token_kind" => "token_kind".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn token_time_bucket_expr(time_bucket: &str) -> String {
+    match time_bucket {
+        "minute" => "substr(emitted_at, 1, 16)".to_string(),
+        "day" => "substr(emitted_at, 1, 10)".to_string(),
+        _ => "substr(emitted_at, 1, 13)".to_string(),
+    }
 }
 
 fn scheduler_asset_id(asset_kind: &str, asset_namespace: &str, asset_partition: &str) -> String {

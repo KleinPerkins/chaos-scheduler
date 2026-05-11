@@ -1,6 +1,7 @@
 use crate::db::{
     Database, EmailConfig, NextRun, QueueInfo, QueuedRun, Run, RunAttempt, RunMetric, RunTask,
-    SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
+    SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket, WorkflowResourceSample,
+    WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use std::sync::{Arc, Mutex};
@@ -227,6 +228,88 @@ pub fn get_sla_violations(state: State<AppState>) -> Result<Vec<SlaViolation>, S
         .db
         .evaluate_sla_violations()
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn query_resource_samples(
+    state: State<AppState>,
+    workflow_id: String,
+    time_window: Option<String>,
+) -> Result<Vec<WorkflowResourceSample>, String> {
+    let window = time_window_modifier(time_window.as_deref())?;
+    state
+        .db
+        .query_workflow_resource_samples(&workflow_id, &window)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn query_token_usage_rollup(
+    state: State<AppState>,
+    group_by: Option<Vec<String>>,
+    time_window: Option<String>,
+    time_bucket: Option<String>,
+) -> Result<Vec<WorkflowTokenUsageRollup>, String> {
+    let window = time_window_modifier(time_window.as_deref())?;
+    let group_by = group_by.unwrap_or_else(|| {
+        vec![
+            "time_bucket".to_string(),
+            "workflow_id".to_string(),
+            "corpus".to_string(),
+            "domain".to_string(),
+            "queue_name".to_string(),
+            "provider".to_string(),
+            "model".to_string(),
+            "token_kind".to_string(),
+        ]
+    });
+    let bucket = normalize_time_bucket(time_bucket.as_deref())?;
+    state
+        .db
+        .query_token_usage_rollup(&group_by, &window, &bucket)
+        .map_err(|e| e.to_string())
+}
+
+fn time_window_modifier(value: Option<&str>) -> Result<String, String> {
+    let raw = value.unwrap_or("24h").trim().to_ascii_lowercase();
+    if raw == "all" {
+        return Ok("-100 years".to_string());
+    }
+    let (number, unit) = split_window(&raw).ok_or_else(|| {
+        "time_window must be all, <number>h, <number>d, <number>m, or '<number> hours/days/minutes'".to_string()
+    })?;
+    let count: i64 = number
+        .parse()
+        .map_err(|_| "time_window count must be a positive integer".to_string())?;
+    if count <= 0 {
+        return Err("time_window count must be positive".to_string());
+    }
+    let sqlite_unit = match unit {
+        "m" | "min" | "minute" | "minutes" => "minutes",
+        "h" | "hr" | "hour" | "hours" => "hours",
+        "d" | "day" | "days" => "days",
+        _ => return Err(format!("Unsupported time_window unit: {}", unit)),
+    };
+    Ok(format!("-{} {}", count, sqlite_unit))
+}
+
+fn split_window(value: &str) -> Option<(&str, &str)> {
+    if let Some((n, unit)) = value.split_once(' ') {
+        return Some((n.trim(), unit.trim()));
+    }
+    let digit_count = value.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digit_count == 0 || digit_count == value.len() {
+        return None;
+    }
+    Some((&value[..digit_count], &value[digit_count..]))
+}
+
+fn normalize_time_bucket(value: Option<&str>) -> Result<String, String> {
+    let bucket = value.unwrap_or("hour").trim().to_ascii_lowercase();
+    match bucket.as_str() {
+        "minute" | "hour" | "day" => Ok(bucket),
+        other => Err(format!("Unsupported time_bucket: {}", other)),
+    }
 }
 
 #[tauri::command]
