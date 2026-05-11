@@ -1035,8 +1035,9 @@ fn run_workflow_command(
         let _ = file.read_to_string(&mut task_events);
         task_events
     });
-    let output = child.wait_with_output()?;
+    let output_result = child.wait_with_output();
     stop_resource_sampler(sampler);
+    let output = output_result?;
     let task_events = task_reader.join().unwrap_or_default();
     Ok((output, task_events))
 }
@@ -1090,7 +1091,11 @@ fn collect_resource_sample(
 ) -> Option<WorkflowResourceSample> {
     let processes = read_process_table().ok()?;
     let selected = select_process_tree(root_pid as i64, &processes);
-    if selected.is_empty() {
+    if selected.is_empty()
+        || !processes
+            .iter()
+            .any(|process| process.pid == root_pid as i64)
+    {
         return None;
     }
     let mut cpu_percent = 0.0;
@@ -2434,6 +2439,22 @@ not json
 
         assert!(stdout.contains("TASK_EVENT_JSON:"));
         assert!(stdout.contains("\"task_id\":\"summarize\""));
+    }
+
+    #[test]
+    fn resource_sampler_tree_selection_can_detect_missing_root_pid() {
+        let processes = vec![ProcessStat {
+            pid: 200,
+            ppid: 100,
+            cpu_percent: 1.0,
+            rss_kb: 10,
+            vms_kb: 20,
+        }];
+
+        let selected = select_process_tree(100, &processes);
+
+        assert_eq!(selected, std::collections::HashSet::from([100, 200]));
+        assert!(!processes.iter().any(|process| process.pid == 100));
     }
 
     #[test]

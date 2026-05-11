@@ -1435,7 +1435,7 @@ impl Database {
                     {model_expr} AS model,
                     {token_kind_expr} AS token_kind,
                     SUM(token_count) AS total_tokens,
-                    COUNT(*) AS call_count
+                    COUNT(DISTINCT COALESCE(json_extract(labels_json, '$.call_id'), id)) AS call_count
              FROM workflow_token_usage
              WHERE datetime(emitted_at) >= datetime('now', ?1)
              GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
@@ -2897,6 +2897,152 @@ SUMMARY_JSON:{\"title\":\"current\"}
             .unwrap();
         assert_eq!(dead_letter_exception, "boom again");
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resource_sample_query_filters_by_workflow_and_window() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = db
+            .create_workflow(
+                "Rollup Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                Some(r#"{"queue":"source-default"}"#),
+            )
+            .unwrap();
+        let other = db
+            .create_workflow(
+                "Other Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                Some(r#"{"queue":"source-default"}"#),
+            )
+            .unwrap();
+        let run = db
+            .create_run_with_context(&workflow.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        for (workflow_id, sampled_at, rss) in [
+            (&workflow.id, chrono::Utc::now().to_rfc3339(), 1024),
+            (&workflow.id, "2000-01-01T00:00:00Z".to_string(), 2048),
+            (&other.id, chrono::Utc::now().to_rfc3339(), 4096),
+        ] {
+            db.insert_workflow_resource_sample(&WorkflowResourceSample {
+                id: String::new(),
+                run_id: Some(run.id.clone()),
+                workflow_id: workflow_id.clone(),
+                queue_name: Some("source-default".to_string()),
+                corpus: "source".to_string(),
+                pid: Some(123),
+                sampled_at,
+                cpu_percent: Some(1.0),
+                memory_rss_bytes: Some(rss),
+                memory_vms_bytes: Some(rss * 2),
+                swap_bytes: None,
+                labels: None,
+            })
+            .unwrap();
+        }
+
+        let samples = db
+            .query_workflow_resource_samples(&workflow.id, "-1 days")
+            .unwrap();
+
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].workflow_id, workflow.id);
+        assert_eq!(samples[0].memory_rss_bytes, Some(1024));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn token_usage_rollup_counts_distinct_calls_not_token_rows() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = db
+            .create_workflow(
+                "Token Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                Some(r#"{"queue":"source-default"}"#),
+            )
+            .unwrap();
+        let run = db
+            .create_run_with_context(&workflow.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        for (token_kind, token_count, call_id) in [
+            ("input", 10, "call-1"),
+            ("output", 5, "call-1"),
+            ("input", 3, "call-2"),
+        ] {
+            db.insert_workflow_token_usage(&WorkflowTokenUsage {
+                id: String::new(),
+                run_id: Some(run.id.clone()),
+                workflow_id: workflow.id.clone(),
+                task_id: Some("summarize".to_string()),
+                provider: "anthropic".to_string(),
+                model: Some("claude".to_string()),
+                token_kind: token_kind.to_string(),
+                token_count,
+                emitted_at: chrono::Utc::now().to_rfc3339(),
+                labels: Some(serde_json::json!({
+                    "corpus": "source",
+                    "domain": "scheduler",
+                    "queue_name": "source-default",
+                    "call_id": call_id,
+                })),
+            })
+            .unwrap();
+        }
+
+        let rollups = db
+            .query_token_usage_rollup(
+                &[
+                    "workflow_id".to_string(),
+                    "corpus".to_string(),
+                    "domain".to_string(),
+                    "queue_name".to_string(),
+                    "provider".to_string(),
+                    "model".to_string(),
+                ],
+                "-1 days",
+                "hour",
+            )
+            .unwrap();
+
+        assert_eq!(rollups.len(), 1);
+        assert_eq!(
+            rollups[0].workflow_id.as_deref(),
+            Some(workflow.id.as_str())
+        );
+        assert_eq!(rollups[0].corpus.as_deref(), Some("source"));
+        assert_eq!(rollups[0].domain.as_deref(), Some("scheduler"));
+        assert_eq!(rollups[0].queue_name.as_deref(), Some("source-default"));
+        assert_eq!(rollups[0].total_tokens, 18);
+        assert_eq!(rollups[0].call_count, 2);
         let _ = std::fs::remove_dir_all(dir);
     }
 
