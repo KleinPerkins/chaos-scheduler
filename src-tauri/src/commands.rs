@@ -1,7 +1,7 @@
 use crate::db::{
     Database, EmailConfig, NextRun, QueueInfo, QueuedRun, Run, RunAttempt, RunMetric, RunTask,
-    SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket, WorkflowResourceSample,
-    WorkflowTokenUsageRollup,
+    SchedulerAsset, SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
+    WorkflowResourceSample, WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use std::sync::{Arc, Mutex};
@@ -267,6 +267,22 @@ pub fn query_token_usage_rollup(
     state
         .db
         .query_token_usage_rollup(&group_by, &window, &bucket)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn query_stale_assets(
+    state: State<AppState>,
+    max_age_seconds: Option<i64>,
+    asset_kind: Option<String>,
+) -> Result<Vec<SchedulerAsset>, String> {
+    let max_age_seconds = max_age_seconds.unwrap_or(24 * 60 * 60);
+    if max_age_seconds < 0 {
+        return Err("max_age_seconds must be non-negative".to_string());
+    }
+    state
+        .db
+        .query_stale_assets(max_age_seconds, asset_kind.as_deref())
         .map_err(|e| e.to_string())
 }
 

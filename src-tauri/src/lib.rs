@@ -253,6 +253,7 @@ pub fn run() {
             commands::get_sla_violations,
             commands::query_resource_samples,
             commands::query_token_usage_rollup,
+            commands::query_stale_assets,
             commands::get_scheduler_status,
             commands::list_queues,
             commands::update_queue,

@@ -126,6 +126,17 @@ export interface WorkflowTokenUsageRollup {
   call_count: number;
 }
 
+export interface SchedulerAsset {
+  asset_id: string;
+  asset_kind: string;
+  asset_namespace: string;
+  asset_partition: string;
+  last_action?: string | null;
+  last_written_at?: string | null;
+  last_writer_run_id?: string | null;
+  freshness_policy?: unknown;
+}
+
 export type TokenRollupDimension =
   | "time_bucket"
   | "workflow_id"
@@ -306,6 +317,10 @@ export function queryTokenUsageRollup(
 
 export function getSchedulerStatus(): Promise<SchedulerStatus> {
   return invoke("get_scheduler_status");
+}
+
+export function queryStaleAssets(maxAgeSeconds = 24 * 60 * 60, assetKind?: string): Promise<SchedulerAsset[]> {
+  return invoke("query_stale_assets", { maxAgeSeconds, assetKind });
 }
 
 export function listQueues(): Promise<QueueInfo[]> {

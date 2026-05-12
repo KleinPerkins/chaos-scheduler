@@ -197,6 +197,24 @@ impl WorkflowScheduler {
                     break;
                 }
             }
+
+            for trigger in trigger_config.iter().filter(|trigger| {
+                trigger.get("kind").and_then(Value::as_str) == Some("asset_update")
+            }) {
+                if let Some(reason) = self.evaluate_asset_update_trigger(&workflow.id, trigger) {
+                    let candidate = DueWorkflow {
+                        id: workflow.id.clone(),
+                        trigger_kind: Some("asset_update".to_string()),
+                        trigger_payload: Some(reason.to_string()),
+                        queue_name: queue_config.queue.clone(),
+                        priority: queue_config.priority,
+                    };
+                    if self.admit_or_skip_due_workflow(&workflow, &queue_config, &candidate) {
+                        due.push(candidate);
+                    }
+                    break;
+                }
+            }
         }
 
         due.sort_by(|a, b| {
@@ -356,6 +374,70 @@ impl WorkflowScheduler {
                 );
                 None
             }
+        }
+    }
+
+    fn evaluate_asset_update_trigger(&self, workflow_id: &str, trigger: &Value) -> Option<Value> {
+        let asset = trigger.get("asset")?;
+        let asset_kind = asset.get("kind")?.as_str()?;
+        let asset_namespace = asset
+            .get("namespace")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        let asset_partition = asset
+            .get("partition")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        let trigger_id = trigger
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                format!(
+                    "asset:{}:{}:{}",
+                    asset_kind,
+                    asset_namespace.unwrap_or(""),
+                    asset_partition.unwrap_or("")
+                )
+            });
+        let record = self
+            .db
+            .latest_asset_write_matching(asset_kind, asset_namespace, asset_partition, None)
+            .ok()
+            .flatten()?;
+        let fingerprint = format!(
+            "{}:{}:{}",
+            record.run_id,
+            record.task_id.clone().unwrap_or_default(),
+            record.emitted_at
+        );
+        if record.workflow_id == workflow_id {
+            let _ = self
+                .db
+                .set_trigger_state(workflow_id, &trigger_id, &fingerprint, false);
+            return None;
+        }
+        let prior = self
+            .db
+            .get_trigger_fingerprint(workflow_id, &trigger_id)
+            .ok()
+            .flatten();
+        let changed = prior.as_deref() != Some(fingerprint.as_str());
+        let _ = self
+            .db
+            .set_trigger_state(workflow_id, &trigger_id, &fingerprint, changed);
+        if changed {
+            Some(serde_json::json!({
+                "trigger_id": trigger_id,
+                "asset_kind": record.asset_kind,
+                "asset_namespace": record.asset_namespace,
+                "asset_partition": record.asset_partition,
+                "last_writer_run_id": record.run_id,
+                "writer_workflow_id": record.workflow_id,
+                "updated_at": record.emitted_at,
+            }))
+        } else {
+            None
         }
     }
 
@@ -1318,6 +1400,72 @@ fn persist_task_events(db: &Arc<Database>, run_id: &str, workflow_id: &str, raw_
                             );
                         }
                     }
+                }
+            }
+            "asset_read" | "asset_written" => {
+                if let Some(details) = details.as_ref() {
+                    if let Some(asset) = details.get("asset") {
+                        let asset_kind = asset.get("kind").and_then(Value::as_str);
+                        let asset_namespace = asset
+                            .get("namespace")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let asset_partition = asset
+                            .get("partition")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if let Some(asset_kind) = asset_kind {
+                            let attempt_id = ensure_task_attempt(
+                                db,
+                                run_id,
+                                task_id,
+                                attempt_number,
+                                Some(details),
+                                &mut attempts,
+                                &mut task_rows,
+                            )
+                            .ok()
+                            .map(|(attempt_id, _)| attempt_id);
+                            let action = if status == "asset_read" { "read" } else { "write" };
+                            let metadata = details.get("metadata");
+                            let freshness_policy = asset.get("freshness_policy");
+                            let _ = db.insert_run_asset_with_freshness(
+                                run_id,
+                                Some(task_id),
+                                attempt_id.as_deref(),
+                                asset_kind,
+                                asset_namespace,
+                                asset_partition,
+                                action,
+                                metadata,
+                                freshness_policy,
+                            );
+                        }
+                    }
+                }
+            }
+            "lineage_event" => {
+                if let Some(openlineage_event) = details
+                    .as_ref()
+                    .and_then(|d| d.get("openlineage_event"))
+                {
+                    let attempt_id = ensure_task_attempt(
+                        db,
+                        run_id,
+                        task_id,
+                        attempt_number,
+                        details.as_ref(),
+                        &mut attempts,
+                        &mut task_rows,
+                    )
+                    .ok()
+                    .map(|(attempt_id, _)| attempt_id);
+                    let _ = db.insert_run_lineage(
+                        run_id,
+                        Some(task_id),
+                        attempt_id.as_deref(),
+                        openlineage_event,
+                    );
                 }
             }
             _ => {}
@@ -2392,7 +2540,7 @@ mod tests {
         )
         .unwrap();
 
-        let scheduler = WorkflowScheduler::new(db);
+        let scheduler = WorkflowScheduler::new(db.clone());
 
         assert!(scheduler
             .find_due_workflows(dir.to_str().unwrap())
@@ -2439,6 +2587,130 @@ not json
 
         assert!(stdout.contains("TASK_EVENT_JSON:"));
         assert!(stdout.contains("\"task_id\":\"summarize\""));
+    }
+
+    #[test]
+    fn task_events_persist_assets_and_lineage() {
+        let dir = std::env::temp_dir().join(format!("chaos-task-assets-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Database::new(&dir));
+        let workflow = db
+            .create_workflow(
+                "Asset Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                None,
+                None,
+                Some(r#"{"queue":"source-default"}"#),
+            )
+            .unwrap();
+        let run = db
+            .create_run_with_context(&workflow.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        let raw = r#"
+{"schema_version":"scheduler.task_event.v1","ts":"2026-05-09T23:00:00Z","task_id":"discover","status":"started","attempt":0}
+{"schema_version":"scheduler.task_event.v1","ts":"2026-05-09T23:00:01Z","task_id":"discover","status":"asset_written","attempt":0,"details":{"asset":{"kind":"source","namespace":"slack","partition":"C123"},"metadata":{"count":2}}}
+{"schema_version":"scheduler.task_event.v1","ts":"2026-05-09T23:00:02Z","task_id":"discover","status":"lineage_event","attempt":0,"details":{"openlineage_event":{"eventType":"COMPLETE"}}}
+"#;
+
+        persist_task_events(&db, &run.id, &workflow.id, raw);
+
+        let conn = rusqlite::Connection::open(dir.join("scheduler.db")).unwrap();
+        let asset_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM run_assets WHERE run_id = ?1", [&run.id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let lineage_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM run_lineage WHERE run_id = ?1", [&run.id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(asset_count, 1);
+        assert_eq!(lineage_count, 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn asset_update_trigger_detects_new_matching_writes() {
+        let dir = std::env::temp_dir().join(format!("chaos-asset-trigger-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Database::new(&dir));
+        let upstream = db
+            .create_workflow(
+                "Capture",
+                None,
+                "scripts/workflows/capture.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                None,
+                None,
+                Some(r#"{"queue":"source-default"}"#),
+            )
+            .unwrap();
+        let downstream = db
+            .create_workflow(
+                "Refresh",
+                None,
+                "scripts/workflows/refresh.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                None,
+                Some(r#"{"triggers":[{"kind":"asset_update","asset":{"kind":"source","namespace":"slack","partition":"C123"}}]}"#),
+                Some(r#"{"queue":"source-default"}"#),
+            )
+            .unwrap();
+        let run = db
+            .create_run_with_context(&upstream.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        db.insert_run_asset(
+            &run.id,
+            Some("discover"),
+            None,
+            "source",
+            "slack",
+            "C123",
+            "write",
+            None,
+        )
+        .unwrap();
+
+        let scheduler = WorkflowScheduler::new(db.clone());
+        let due = scheduler.find_due_workflows(dir.to_str().unwrap());
+
+        let downstream_candidate = due.iter().find(|candidate| candidate.id == downstream.id).unwrap();
+        assert_eq!(downstream_candidate.trigger_kind.as_deref(), Some("asset_update"));
+
+        let downstream_run = db
+            .create_run_with_context(&downstream.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        db.insert_run_asset(
+            &downstream_run.id,
+            Some("refresh"),
+            None,
+            "source",
+            "slack",
+            "C123",
+            "write",
+            None,
+        )
+        .unwrap();
+        let after_self_write = scheduler.find_due_workflows(dir.to_str().unwrap());
+        assert!(!after_self_write.iter().any(|candidate| candidate.id == downstream.id));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

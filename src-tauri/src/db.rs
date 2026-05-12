@@ -211,6 +211,18 @@ pub struct RunLineage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetUpdateRecord {
+    pub asset_id: Option<String>,
+    pub asset_kind: String,
+    pub asset_namespace: String,
+    pub asset_partition: String,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub task_id: Option<String>,
+    pub emitted_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct QueueEvent {
     pub id: String,
@@ -1084,6 +1096,31 @@ impl Database {
         action: &str,
         metadata: Option<&serde_json::Value>,
     ) -> rusqlite::Result<String> {
+        self.insert_run_asset_with_freshness(
+            run_id,
+            task_id,
+            attempt_id,
+            asset_kind,
+            asset_namespace,
+            asset_partition,
+            action,
+            metadata,
+            None,
+        )
+    }
+
+    pub fn insert_run_asset_with_freshness(
+        &self,
+        run_id: &str,
+        task_id: Option<&str>,
+        attempt_id: Option<&str>,
+        asset_kind: &str,
+        asset_namespace: &str,
+        asset_partition: &str,
+        action: &str,
+        metadata: Option<&serde_json::Value>,
+        freshness_policy: Option<&serde_json::Value>,
+    ) -> rusqlite::Result<String> {
         if !matches!(action, "read" | "write") {
             return Err(rusqlite::Error::InvalidParameterName(
                 "asset action must be read or write".to_string(),
@@ -1095,7 +1132,7 @@ impl Database {
             asset_partition,
             Some(action),
             Some(run_id),
-            None,
+            freshness_policy,
         )?;
         let id = uuid::Uuid::new_v4().to_string();
         let emitted_at = chrono::Utc::now().to_rfc3339();
@@ -1128,6 +1165,68 @@ impl Database {
             params![id, run_id, task_id, attempt_id, openlineage_event_json, emitted_at],
         )?;
         Ok(id)
+    }
+
+    pub fn latest_asset_write_matching(
+        &self,
+        asset_kind: &str,
+        asset_namespace: Option<&str>,
+        asset_partition: Option<&str>,
+        _exclude_workflow_id: Option<&str>,
+    ) -> rusqlite::Result<Option<AssetUpdateRecord>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT ra.asset_id, ra.asset_kind, ra.asset_namespace, ra.asset_partition,
+                    ra.run_id, r.workflow_id, ra.task_id, ra.emitted_at
+             FROM run_assets ra
+             JOIN runs r ON r.id = ra.run_id
+             WHERE ra.action = 'write'
+               AND ra.asset_kind = ?1
+               AND (?2 IS NULL OR ra.asset_namespace = ?2)
+               AND (?3 IS NULL OR ra.asset_partition = ?3)
+             ORDER BY ra.emitted_at DESC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![
+            asset_kind,
+            asset_namespace,
+            asset_partition
+        ])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(AssetUpdateRecord {
+                asset_id: row.get(0).unwrap_or(None),
+                asset_kind: row.get(1).unwrap_or_default(),
+                asset_namespace: row.get(2).unwrap_or_default(),
+                asset_partition: row.get(3).unwrap_or_default(),
+                run_id: row.get(4).unwrap_or_default(),
+                workflow_id: row.get(5).unwrap_or_default(),
+                task_id: row.get(6).unwrap_or(None),
+                emitted_at: row.get(7).unwrap_or_default(),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn query_stale_assets(
+        &self,
+        max_age_seconds: i64,
+        asset_kind: Option<&str>,
+    ) -> rusqlite::Result<Vec<SchedulerAsset>> {
+        let modifier = format!("-{} seconds", max_age_seconds);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT asset_id, asset_kind, asset_namespace, asset_partition, last_action,
+                    last_written_at, last_writer_run_id, freshness_policy_json
+             FROM scheduler_assets
+             WHERE (?1 IS NULL OR asset_kind = ?1)
+               AND (last_written_at IS NULL OR datetime(last_written_at) <= datetime('now', ?2))
+             ORDER BY COALESCE(last_written_at, '') ASC, asset_kind ASC, asset_namespace ASC",
+        )?;
+        let rows = stmt.query_map(params![asset_kind, modifier], |row| {
+            Ok(scheduler_asset_from_row(row))
+        })?;
+        rows.collect()
     }
 
     pub fn insert_idempotency_key(
@@ -2111,6 +2210,22 @@ fn scheduler_asset_id(asset_kind: &str, asset_namespace: &str, asset_partition: 
     format!("{}:{}:{}", asset_kind, asset_namespace, asset_partition)
 }
 
+fn scheduler_asset_from_row(row: &rusqlite::Row) -> SchedulerAsset {
+    let freshness_str: Option<String> = row.get(7).unwrap_or(None);
+    SchedulerAsset {
+        asset_id: row.get(0).unwrap_or_default(),
+        asset_kind: row.get(1).unwrap_or_default(),
+        asset_namespace: row.get(2).unwrap_or_default(),
+        asset_partition: row.get(3).unwrap_or_default(),
+        last_action: row.get(4).unwrap_or(None),
+        last_written_at: row.get(5).unwrap_or(None),
+        last_writer_run_id: row.get(6).unwrap_or(None),
+        freshness_policy: freshness_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok()),
+    }
+}
+
 fn run_from_row(row: &rusqlite::Row) -> Run {
     let stdout: Option<String> = row.get(5).unwrap_or(None);
     let summary = stdout.as_deref().and_then(extract_summary);
@@ -2760,6 +2875,35 @@ SUMMARY_JSON:{\"title\":\"current\"}
             &serde_json::json!({"eventType": "COMPLETE"}),
         )
         .unwrap();
+        let latest_asset = db
+            .latest_asset_write_matching("source", Some("slack"), Some("channel:C123"), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest_asset.run_id, run.id);
+        assert_eq!(latest_asset.workflow_id, workflow.id);
+        db.insert_run_asset_with_freshness(
+            &run.id,
+            Some("discover"),
+            Some(&attempt_id),
+            "source",
+            "notion",
+            "page:1",
+            "write",
+            None,
+            Some(&serde_json::json!({"max_age_seconds": 86400})),
+        )
+        .unwrap();
+        let conn = db.conn().unwrap();
+        let freshness_policy: Option<String> = conn
+            .query_row(
+                "SELECT freshness_policy_json FROM scheduler_assets WHERE asset_namespace = 'notion'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(freshness_policy.unwrap().contains("max_age_seconds"));
+        let stale_assets = db.query_stale_assets(0, Some("source")).unwrap();
+        assert!(stale_assets.iter().any(|asset| asset.asset_namespace == "slack"));
         assert!(db
             .insert_idempotency_key(
                 "wf-1:run-1:discover:item-1",
@@ -2854,8 +2998,8 @@ SUMMARY_JSON:{\"title\":\"current\"}
             ("run_metrics", 1),
             ("run_inputs", 1),
             ("run_outputs", 1),
-            ("scheduler_assets", 1),
-            ("run_assets", 2),
+            ("scheduler_assets", 2),
+            ("run_assets", 3),
             ("run_lineage", 1),
             ("scheduler_idempotency_keys", 1),
             ("scheduler_checkpoints", 1),
