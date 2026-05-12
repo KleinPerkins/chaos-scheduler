@@ -56,10 +56,12 @@ pub struct WorkflowScheduler {
 impl WorkflowScheduler {
     pub fn new(db: Arc<Database>) -> Self {
         let email_enabled = db.get_email_config().map(|c| c.enabled).unwrap_or(false);
+        let (notify_on_failure, notify_on_success) =
+            db.get_notification_prefs().unwrap_or((true, false));
         Self {
             db,
-            notify_on_failure: AtomicBool::new(true),
-            notify_on_success: AtomicBool::new(false),
+            notify_on_failure: AtomicBool::new(notify_on_failure),
+            notify_on_success: AtomicBool::new(notify_on_success),
             email_on_failure: AtomicBool::new(email_enabled),
         }
     }
@@ -114,8 +116,42 @@ impl WorkflowScheduler {
 
         let now = Utc::now();
         let mut due = vec![];
+        let mut queued_workflow_ids = HashSet::new();
+
+        for row in self.db.list_queued_runs(500).unwrap_or_default() {
+            if row.status != "queued" {
+                continue;
+            }
+            let Ok(workflow) = self.db.get_workflow(&row.workflow_id) else {
+                continue;
+            };
+            if !workflow.enabled {
+                continue;
+            }
+            let queue_config =
+                parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
+            if self.queued_workflow_is_admissible(&workflow, &queue_config) {
+                queued_workflow_ids.insert(workflow.id.clone());
+                let candidate = DueWorkflow {
+                    id: workflow.id.clone(),
+                    trigger_kind: row.trigger_kind.clone(),
+                    trigger_payload: row.trigger_payload.clone(),
+                    queue_name: row.queue_name.clone(),
+                    priority: row.priority,
+                    queued_run_id: Some(row.id.clone()),
+                    upstream_run_id: row.upstream_run_id.clone(),
+                    input_json: row.input_json.clone(),
+                    rerun_of_run_id: row.rerun_of_run_id.clone(),
+                };
+                self.mark_trigger_candidate_admitted(&workflow.id, &candidate);
+                due.push(candidate);
+            }
+        }
 
         for workflow in workflows {
+            if queued_workflow_ids.contains(&workflow.id) {
+                continue;
+            }
             if !workflow.enabled {
                 continue;
             }
@@ -167,6 +203,10 @@ impl WorkflowScheduler {
                             ),
                             queue_name: queue_config.queue.clone(),
                             priority: queue_config.priority,
+                            queued_run_id: None,
+                            upstream_run_id: None,
+                            input_json: None,
+                            rerun_of_run_id: None,
                         };
                         if self.admit_or_skip_due_workflow(&workflow, &queue_config, &candidate) {
                             let now_str = now.to_rfc3339();
@@ -190,8 +230,13 @@ impl WorkflowScheduler {
                         trigger_payload: Some(reason.to_string()),
                         queue_name: queue_config.queue.clone(),
                         priority: queue_config.priority,
+                        queued_run_id: None,
+                        upstream_run_id: None,
+                        input_json: None,
+                        rerun_of_run_id: None,
                     };
                     if self.admit_or_skip_due_workflow(&workflow, &queue_config, &candidate) {
+                        self.mark_trigger_candidate_admitted(&workflow.id, &candidate);
                         due.push(candidate);
                     }
                     break;
@@ -208,8 +253,13 @@ impl WorkflowScheduler {
                         trigger_payload: Some(reason.to_string()),
                         queue_name: queue_config.queue.clone(),
                         priority: queue_config.priority,
+                        queued_run_id: None,
+                        upstream_run_id: None,
+                        input_json: None,
+                        rerun_of_run_id: None,
                     };
                     if self.admit_or_skip_due_workflow(&workflow, &queue_config, &candidate) {
+                        self.mark_trigger_candidate_admitted(&workflow.id, &candidate);
                         due.push(candidate);
                     }
                     break;
@@ -241,10 +291,15 @@ impl WorkflowScheduler {
                         workflow.id,
                         queue_config.queue
                     );
-                    let _ = self.db.upsert_queued_run(
+                    let _ = self.db.upsert_queued_run_with_context(
                         &workflow.id,
                         &queue_config.queue,
                         queue_config.priority,
+                        candidate.trigger_kind.as_deref(),
+                        candidate.trigger_payload.as_deref(),
+                        candidate.upstream_run_id.as_deref(),
+                        candidate.input_json.as_deref(),
+                        candidate.rerun_of_run_id.as_deref(),
                     );
                     false
                 }
@@ -292,6 +347,41 @@ impl WorkflowScheduler {
                 false
             }
         }
+    }
+
+    fn queued_workflow_is_admissible(
+        &self,
+        workflow: &crate::db::Workflow,
+        queue_config: &QueueConfig,
+    ) -> bool {
+        matches!(
+            self.dependency_decision(workflow, queue_config),
+            DependencyDecision::Ready
+        ) && self.has_queue_capacity(queue_config).unwrap_or(false)
+    }
+
+    fn mark_trigger_candidate_admitted(&self, workflow_id: &str, candidate: &DueWorkflow) {
+        let Some(kind) = candidate.trigger_kind.as_deref() else {
+            return;
+        };
+        if kind != "file_arrival" && kind != "asset_update" {
+            return;
+        }
+        let Some(payload) = candidate.trigger_payload.as_deref() else {
+            return;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(payload) else {
+            return;
+        };
+        let Some(trigger_id) = value.get("trigger_id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(fingerprint) = value.get("fingerprint").and_then(Value::as_str) else {
+            return;
+        };
+        let _ = self
+            .db
+            .set_trigger_state(workflow_id, trigger_id, fingerprint, true);
     }
 
     fn dependency_decision(
@@ -423,12 +513,10 @@ impl WorkflowScheduler {
             .ok()
             .flatten();
         let changed = prior.as_deref() != Some(fingerprint.as_str());
-        let _ = self
-            .db
-            .set_trigger_state(workflow_id, &trigger_id, &fingerprint, changed);
         if changed {
             Some(serde_json::json!({
                 "trigger_id": trigger_id,
+                "fingerprint": fingerprint,
                 "asset_kind": record.asset_kind,
                 "asset_namespace": record.asset_namespace,
                 "asset_partition": record.asset_partition,
@@ -468,9 +556,6 @@ impl WorkflowScheduler {
             .ok()
             .flatten();
         let changed = prior.as_deref() != Some(fingerprint.as_str());
-        let _ = self
-            .db
-            .set_trigger_state(workflow_id, &trigger_id, &fingerprint, changed);
         if changed {
             Some(serde_json::json!({
                 "trigger_id": trigger_id,
@@ -490,6 +575,10 @@ pub struct DueWorkflow {
     pub trigger_payload: Option<String>,
     pub queue_name: String,
     pub priority: i64,
+    pub queued_run_id: Option<String>,
+    pub upstream_run_id: Option<String>,
+    pub input_json: Option<String>,
+    pub rerun_of_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -688,6 +777,7 @@ pub fn execute_workflow_with_context(
     upstream_run_id: Option<&str>,
     input_json: Option<&str>,
     rerun_of_run_id: Option<&str>,
+    queued_run_id: Option<&str>,
 ) -> Result<RunResult, String> {
     let workflow = db
         .get_workflow(workflow_id)
@@ -698,7 +788,16 @@ pub fn execute_workflow_with_context(
         .map_err(|e| format!("Failed to read queue capacity: {}", e))?;
     let running = running_count_for_queue(db, &queue_config.queue, &queue_config.corpus)?;
     if running >= capacity {
-        let _ = db.upsert_queued_run(&workflow.id, &queue_config.queue, queue_config.priority);
+        let _ = db.upsert_queued_run_with_context(
+            &workflow.id,
+            &queue_config.queue,
+            queue_config.priority,
+            trigger_kind,
+            trigger_payload,
+            upstream_run_id,
+            input_json,
+            rerun_of_run_id,
+        );
         return Err(format!(
             "Queue {} is at capacity ({}/{})",
             queue_config.queue, running, capacity
@@ -716,7 +815,11 @@ pub fn execute_workflow_with_context(
             rerun_of_run_id,
         )
         .map_err(|e| format!("Failed to create run record: {}", e))?;
-    let _ = db.mark_queued_run_admitted(&workflow.id, &run.id);
+    let _ = if let Some(queued_run_id) = queued_run_id {
+        db.mark_queued_run_admitted_by_id(queued_run_id, &run.id)
+    } else {
+        db.mark_queued_run_admitted(&workflow.id, &run.id)
+    };
 
     let acquired = db
         .acquire_mutex_locks(&workflow.id, &run.id, &mutex_keys)
@@ -901,6 +1004,7 @@ pub fn trigger_on_completion(
             Some("on_completion"),
             Some(&payload),
             Some(upstream_run_id),
+            None,
             None,
             None,
         ) {
@@ -1406,14 +1510,10 @@ fn persist_task_events(db: &Arc<Database>, run_id: &str, workflow_id: &str, raw_
                 if let Some(details) = details.as_ref() {
                     if let Some(asset) = details.get("asset") {
                         let asset_kind = asset.get("kind").and_then(Value::as_str);
-                        let asset_namespace = asset
-                            .get("namespace")
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        let asset_partition = asset
-                            .get("partition")
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
+                        let asset_namespace =
+                            asset.get("namespace").and_then(Value::as_str).unwrap_or("");
+                        let asset_partition =
+                            asset.get("partition").and_then(Value::as_str).unwrap_or("");
                         if let Some(asset_kind) = asset_kind {
                             let attempt_id = ensure_task_attempt(
                                 db,
@@ -1426,7 +1526,11 @@ fn persist_task_events(db: &Arc<Database>, run_id: &str, workflow_id: &str, raw_
                             )
                             .ok()
                             .map(|(attempt_id, _)| attempt_id);
-                            let action = if status == "asset_read" { "read" } else { "write" };
+                            let action = if status == "asset_read" {
+                                "read"
+                            } else {
+                                "write"
+                            };
                             let metadata = details.get("metadata");
                             let freshness_policy = asset.get("freshness_policy");
                             let _ = db.insert_run_asset_with_freshness(
@@ -1445,9 +1549,8 @@ fn persist_task_events(db: &Arc<Database>, run_id: &str, workflow_id: &str, raw_
                 }
             }
             "lineage_event" => {
-                if let Some(openlineage_event) = details
-                    .as_ref()
-                    .and_then(|d| d.get("openlineage_event"))
+                if let Some(openlineage_event) =
+                    details.as_ref().and_then(|d| d.get("openlineage_event"))
                 {
                     let attempt_id = ensure_task_attempt(
                         db,
@@ -1910,9 +2013,10 @@ pub fn start_scheduler_loop(
                         email_enabled,
                         wf.trigger_kind.as_deref(),
                         wf.trigger_payload.as_deref(),
-                        None,
-                        None,
-                        None,
+                        wf.upstream_run_id.as_deref(),
+                        wf.input_json.as_deref(),
+                        wf.rerun_of_run_id.as_deref(),
+                        wf.queued_run_id.as_deref(),
                     ) {
                         Ok(result) => {
                             if result.completed {
@@ -2622,14 +2726,18 @@ not json
 
         let conn = rusqlite::Connection::open(dir.join("scheduler.db")).unwrap();
         let asset_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM run_assets WHERE run_id = ?1", [&run.id], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM run_assets WHERE run_id = ?1",
+                [&run.id],
+                |row| row.get(0),
+            )
             .unwrap();
         let lineage_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM run_lineage WHERE run_id = ?1", [&run.id], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM run_lineage WHERE run_id = ?1",
+                [&run.id],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(asset_count, 1);
         assert_eq!(lineage_count, 1);
@@ -2639,7 +2747,8 @@ not json
 
     #[test]
     fn asset_update_trigger_detects_new_matching_writes() {
-        let dir = std::env::temp_dir().join(format!("chaos-asset-trigger-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("chaos-asset-trigger-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = Arc::new(Database::new(&dir));
         let upstream = db
@@ -2690,8 +2799,14 @@ not json
         let scheduler = WorkflowScheduler::new(db.clone());
         let due = scheduler.find_due_workflows(dir.to_str().unwrap());
 
-        let downstream_candidate = due.iter().find(|candidate| candidate.id == downstream.id).unwrap();
-        assert_eq!(downstream_candidate.trigger_kind.as_deref(), Some("asset_update"));
+        let downstream_candidate = due
+            .iter()
+            .find(|candidate| candidate.id == downstream.id)
+            .unwrap();
+        assert_eq!(
+            downstream_candidate.trigger_kind.as_deref(),
+            Some("asset_update")
+        );
 
         let downstream_run = db
             .create_run_with_context(&downstream.id, Some("manual"), None, None, None, None)
@@ -2708,7 +2823,9 @@ not json
         )
         .unwrap();
         let after_self_write = scheduler.find_due_workflows(dir.to_str().unwrap());
-        assert!(!after_self_write.iter().any(|candidate| candidate.id == downstream.id));
+        assert!(!after_self_write
+            .iter()
+            .any(|candidate| candidate.id == downstream.id));
 
         let _ = std::fs::remove_dir_all(dir);
     }

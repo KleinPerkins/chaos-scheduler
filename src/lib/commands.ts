@@ -384,6 +384,13 @@ export function setNotificationPrefs(
   return invoke("set_notification_prefs", { notifyOnFailure, notifyOnSuccess });
 }
 
+export function getNotificationPrefs(): Promise<{
+  notify_on_failure: boolean;
+  notify_on_success: boolean;
+}> {
+  return invoke("get_notification_prefs");
+}
+
 export function analyzeRunError(runId: string): Promise<ErrorAnalysis> {
   return invoke("analyze_run_error", { runId });
 }
@@ -397,7 +404,7 @@ export function getEmailConfig(): Promise<EmailConfig> {
 }
 
 export function setEmailConfig(config: EmailConfig): Promise<void> {
-  return invoke("set_email_config", { ...config });
+  return invoke("set_email_config", { config });
 }
 
 export function testEmailConfig(): Promise<{ success?: boolean; error?: string }> {

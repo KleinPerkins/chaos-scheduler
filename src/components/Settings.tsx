@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   getAppConfig,
   getLaunchAtLogin,
   setLaunchAtLogin,
   setNotificationPrefs,
+  getNotificationPrefs,
   getEmailConfig,
   setEmailConfig,
   testEmailConfig,
@@ -19,6 +20,7 @@ export default function Settings() {
   const [launchAtLogin, setLaunchAtLoginState] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [statusType, setStatusType] = useState<"info" | "error" | "success">("info");
+  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [emailConfig, setEmailConfigState] = useState<EmailConfig>({
     enabled: false,
@@ -44,15 +46,30 @@ export default function Settings() {
     getEmailConfig()
       .then((config) => setEmailConfigState(config))
       .catch(() => {});
+    getNotificationPrefs()
+      .then((prefs) => {
+        setNotifyOnFailure(prefs.notify_on_failure);
+        setNotifyOnSuccess(prefs.notify_on_success);
+      })
+      .catch(() => {});
     getLaunchAtLogin()
       .then((enabled) => setLaunchAtLoginState(enabled))
       .catch(() => {});
   }, []);
 
   const showStatus = (msg: string, type: "info" | "error" | "success" = "info", duration = 3000) => {
+    if (statusTimerRef.current) {
+      clearTimeout(statusTimerRef.current);
+      statusTimerRef.current = null;
+    }
     setStatus(msg);
     setStatusType(type);
-    if (duration > 0) setTimeout(() => setStatus(null), duration);
+    if (duration > 0) {
+      statusTimerRef.current = setTimeout(() => {
+        setStatus(null);
+        statusTimerRef.current = null;
+      }, duration);
+    }
   };
 
   const handleNotifChange = async (failure: boolean, success: boolean) => {

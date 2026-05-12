@@ -1,4 +1,4 @@
-use rusqlite::{params, types::Type, Connection};
+use rusqlite::{params, types::Type, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -90,6 +90,11 @@ pub struct QueuedRun {
     pub queued_at: String,
     pub admitted_at: Option<String>,
     pub finished_at: Option<String>,
+    pub trigger_kind: Option<String>,
+    pub trigger_payload: Option<String>,
+    pub upstream_run_id: Option<String>,
+    pub input_json: Option<String>,
+    pub rerun_of_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,7 +412,12 @@ impl Database {
                 status TEXT NOT NULL DEFAULT 'queued',
                 queued_at TEXT NOT NULL,
                 admitted_at TEXT,
-                finished_at TEXT
+                finished_at TEXT,
+                trigger_kind TEXT,
+                trigger_payload TEXT,
+                upstream_run_id TEXT,
+                input_json TEXT,
+                rerun_of_run_id TEXT
             );
             CREATE TABLE IF NOT EXISTS workflow_mutex_locks (
                 mutex_key TEXT PRIMARY KEY,
@@ -445,6 +455,11 @@ impl Database {
         let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN upstream_run_id TEXT;");
         let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN input_json TEXT;");
         let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN rerun_of_run_id TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE queued_runs ADD COLUMN trigger_kind TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE queued_runs ADD COLUMN trigger_payload TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE queued_runs ADD COLUMN upstream_run_id TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE queued_runs ADD COLUMN input_json TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE queued_runs ADD COLUMN rerun_of_run_id TEXT;");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS email_config (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -656,6 +671,8 @@ impl Database {
         )?;
         conn.execute_batch(
             "INSERT OR IGNORE INTO scheduler_config (key, value) VALUES ('global_parallelism_cap', '4');
+             INSERT OR IGNORE INTO scheduler_config (key, value) VALUES ('notify_on_failure', 'true');
+             INSERT OR IGNORE INTO scheduler_config (key, value) VALUES ('notify_on_success', 'false');
              INSERT OR IGNORE INTO queues (name, corpus, capacity) VALUES ('source-default', 'source', 4);
              INSERT OR IGNORE INTO queues (name, corpus, capacity) VALUES ('instance-default', 'instance', 2);",
         )?;
@@ -1187,11 +1204,7 @@ impl Database {
              ORDER BY ra.emitted_at DESC
              LIMIT 1",
         )?;
-        let mut rows = stmt.query(params![
-            asset_kind,
-            asset_namespace,
-            asset_partition
-        ])?;
+        let mut rows = stmt.query(params![asset_kind, asset_namespace, asset_partition])?;
         if let Some(row) = rows.next()? {
             Ok(Some(AssetUpdateRecord {
                 asset_id: row.get(0).unwrap_or(None),
@@ -1816,6 +1829,56 @@ impl Database {
             .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(e)))
     }
 
+    fn get_bool_config(&self, key: &str, default: bool) -> rusqlite::Result<bool> {
+        let conn = self.conn()?;
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM scheduler_config WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(
+            match raw
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("true") | Some("1") | Some("yes") => true,
+                Some("false") | Some("0") | Some("no") => false,
+                _ => default,
+            },
+        )
+    }
+
+    fn set_bool_config(&self, key: &str, value: bool) -> rusqlite::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO scheduler_config (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![key, if value { "true" } else { "false" }],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_notification_prefs(&self) -> rusqlite::Result<(bool, bool)> {
+        Ok((
+            self.get_bool_config("notify_on_failure", true)?,
+            self.get_bool_config("notify_on_success", false)?,
+        ))
+    }
+
+    pub fn set_notification_prefs(
+        &self,
+        notify_on_failure: bool,
+        notify_on_success: bool,
+    ) -> rusqlite::Result<()> {
+        self.set_bool_config("notify_on_failure", notify_on_failure)?;
+        self.set_bool_config("notify_on_success", notify_on_success)?;
+        Ok(())
+    }
+
     pub fn validate_queue_cap_lattice(&self) -> rusqlite::Result<Vec<String>> {
         let conn = self.conn()?;
         let global_cap = self.global_parallelism_cap()?;
@@ -1939,7 +2002,8 @@ impl Database {
     pub fn list_queued_runs(&self, limit: i64) -> rusqlite::Result<Vec<QueuedRun>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, w.corpus, q.priority, q.status, q.queued_at, q.admitted_at, q.finished_at
+            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, w.corpus, q.priority, q.status, q.queued_at, q.admitted_at, q.finished_at,
+                    q.trigger_kind, q.trigger_payload, q.upstream_run_id, q.input_json, q.rerun_of_run_id
              FROM queued_runs q
              LEFT JOIN workflows w ON q.workflow_id = w.id
              ORDER BY
@@ -1963,6 +2027,11 @@ impl Database {
                 queued_at: row.get(8)?,
                 admitted_at: row.get(9)?,
                 finished_at: row.get(10)?,
+                trigger_kind: row.get(11)?,
+                trigger_payload: row.get(12)?,
+                upstream_run_id: row.get(13)?,
+                input_json: row.get(14)?,
+                rerun_of_run_id: row.get(15)?,
             })
         })?;
         rows.collect()
@@ -1974,16 +2043,66 @@ impl Database {
         queue_name: &str,
         priority: i64,
     ) -> rusqlite::Result<String> {
+        self.upsert_queued_run_with_context(
+            workflow_id,
+            queue_name,
+            priority,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_queued_run_with_context(
+        &self,
+        workflow_id: &str,
+        queue_name: &str,
+        priority: i64,
+        trigger_kind: Option<&str>,
+        trigger_payload: Option<&str>,
+        upstream_run_id: Option<&str>,
+        input_json: Option<&str>,
+        rerun_of_run_id: Option<&str>,
+    ) -> rusqlite::Result<String> {
         let conn = self.conn()?;
         let existing: rusqlite::Result<String> = conn.query_row(
-            "SELECT id FROM queued_runs WHERE workflow_id = ?1 AND status = 'queued' ORDER BY queued_at ASC LIMIT 1",
-            params![workflow_id],
+            "SELECT id FROM queued_runs
+             WHERE workflow_id = ?1 AND status = 'queued'
+               AND COALESCE(trigger_kind, '') = COALESCE(?2, '')
+               AND COALESCE(trigger_payload, '') = COALESCE(?3, '')
+               AND COALESCE(upstream_run_id, '') = COALESCE(?4, '')
+               AND COALESCE(input_json, '') = COALESCE(?5, '')
+               AND COALESCE(rerun_of_run_id, '') = COALESCE(?6, '')
+             ORDER BY queued_at ASC LIMIT 1",
+            params![
+                workflow_id,
+                trigger_kind,
+                trigger_payload,
+                upstream_run_id,
+                input_json,
+                rerun_of_run_id
+            ],
             |row| row.get(0),
         );
         if let Ok(id) = existing {
             conn.execute(
-                "UPDATE queued_runs SET queue_name = ?2, priority = ?3 WHERE id = ?1",
-                params![id, queue_name, priority],
+                "UPDATE queued_runs
+                 SET queue_name = ?2, priority = ?3, trigger_kind = ?4, trigger_payload = ?5,
+                     upstream_run_id = ?6, input_json = ?7, rerun_of_run_id = ?8
+                 WHERE id = ?1",
+                params![
+                    id,
+                    queue_name,
+                    priority,
+                    trigger_kind,
+                    trigger_payload,
+                    upstream_run_id,
+                    input_json,
+                    rerun_of_run_id
+                ],
             )?;
             return Ok(id);
         }
@@ -2008,9 +2127,22 @@ impl Database {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO queued_runs (id, workflow_id, queue_name, priority, status, queued_at)
-             VALUES (?1, ?2, ?3, ?4, 'queued', ?5)",
-            params![id, workflow_id, queue_name, priority, now],
+            "INSERT INTO queued_runs
+                (id, workflow_id, queue_name, priority, status, queued_at,
+                 trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id)
+             VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                id,
+                workflow_id,
+                queue_name,
+                priority,
+                now,
+                trigger_kind,
+                trigger_payload,
+                upstream_run_id,
+                input_json,
+                rerun_of_run_id
+            ],
         )?;
         Ok(id)
     }
@@ -2029,10 +2161,19 @@ impl Database {
         let Ok(id) = id else {
             return Ok(0);
         };
+        self.mark_queued_run_admitted_by_id(&id, run_id)
+    }
+
+    pub fn mark_queued_run_admitted_by_id(
+        &self,
+        queued_run_id: &str,
+        run_id: &str,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "UPDATE queued_runs SET run_id = ?2, status = 'admitted', admitted_at = ?3 WHERE id = ?1",
-            params![id, run_id, now],
+            "UPDATE queued_runs SET run_id = ?2, status = 'admitted', admitted_at = ?3 WHERE id = ?1 AND status = 'queued'",
+            params![queued_run_id, run_id, now],
         )
     }
 
@@ -2618,6 +2759,86 @@ SUMMARY_JSON:{\"title\":\"current\"}
     }
 
     #[test]
+    fn queued_runs_preserve_trigger_context_until_admission() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = db
+            .create_workflow(
+                "Queued Trigger Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                None,
+                None,
+                Some(r#"{"queue":"source-default","priority":5}"#),
+            )
+            .unwrap();
+
+        let queued_id = db
+            .upsert_queued_run_with_context(
+                &workflow.id,
+                "source-default",
+                5,
+                Some("file_arrival"),
+                Some(r#"{"trigger_id":"inbox","fingerprint":"abc"}"#),
+                Some("upstream-run"),
+                Some(r#"{"manual":true}"#),
+                Some("source-run"),
+            )
+            .unwrap();
+        let rows = db.list_queued_runs(10).unwrap();
+        let queued = rows.iter().find(|row| row.id == queued_id).unwrap();
+        assert_eq!(queued.trigger_kind.as_deref(), Some("file_arrival"));
+        assert_eq!(
+            queued.trigger_payload.as_deref(),
+            Some(r#"{"trigger_id":"inbox","fingerprint":"abc"}"#),
+        );
+        assert_eq!(queued.upstream_run_id.as_deref(), Some("upstream-run"));
+        assert_eq!(queued.input_json.as_deref(), Some(r#"{"manual":true}"#));
+        assert_eq!(queued.rerun_of_run_id.as_deref(), Some("source-run"));
+
+        let run = db
+            .create_run_with_context(
+                &workflow.id,
+                queued.trigger_kind.as_deref(),
+                queued.trigger_payload.as_deref(),
+                queued.upstream_run_id.as_deref(),
+                queued.input_json.as_deref(),
+                queued.rerun_of_run_id.as_deref(),
+            )
+            .unwrap();
+        assert_eq!(
+            db.mark_queued_run_admitted_by_id(&queued_id, &run.id)
+                .unwrap(),
+            1
+        );
+        let rows = db.list_queued_runs(10).unwrap();
+        let admitted = rows.iter().find(|row| row.id == queued_id).unwrap();
+        assert_eq!(admitted.status, "admitted");
+        assert_eq!(admitted.run_id.as_deref(), Some(run.id.as_str()));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn notification_preferences_persist_in_scheduler_config() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        assert_eq!(db.get_notification_prefs().unwrap(), (true, false));
+        db.set_notification_prefs(false, true).unwrap();
+        assert_eq!(db.get_notification_prefs().unwrap(), (false, true));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn session_5_schema_tables_and_indexes_are_created() {
         let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2903,7 +3124,9 @@ SUMMARY_JSON:{\"title\":\"current\"}
             .unwrap();
         assert!(freshness_policy.unwrap().contains("max_age_seconds"));
         let stale_assets = db.query_stale_assets(0, Some("source")).unwrap();
-        assert!(stale_assets.iter().any(|asset| asset.asset_namespace == "slack"));
+        assert!(stale_assets
+            .iter()
+            .any(|asset| asset.asset_namespace == "slack"));
         assert!(db
             .insert_idempotency_key(
                 "wf-1:run-1:discover:item-1",

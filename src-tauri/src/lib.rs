@@ -268,6 +268,7 @@ pub fn run() {
             commands::get_launch_at_login,
             commands::set_launch_at_login,
             commands::set_notification_prefs,
+            commands::get_notification_prefs,
             commands::analyze_run_error,
             commands::generate_workflow_description,
             commands::get_email_config,

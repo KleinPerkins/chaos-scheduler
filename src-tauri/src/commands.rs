@@ -125,6 +125,7 @@ pub fn trigger_workflow(state: State<AppState>, id: String) -> Result<String, St
         None,
         None,
         None,
+        None,
     )?;
     if result.completed {
         scheduler::trigger_on_completion(
@@ -171,7 +172,21 @@ pub fn rerun_workflow(
         None,
         input_override_json.as_deref(),
         source_run_id.as_deref(),
+        None,
     )?;
+    if result.completed {
+        scheduler::trigger_on_completion(
+            &state.db,
+            &state.chaos_labs_root,
+            &state.python_path,
+            &workflow_id,
+            &result.run_id,
+            result.success,
+            true,
+            true,
+            false,
+        );
+    }
     Ok(result.run_id)
 }
 
@@ -598,10 +613,26 @@ pub fn set_notification_prefs(
     notify_on_failure: bool,
     notify_on_success: bool,
 ) -> Result<(), String> {
+    state
+        .db
+        .set_notification_prefs(notify_on_failure, notify_on_success)
+        .map_err(|e| e.to_string())?;
     let scheduler = state.scheduler.lock().map_err(|e| e.to_string())?;
     scheduler.set_notify_on_failure(notify_on_failure);
     scheduler.set_notify_on_success(notify_on_success);
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_notification_prefs(state: State<AppState>) -> Result<serde_json::Value, String> {
+    let (notify_on_failure, notify_on_success) = state
+        .db
+        .get_notification_prefs()
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "notify_on_failure": notify_on_failure,
+        "notify_on_success": notify_on_success,
+    }))
 }
 
 #[tauri::command]
@@ -717,37 +748,14 @@ pub fn get_email_config(state: State<AppState>) -> Result<EmailConfig, String> {
 }
 
 #[tauri::command]
-pub fn set_email_config(
-    state: State<AppState>,
-    enabled: bool,
-    alert_email: String,
-    smtp_host: String,
-    smtp_port: i32,
-    smtp_user: String,
-    smtp_password: String,
-    from_address: String,
-    from_name: String,
-) -> Result<(), String> {
-    let password = if smtp_password == "••••••••" {
-        state
+pub fn set_email_config(state: State<AppState>, mut config: EmailConfig) -> Result<(), String> {
+    if config.smtp_password == "••••••••" {
+        config.smtp_password = state
             .db
             .get_email_config()
             .map(|c| c.smtp_password)
-            .unwrap_or_default()
-    } else {
-        smtp_password
-    };
-
-    let config = EmailConfig {
-        enabled,
-        alert_email,
-        smtp_host,
-        smtp_port,
-        smtp_user,
-        smtp_password: password,
-        from_address,
-        from_name,
-    };
+            .unwrap_or_default();
+    }
     state
         .db
         .set_email_config(&config)

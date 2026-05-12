@@ -21,6 +21,66 @@ interface RunSummary {
   [key: string]: unknown;
 }
 
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringifyUnknown(value: unknown): string {
+  if (typeof value === "string") return value;
+  return JSON.stringify(value, null, 2);
+}
+
+function asStatsData(value: unknown): Record<string, number | string> | null {
+  if (!isRecord(value)) return null;
+  const entries = Object.entries(value).filter(
+    ([, v]) => typeof v === "number" || typeof v === "string",
+  );
+  return Object.fromEntries(entries) as Record<string, number | string>;
+}
+
+function asItemList(value: unknown): Array<{ name: string; detail?: string; url?: string; badge?: string }> | null {
+  if (!Array.isArray(value)) return null;
+  const items = value.filter(isRecord).map((item) => ({
+    name: typeof item.name === "string" ? item.name : "Untitled",
+    detail: typeof item.detail === "string" ? item.detail : undefined,
+    url: typeof item.url === "string" ? item.url : undefined,
+    badge: typeof item.badge === "string" ? item.badge : undefined,
+  }));
+  return items;
+}
+
+function asLinkList(value: unknown): Array<{ label: string; url: string }> | null {
+  if (!Array.isArray(value)) return null;
+  const links = value
+    .filter(isRecord)
+    .filter((item) => typeof item.label === "string" && typeof item.url === "string")
+    .map((item) => ({ label: item.label as string, url: item.url as string }));
+  return links;
+}
+
+function asPhaseList(value: unknown): Array<{ name: string; status: string; duration?: string }> | null {
+  if (!Array.isArray(value)) return null;
+  return value.filter(isRecord).map((phase) => ({
+    name: typeof phase.name === "string" ? phase.name : "Unnamed phase",
+    status: typeof phase.status === "string" ? phase.status : "unknown",
+    duration: typeof phase.duration === "string" ? phase.duration : undefined,
+  }));
+}
+
+function asTableData(value: unknown): { headers: string[]; rows: string[][] } | null {
+  if (!isRecord(value) || !Array.isArray(value.headers) || !Array.isArray(value.rows)) return null;
+  const headers = value.headers.map((header) => String(header));
+  const rows = value.rows
+    .filter(Array.isArray)
+    .map((row) => row.map((cell) => String(cell)));
+  return { headers, rows };
+}
+
+function isSummarySection(value: unknown): value is SummarySection {
+  return isRecord(value) && typeof value.type === "string";
+}
+
 function formatDuration(start: string, end: string | null): string {
   if (!end) return "running...";
   const ms = new Date(end).getTime() - new Date(start).getTime();
@@ -143,20 +203,30 @@ function TableView({ data }: { data: { headers: string[]; rows: string[][] } }) 
 
 function SectionRenderer({ section }: { section: SummarySection }) {
   switch (section.type) {
-    case "stats":
-      return <StatsGrid data={section.data as Record<string, number | string>} />;
-    case "items":
-      return <ItemList data={section.data as Array<{ name: string; detail?: string; url?: string; badge?: string }>} />;
-    case "links":
-      return <LinkList data={section.data as Array<{ label: string; url: string }>} />;
-    case "phases":
-      return <PhaseTimeline data={section.data as Array<{ name: string; status: string; duration?: string }>} />;
+    case "stats": {
+      const data = asStatsData(section.data);
+      return data ? <StatsGrid data={data} /> : <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>;
+    }
+    case "items": {
+      const data = asItemList(section.data);
+      return data ? <ItemList data={data} /> : <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>;
+    }
+    case "links": {
+      const data = asLinkList(section.data);
+      return data ? <LinkList data={data} /> : <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>;
+    }
+    case "phases": {
+      const data = asPhaseList(section.data);
+      return data ? <PhaseTimeline data={data} /> : <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>;
+    }
     case "text":
-      return <TextBlock data={section.data as string} />;
-    case "table":
-      return <TableView data={section.data as { headers: string[]; rows: string[][] }} />;
+      return <TextBlock data={typeof section.data === "string" ? section.data : stringifyUnknown(section.data)} />;
+    case "table": {
+      const data = asTableData(section.data);
+      return data ? <TableView data={data} /> : <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>;
+    }
     default:
-      return <pre className="rd-raw">{JSON.stringify(section.data, null, 2)}</pre>;
+      return <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>;
   }
 }
 
@@ -200,8 +270,11 @@ export default function RunDetail({ runId, onBack }: Props) {
     return <div className="rd-loading">Loading...</div>;
   }
 
-  const summary = run.summary as RunSummary | null | undefined;
-  const hasSummary = summary && summary.sections && summary.sections.length > 0;
+  const summary = isRecord(run.summary) ? (run.summary as RunSummary) : null;
+  const summarySections = Array.isArray(summary?.sections)
+    ? summary.sections.filter(isSummarySection)
+    : [];
+  const hasSummary = summarySections.length > 0;
   const isFailed = run.status === "failed";
   const hasStderr = !!run.stderr;
   const recommendedSteps = analysis?.recommended_steps ?? [];
@@ -388,9 +461,9 @@ export default function RunDetail({ runId, onBack }: Props) {
       {/* Structured sections */}
       {hasSummary ? (
         <div className="rd-sections">
-          {summary!.sections!.map((section, i) => (
+          {summarySections.map((section, i) => (
             <div key={i} className="rd-section">
-              <h3 className="rd-section-title">{section.title}</h3>
+              <h3 className="rd-section-title">{section.title || `Section ${i + 1}`}</h3>
               <SectionRenderer section={section} />
             </div>
           ))}
