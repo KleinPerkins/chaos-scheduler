@@ -1818,6 +1818,17 @@ impl Database {
         }
     }
 
+    pub fn queue_tag_cap(&self, queue_name: &str, corpus: &str) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT tag_cap FROM queues WHERE name = ?1 AND corpus = ?2",
+            params![queue_name, corpus],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|value| value.flatten())
+    }
+
     pub fn global_parallelism_cap(&self) -> rusqlite::Result<i64> {
         let conn = self.conn()?;
         let raw: String = conn.query_row(
@@ -2037,6 +2048,7 @@ impl Database {
         rows.collect()
     }
 
+    #[allow(dead_code)]
     pub fn upsert_queued_run(
         &self,
         workflow_id: &str,
@@ -2147,6 +2159,7 @@ impl Database {
         Ok(id)
     }
 
+    #[allow(dead_code)]
     pub fn mark_queued_run_admitted(
         &self,
         workflow_id: &str,
@@ -2183,6 +2196,20 @@ impl Database {
         conn.execute(
             "UPDATE queued_runs SET status = 'cancelled', finished_at = ?2 WHERE id = ?1 AND status = 'queued'",
             params![id, now],
+        )
+    }
+
+    pub fn mark_queued_run_terminal_by_id(
+        &self,
+        queued_run_id: &str,
+        run_id: &str,
+        status: &str,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE queued_runs SET run_id = ?2, status = ?3, admitted_at = COALESCE(admitted_at, ?4), finished_at = ?4 WHERE id = ?1 AND status = 'queued'",
+            params![queued_run_id, run_id, status, now],
         )
     }
 

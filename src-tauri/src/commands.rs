@@ -126,6 +126,7 @@ pub fn trigger_workflow(state: State<AppState>, id: String) -> Result<String, St
         None,
         None,
         None,
+        None,
     )?;
     if result.completed {
         scheduler::trigger_on_completion(
@@ -172,6 +173,7 @@ pub fn rerun_workflow(
         None,
         input_override_json.as_deref(),
         source_run_id.as_deref(),
+        None,
         None,
     )?;
     if result.completed {

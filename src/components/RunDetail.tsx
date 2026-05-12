@@ -271,6 +271,8 @@ export default function RunDetail({ runId, onBack }: Props) {
   }
 
   const summary = isRecord(run.summary) ? (run.summary as RunSummary) : null;
+  const summaryTitle = typeof summary?.title === "string" ? summary.title : null;
+  const summaryDescription = typeof summary?.description === "string" ? summary.description : null;
   const summarySections = Array.isArray(summary?.sections)
     ? summary.sections.filter(isSummarySection)
     : [];
@@ -290,8 +292,8 @@ export default function RunDetail({ runId, onBack }: Props) {
           <h1 className="page-title">
             {run.workflow_name ?? "Workflow Run"}
           </h1>
-          {summary?.title && (
-            <p className="page-subtitle">{summary.title}</p>
+          {summaryTitle && (
+            <p className="page-subtitle">{summaryTitle}</p>
           )}
         </div>
         <button className="btn btn-ghost" onClick={onBack}>
@@ -454,8 +456,8 @@ export default function RunDetail({ runId, onBack }: Props) {
         </div>
       )}
 
-      {summary?.description && (
-        <p className="rd-description">{summary.description}</p>
+      {summaryDescription && (
+        <p className="rd-description">{summaryDescription}</p>
       )}
 
       {/* Structured sections */}
@@ -463,7 +465,9 @@ export default function RunDetail({ runId, onBack }: Props) {
         <div className="rd-sections">
           {summarySections.map((section, i) => (
             <div key={i} className="rd-section">
-              <h3 className="rd-section-title">{section.title || `Section ${i + 1}`}</h3>
+              <h3 className="rd-section-title">
+                {(typeof section.title === "string" && section.title) || `Section ${i + 1}`}
+              </h3>
               <SectionRenderer section={section} />
             </div>
           ))}

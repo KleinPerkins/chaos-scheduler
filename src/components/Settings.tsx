@@ -55,6 +55,11 @@ export default function Settings() {
     getLaunchAtLogin()
       .then((enabled) => setLaunchAtLoginState(enabled))
       .catch(() => {});
+    return () => {
+      if (statusTimerRef.current) {
+        clearTimeout(statusTimerRef.current);
+      }
+    };
   }, []);
 
   const showStatus = (msg: string, type: "info" | "error" | "success" = "info", duration = 3000) => {

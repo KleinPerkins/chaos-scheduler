@@ -130,21 +130,48 @@ impl WorkflowScheduler {
             }
             let queue_config =
                 parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
-            if self.queued_workflow_is_admissible(&workflow, &queue_config) {
-                queued_workflow_ids.insert(workflow.id.clone());
-                let candidate = DueWorkflow {
-                    id: workflow.id.clone(),
-                    trigger_kind: row.trigger_kind.clone(),
-                    trigger_payload: row.trigger_payload.clone(),
-                    queue_name: row.queue_name.clone(),
-                    priority: row.priority,
-                    queued_run_id: Some(row.id.clone()),
-                    upstream_run_id: row.upstream_run_id.clone(),
-                    input_json: row.input_json.clone(),
-                    rerun_of_run_id: row.rerun_of_run_id.clone(),
-                };
-                self.mark_trigger_candidate_admitted(&workflow.id, &candidate);
-                due.push(candidate);
+            match dependency_decision_for_db(&self.db, &workflow, &queue_config) {
+                DependencyDecision::Ready
+                    if self.has_queue_capacity(&queue_config).unwrap_or(false) =>
+                {
+                    queued_workflow_ids.insert(workflow.id.clone());
+                    let candidate = DueWorkflow {
+                        id: workflow.id.clone(),
+                        trigger_kind: row.trigger_kind.clone(),
+                        trigger_payload: row.trigger_payload.clone(),
+                        queue_name: row.queue_name.clone(),
+                        priority: row.priority,
+                        queued_run_id: Some(row.id.clone()),
+                        upstream_run_id: row.upstream_run_id.clone(),
+                        input_json: row.input_json.clone(),
+                        rerun_of_run_id: row.rerun_of_run_id.clone(),
+                    };
+                    due.push(candidate);
+                }
+                DependencyDecision::CascadeSkip(reason) => {
+                    let payload = serde_json::json!({
+                        "reason": reason,
+                        "original_trigger_kind": row.trigger_kind.as_deref(),
+                        "original_trigger_payload": row.trigger_payload.as_deref(),
+                    })
+                    .to_string();
+                    if let Ok(run) = self.db.create_terminal_run_with_context(
+                        &workflow.id,
+                        "cascade-skipped",
+                        row.trigger_kind.as_deref(),
+                        Some(&payload),
+                        row.upstream_run_id.as_deref(),
+                        row.input_json.as_deref(),
+                        row.rerun_of_run_id.as_deref(),
+                    ) {
+                        let _ = self.db.mark_queued_run_terminal_by_id(
+                            &row.id,
+                            &run.id,
+                            "cascade-skipped",
+                        );
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -236,7 +263,6 @@ impl WorkflowScheduler {
                         rerun_of_run_id: None,
                     };
                     if self.admit_or_skip_due_workflow(&workflow, &queue_config, &candidate) {
-                        self.mark_trigger_candidate_admitted(&workflow.id, &candidate);
                         due.push(candidate);
                     }
                     break;
@@ -259,7 +285,6 @@ impl WorkflowScheduler {
                         rerun_of_run_id: None,
                     };
                     if self.admit_or_skip_due_workflow(&workflow, &queue_config, &candidate) {
-                        self.mark_trigger_candidate_admitted(&workflow.id, &candidate);
                         due.push(candidate);
                     }
                     break;
@@ -319,10 +344,15 @@ impl WorkflowScheduler {
                     queue_config.queue,
                     reason
                 );
-                let _ = self.db.upsert_queued_run(
+                let _ = self.db.upsert_queued_run_with_context(
                     &workflow.id,
                     &queue_config.queue,
                     queue_config.priority,
+                    candidate.trigger_kind.as_deref(),
+                    candidate.trigger_payload.as_deref(),
+                    candidate.upstream_run_id.as_deref(),
+                    candidate.input_json.as_deref(),
+                    candidate.rerun_of_run_id.as_deref(),
                 );
                 false
             }
@@ -349,122 +379,16 @@ impl WorkflowScheduler {
         }
     }
 
-    fn queued_workflow_is_admissible(
-        &self,
-        workflow: &crate::db::Workflow,
-        queue_config: &QueueConfig,
-    ) -> bool {
-        matches!(
-            self.dependency_decision(workflow, queue_config),
-            DependencyDecision::Ready
-        ) && self.has_queue_capacity(queue_config).unwrap_or(false)
-    }
-
-    fn mark_trigger_candidate_admitted(&self, workflow_id: &str, candidate: &DueWorkflow) {
-        let Some(kind) = candidate.trigger_kind.as_deref() else {
-            return;
-        };
-        if kind != "file_arrival" && kind != "asset_update" {
-            return;
-        }
-        let Some(payload) = candidate.trigger_payload.as_deref() else {
-            return;
-        };
-        let Ok(value) = serde_json::from_str::<Value>(payload) else {
-            return;
-        };
-        let Some(trigger_id) = value.get("trigger_id").and_then(Value::as_str) else {
-            return;
-        };
-        let Some(fingerprint) = value.get("fingerprint").and_then(Value::as_str) else {
-            return;
-        };
-        let _ = self
-            .db
-            .set_trigger_state(workflow_id, trigger_id, fingerprint, true);
-    }
-
     fn dependency_decision(
         &self,
         workflow: &crate::db::Workflow,
         queue_config: &QueueConfig,
     ) -> DependencyDecision {
-        for upstream in &queue_config.depends_on {
-            match self.latest_status(upstream) {
-                Some(status) if status == "success" => {}
-                Some(status) if is_failure_terminal(&status) => {
-                    return DependencyDecision::CascadeSkip(format!(
-                        "depends_on upstream {} ended as {}",
-                        upstream, status
-                    ));
-                }
-                Some(status) => {
-                    return DependencyDecision::Waiting(format!(
-                        "depends_on upstream {} is {}",
-                        upstream, status
-                    ));
-                }
-                None => {
-                    return DependencyDecision::Waiting(format!(
-                        "depends_on upstream {} has no runs",
-                        upstream
-                    ));
-                }
-            }
-        }
-        for upstream in &queue_config.waits_for {
-            match self.latest_status(upstream) {
-                Some(status) if is_terminal_status(&status) => {}
-                Some(status) => {
-                    return DependencyDecision::Waiting(format!(
-                        "waits_for upstream {} is {}",
-                        upstream, status
-                    ));
-                }
-                None => {
-                    return DependencyDecision::Waiting(format!(
-                        "waits_for upstream {} has no runs",
-                        upstream
-                    ));
-                }
-            }
-        }
-        if queue_config.queue.trim().is_empty() {
-            return DependencyDecision::Waiting(format!(
-                "workflow {} has empty queue assignment",
-                workflow.id
-            ));
-        }
-        DependencyDecision::Ready
+        dependency_decision_for_db(&self.db, workflow, queue_config)
     }
 
     fn has_queue_capacity(&self, queue_config: &QueueConfig) -> Result<bool, String> {
-        let capacity = self
-            .db
-            .queue_capacity(&queue_config.queue, &queue_config.corpus)
-            .map_err(|e| e.to_string())?;
-        let running = self
-            .running_count_for_queue(&queue_config.queue, &queue_config.corpus)
-            .map_err(|e| e.to_string())?;
-        Ok(running < capacity)
-    }
-
-    fn running_count_for_queue(&self, queue_name: &str, corpus: &str) -> Result<i64, String> {
-        running_count_for_queue(&self.db, queue_name, corpus)
-    }
-
-    fn latest_status(&self, workflow_id: &str) -> Option<String> {
-        match self.db.latest_run_status(workflow_id) {
-            Ok(status) => status,
-            Err(e) => {
-                log::warn!(
-                    "Failed to read latest run status for {}: {}",
-                    workflow_id,
-                    e
-                );
-                None
-            }
-        }
+        has_runtime_capacity(&self.db, queue_config)
     }
 
     fn evaluate_asset_update_trigger(&self, workflow_id: &str, trigger: &Value) -> Option<Value> {
@@ -569,6 +493,101 @@ impl WorkflowScheduler {
     }
 }
 
+fn latest_status_for_db(db: &Arc<Database>, workflow_id: &str) -> Option<String> {
+    match db.latest_run_status(workflow_id) {
+        Ok(status) => status,
+        Err(e) => {
+            log::warn!(
+                "Failed to read latest run status for {}: {}",
+                workflow_id,
+                e
+            );
+            None
+        }
+    }
+}
+
+fn dependency_decision_for_db(
+    db: &Arc<Database>,
+    workflow: &crate::db::Workflow,
+    queue_config: &QueueConfig,
+) -> DependencyDecision {
+    for upstream in &queue_config.depends_on {
+        match latest_status_for_db(db, upstream) {
+            Some(status) if status == "success" => {}
+            Some(status) if is_failure_terminal(&status) => {
+                return DependencyDecision::CascadeSkip(format!(
+                    "depends_on upstream {} ended as {}",
+                    upstream, status
+                ));
+            }
+            Some(status) => {
+                return DependencyDecision::Waiting(format!(
+                    "depends_on upstream {} is {}",
+                    upstream, status
+                ));
+            }
+            None => {
+                return DependencyDecision::Waiting(format!(
+                    "depends_on upstream {} has no runs",
+                    upstream
+                ));
+            }
+        }
+    }
+    for upstream in &queue_config.waits_for {
+        match latest_status_for_db(db, upstream) {
+            Some(status) if is_terminal_status(&status) => {}
+            Some(status) => {
+                return DependencyDecision::Waiting(format!(
+                    "waits_for upstream {} is {}",
+                    upstream, status
+                ));
+            }
+            None => {
+                return DependencyDecision::Waiting(format!(
+                    "waits_for upstream {} has no runs",
+                    upstream
+                ));
+            }
+        }
+    }
+    if queue_config.queue.trim().is_empty() {
+        return DependencyDecision::Waiting(format!(
+            "workflow {} has empty queue assignment",
+            workflow.id
+        ));
+    }
+    DependencyDecision::Ready
+}
+
+fn mark_trigger_context_admitted(
+    db: &Arc<Database>,
+    workflow_id: &str,
+    trigger_kind: Option<&str>,
+    trigger_payload: Option<&str>,
+) {
+    let Some(kind) = trigger_kind else {
+        return;
+    };
+    if kind != "file_arrival" && kind != "asset_update" {
+        return;
+    }
+    let Some(payload) = trigger_payload else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(payload) else {
+        return;
+    };
+    let Some(trigger_id) = value.get("trigger_id").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(fingerprint) = value.get("fingerprint").and_then(Value::as_str) else {
+        return;
+    };
+    let _ = db.set_trigger_state(workflow_id, trigger_id, fingerprint, true);
+}
+
 pub struct DueWorkflow {
     pub id: String,
     pub trigger_kind: Option<String>,
@@ -633,15 +652,59 @@ fn mutex_keys(workflow_id: &str, queue_config: &QueueConfig) -> Vec<String> {
         pair.sort();
         keys.push(format!("exclude:{}::{}", pair[0], pair[1]));
     }
-    for tag in &queue_config.tags {
-        keys.push(format!(
-            "tag:{}:{}:{}",
-            queue_config.corpus, queue_config.queue, tag
-        ));
-    }
+    // Tag concurrency is enforced by tag_cap counts rather than mutex keys so caps above 1 work.
     keys.sort();
     keys.dedup();
     keys
+}
+
+fn has_runtime_capacity(db: &Arc<Database>, queue_config: &QueueConfig) -> Result<bool, String> {
+    let capacity = db
+        .queue_capacity(&queue_config.queue, &queue_config.corpus)
+        .map_err(|e| e.to_string())?;
+    let running = running_count_for_queue(db, &queue_config.queue, &queue_config.corpus)?;
+    if running >= capacity {
+        return Ok(false);
+    }
+    let global_cap = db.global_parallelism_cap().map_err(|e| e.to_string())?;
+    if db.get_running_runs().map_err(|e| e.to_string())?.len() as i64 >= global_cap {
+        return Ok(false);
+    }
+    if let Some(tag_cap) = db
+        .queue_tag_cap(&queue_config.queue, &queue_config.corpus)
+        .map_err(|e| e.to_string())?
+    {
+        for tag in &queue_config.tags {
+            if running_count_for_tag(db, &queue_config.queue, &queue_config.corpus, tag)? >= tag_cap
+            {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn running_count_for_tag(
+    db: &Arc<Database>,
+    queue_name: &str,
+    corpus: &str,
+    tag: &str,
+) -> Result<i64, String> {
+    let running = db.get_running_runs().map_err(|e| e.to_string())?;
+    let mut count = 0;
+    for run in running {
+        let workflow = db
+            .get_workflow(&run.workflow_id)
+            .map_err(|e| e.to_string())?;
+        let config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
+        if config.queue == queue_name
+            && config.corpus == corpus
+            && config.tags.iter().any(|candidate| candidate == tag)
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 fn running_count_for_queue(
@@ -778,16 +841,13 @@ pub fn execute_workflow_with_context(
     input_json: Option<&str>,
     rerun_of_run_id: Option<&str>,
     queued_run_id: Option<&str>,
+    app_handle: Option<tauri::AppHandle>,
 ) -> Result<RunResult, String> {
     let workflow = db
         .get_workflow(workflow_id)
         .map_err(|e| format!("Failed to get workflow: {}", e))?;
     let queue_config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
-    let capacity = db
-        .queue_capacity(&queue_config.queue, &queue_config.corpus)
-        .map_err(|e| format!("Failed to read queue capacity: {}", e))?;
-    let running = running_count_for_queue(db, &queue_config.queue, &queue_config.corpus)?;
-    if running >= capacity {
+    if !has_runtime_capacity(db, &queue_config)? {
         let _ = db.upsert_queued_run_with_context(
             &workflow.id,
             &queue_config.queue,
@@ -799,8 +859,8 @@ pub fn execute_workflow_with_context(
             rerun_of_run_id,
         );
         return Err(format!(
-            "Queue {} is at capacity ({}/{})",
-            queue_config.queue, running, capacity
+            "Queue {} is at capacity or constrained by global/tag caps",
+            queue_config.queue
         ));
     }
     let mutex_keys = mutex_keys(&workflow.id, &queue_config);
@@ -815,11 +875,17 @@ pub fn execute_workflow_with_context(
             rerun_of_run_id,
         )
         .map_err(|e| format!("Failed to create run record: {}", e))?;
-    let _ = if let Some(queued_run_id) = queued_run_id {
-        db.mark_queued_run_admitted_by_id(queued_run_id, &run.id)
-    } else {
-        db.mark_queued_run_admitted(&workflow.id, &run.id)
-    };
+    if let Some(queued_run_id) = queued_run_id {
+        let updated = db
+            .mark_queued_run_admitted_by_id(queued_run_id, &run.id)
+            .map_err(|e| format!("Failed to admit queued run: {}", e))?;
+        if updated == 0 {
+            let reason = format!("Queued run {} is no longer available", queued_run_id);
+            let _ = db.finish_run_with_status(&run.id, "cancelled", "", &reason);
+            return Err(reason);
+        }
+    }
+    mark_trigger_context_admitted(db, &workflow.id, trigger_kind, trigger_payload);
 
     let acquired = db
         .acquire_mutex_locks(&workflow.id, &run.id, &mutex_keys)
@@ -901,6 +967,7 @@ pub fn execute_workflow_with_context(
                         sample_metadata,
                         notify_success,
                         notify_failure,
+                        app_handle.clone(),
                     );
                 });
 
@@ -934,8 +1001,17 @@ pub fn execute_workflow_with_context(
             })
         }
         Err(e) => {
-            let _ = db.finish_run(&run.id, -1, "", &format!("Failed to execute: {}", e), None);
-            Err(format!("Failed to execute workflow: {}", e))
+            let stderr = format!("Failed to execute: {}", e);
+            let _ = db.finish_run(&run.id, -1, "", &stderr, None);
+            Ok(RunResult {
+                run_id: run.id,
+                workflow_name: workflow.name,
+                script_path: workflow.script_path.clone(),
+                success: false,
+                completed: true,
+                should_notify: notify_on_failure,
+                email_on_failure: workflow.email_on_failure,
+            })
         }
     }
 }
@@ -993,7 +1069,47 @@ pub fn trigger_on_completion(
             "status": status,
         })
         .to_string();
-        if let Err(e) = execute_workflow_with_context(
+        let queue_config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
+        match dependency_decision_for_db(db, &workflow, &queue_config) {
+            DependencyDecision::Ready => {}
+            DependencyDecision::Waiting(reason) => {
+                log::info!(
+                    "Deferring completion-triggered workflow {} in queue {}: {}",
+                    workflow.id,
+                    queue_config.queue,
+                    reason
+                );
+                let _ = db.upsert_queued_run_with_context(
+                    &workflow.id,
+                    &queue_config.queue,
+                    queue_config.priority,
+                    Some("on_completion"),
+                    Some(&payload),
+                    Some(upstream_run_id),
+                    None,
+                    None,
+                );
+                continue;
+            }
+            DependencyDecision::CascadeSkip(reason) => {
+                let skip_payload = serde_json::json!({
+                    "reason": reason,
+                    "original_trigger_payload": payload,
+                })
+                .to_string();
+                let _ = db.create_terminal_run_with_context(
+                    &workflow.id,
+                    "cascade-skipped",
+                    Some("on_completion"),
+                    Some(&skip_payload),
+                    Some(upstream_run_id),
+                    None,
+                    None,
+                );
+                continue;
+            }
+        }
+        match execute_workflow_with_context(
             db,
             chaos_labs_root,
             python_path,
@@ -1007,12 +1123,27 @@ pub fn trigger_on_completion(
             None,
             None,
             None,
+            None,
         ) {
-            log::error!(
-                "Completion trigger failed for downstream workflow {}: {}",
-                workflow.id,
-                e
-            );
+            Ok(result) if result.completed => trigger_on_completion(
+                db,
+                chaos_labs_root,
+                python_path,
+                &workflow.id,
+                &result.run_id,
+                result.success,
+                notify_on_success,
+                notify_on_failure,
+                email_on_failure_enabled,
+            ),
+            Ok(_) => {}
+            Err(e) => {
+                log::error!(
+                    "Completion trigger failed for downstream workflow {}: {}",
+                    workflow.id,
+                    e
+                );
+            }
         }
     }
 }
@@ -1717,6 +1848,7 @@ fn monitor_background_pid(
     sample_metadata: ResourceSampleMetadata,
     notify_on_success: bool,
     notify_on_failure: bool,
+    app_handle: Option<tauri::AppHandle>,
 ) {
     log::info!(
         "Monitoring background PID {} for workflow '{}'",
@@ -1785,32 +1917,40 @@ fn monitor_background_pid(
 
     let _ = db.finish_run(run_id, exit_code, &stdout, "", result_url.as_deref());
 
-    if exit_code != 0 && email_enabled {
-        let result = RunResult {
-            run_id: run_id.to_string(),
-            workflow_name: wf_name.to_string(),
-            script_path: wf_script.to_string(),
-            success: false,
-            completed: true,
-            should_notify: true,
-            email_on_failure: true,
-        };
+    let success = exit_code == 0;
+    let result = RunResult {
+        run_id: run_id.to_string(),
+        workflow_name: wf_name.to_string(),
+        script_path: wf_script.to_string(),
+        success,
+        completed: true,
+        should_notify: if success {
+            notify_on_success
+        } else {
+            notify_on_failure
+        },
+        email_on_failure: true,
+    };
+    if result.should_notify {
+        if let Some(app_handle) = app_handle.as_ref() {
+            send_notification(app_handle, &result);
+        }
+    }
+    if !success && email_enabled {
         send_failure_email(db, chaos_labs_root, &result);
     }
 
-    if exit_code == 0 {
-        trigger_on_completion(
-            db,
-            chaos_labs_root,
-            python_path,
-            workflow_id,
-            run_id,
-            true,
-            notify_on_success,
-            notify_on_failure,
-            email_enabled,
-        );
-    }
+    trigger_on_completion(
+        db,
+        chaos_labs_root,
+        python_path,
+        workflow_id,
+        run_id,
+        success,
+        notify_on_success,
+        notify_on_failure,
+        email_enabled,
+    );
 }
 
 fn read_exit_status_from_dir(dir: &str) -> Option<i32> {
@@ -2017,6 +2157,7 @@ pub fn start_scheduler_loop(
                         wf.input_json.as_deref(),
                         wf.rerun_of_run_id.as_deref(),
                         wf.queued_run_id.as_deref(),
+                        Some(app_handle.clone()),
                     ) {
                         Ok(result) => {
                             if result.completed {
@@ -2847,7 +2988,7 @@ not json
     }
 
     #[test]
-    fn mutex_keys_include_pair_and_tag_groups() {
+    fn mutex_keys_include_pair_groups() {
         let config = parse_queue_config(
             Some(r#"{"excludes":["refresh"],"tags":["heavy_io"],"queue":"source-heavy"}"#),
             "source",
@@ -2855,13 +2996,7 @@ not json
 
         let keys = mutex_keys("capture", &config);
 
-        assert_eq!(
-            keys,
-            vec![
-                "exclude:capture::refresh".to_string(),
-                "tag:source:source-heavy:heavy_io".to_string()
-            ]
-        );
+        assert_eq!(keys, vec!["exclude:capture::refresh".to_string()]);
     }
 
     #[test]
