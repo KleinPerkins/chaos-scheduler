@@ -205,7 +205,7 @@ impl WorkflowScheduler {
             if !cron_triggers.is_empty() {
                 let cron_expr = cron_triggers.join("; ");
                 let tz = parse_tz(&workflow.timezone);
-                let since = now - chrono::Duration::days(2);
+                let since = now - chrono::Duration::days(8);
                 if let Some(scheduled_time) = latest_scheduled_multi(&cron_expr, tz, since, now) {
                     let last_run = workflow.last_run_at.as_ref().and_then(|s| {
                         chrono::DateTime::parse_from_rfc3339(s)
@@ -514,7 +514,7 @@ fn dependency_decision_for_db(
 ) -> DependencyDecision {
     for upstream in &queue_config.depends_on {
         match latest_status_for_db(db, upstream) {
-            Some(status) if status == "success" => {}
+            Some(status) if matches!(status.as_str(), "success" | "succeeded") => {}
             Some(status) if is_failure_terminal(&status) => {
                 return DependencyDecision::CascadeSkip(format!(
                     "depends_on upstream {} ended as {}",
@@ -729,12 +729,21 @@ fn running_count_for_queue(
 fn is_terminal_status(status: &str) -> bool {
     matches!(
         status,
-        "success" | "failed" | "cancelled" | "cascade-skipped"
+        "success"
+            | "succeeded"
+            | "failed"
+            | "cancelled"
+            | "cascade-skipped"
+            | "dead_letter"
+            | "dead_lettered"
     )
 }
 
 fn is_failure_terminal(status: &str) -> bool {
-    matches!(status, "failed" | "cancelled" | "cascade-skipped")
+    matches!(
+        status,
+        "failed" | "cancelled" | "cascade-skipped" | "dead_letter" | "dead_lettered"
+    )
 }
 
 /// Compute the next run time for a cron expression in the given timezone.
@@ -885,8 +894,6 @@ pub fn execute_workflow_with_context(
             return Err(reason);
         }
     }
-    mark_trigger_context_admitted(db, &workflow.id, trigger_kind, trigger_payload);
-
     let acquired = db
         .acquire_mutex_locks(&workflow.id, &run.id, &mutex_keys)
         .map_err(|e| format!("Failed to acquire mutex locks: {}", e))?;
@@ -898,6 +905,7 @@ pub fn execute_workflow_with_context(
         let _ = db.finish_run_with_status(&run.id, "cancelled", "", &reason);
         return Err(reason);
     }
+    mark_trigger_context_admitted(db, &workflow.id, trigger_kind, trigger_payload);
 
     let sample_metadata = ResourceSampleMetadata {
         db: Arc::clone(db),
@@ -961,6 +969,7 @@ pub fn execute_workflow_with_context(
                         bg_log.as_deref(),
                         log_start_offset,
                         email_enabled && wf_email,
+                        email_enabled,
                         &db,
                         &py,
                         &workflow_id,
@@ -1842,6 +1851,7 @@ fn monitor_background_pid(
     bg_log_path: Option<&str>,
     log_start_offset: Option<u64>,
     email_enabled: bool,
+    completion_email_enabled: bool,
     db: &Arc<Database>,
     python_path: &str,
     workflow_id: &str,
@@ -1949,7 +1959,7 @@ fn monitor_background_pid(
         success,
         notify_on_success,
         notify_on_failure,
-        email_enabled,
+        completion_email_enabled,
     );
 }
 
@@ -1971,10 +1981,6 @@ fn read_exit_status_from_dir(dir: &str) -> Option<i32> {
     None
 }
 
-fn read_exit_status(chaos_labs_root: &str) -> Option<i32> {
-    read_exit_status_from_dir(&format!("{}/data/context-capture", chaos_labs_root))
-}
-
 #[derive(Debug, Deserialize)]
 struct RunScopedStatus {
     run_id: Option<String>,
@@ -1989,7 +1995,7 @@ fn read_run_scoped_exit_status_from_dir(dir: &str, run_id: &str) -> Option<RunSc
         .join(format!("{}.json", run_id));
     let content = std::fs::read_to_string(path).ok()?;
     let parsed = serde_json::from_str::<RunScopedStatus>(&content).ok()?;
-    if parsed.run_id.as_deref().is_some_and(|id| id != run_id) {
+    if parsed.run_id.as_deref() != Some(run_id) {
         return None;
     }
     Some(parsed)
@@ -2009,6 +2015,9 @@ fn read_log_slice(path: &str, start_offset: Option<u64>) -> std::io::Result<Stri
 }
 
 fn infer_exit_code_from_current_output(stdout: &str) -> i32 {
+    if stdout.trim().is_empty() {
+        return 1;
+    }
     let success_markers = [
         "Context capture completed",
         "Context refresh completed",
@@ -2067,27 +2076,43 @@ fn recover_orphaned_runs(db: &Database, chaos_labs_root: &str) {
             }
         }
 
-        let result_url = extract_result_url(&best_stdout).or_else(|| {
-            if best_log_path.is_empty() {
-                None
-            } else {
-                Some(format!("file://{}", best_log_path))
-            }
-        });
+        let status_dirs = [
+            format!("{}/data/context-capture", chaos_labs_root),
+            format!("{}/data/context-refresh", chaos_labs_root),
+        ];
+        let run_status = status_dirs
+            .iter()
+            .find_map(|dir| read_run_scoped_exit_status_from_dir(dir, &run.id));
 
-        let exit_code =
-            read_exit_status_from_dir(&format!("{}/data/context-refresh", chaos_labs_root))
-                .or_else(|| read_exit_status(chaos_labs_root))
-                .unwrap_or_else(|| {
-                    if best_stdout.is_empty() {
-                        -1
-                    } else if best_stdout.contains("Traceback") || best_stdout.contains("] ERROR:")
-                    {
-                        1
-                    } else {
-                        0
-                    }
-                });
+        let result_url = run_status
+            .as_ref()
+            .and_then(|status| {
+                status
+                    .result_url
+                    .clone()
+                    .or_else(|| status.report_path.as_ref().map(|p| format!("file://{}", p)))
+            })
+            .or_else(|| extract_result_url(&best_stdout))
+            .or_else(|| {
+                if best_log_path.is_empty() {
+                    None
+                } else {
+                    Some(format!("file://{}", best_log_path))
+                }
+            });
+
+        let exit_code = run_status
+            .as_ref()
+            .and_then(|status| status.exit_code)
+            .unwrap_or_else(|| {
+                if best_stdout.is_empty() {
+                    -1
+                } else if best_stdout.contains("Traceback") || best_stdout.contains("] ERROR:") {
+                    1
+                } else {
+                    0
+                }
+            });
 
         let status_label = match exit_code {
             0 => "success",
@@ -2723,6 +2748,11 @@ mod tests {
     }
 
     #[test]
+    fn infer_exit_code_treats_empty_output_as_failure() {
+        assert_eq!(infer_exit_code_from_current_output(" \n\t"), 1);
+    }
+
+    #[test]
     fn run_scoped_status_ignores_other_run_ids() {
         let dir = std::env::temp_dir().join(format!("chaos-run-status-{}", uuid::Uuid::new_v4()));
         let status_dir = dir.join("run-status");
@@ -2732,6 +2762,19 @@ mod tests {
             r#"{"run_id":"run-b","exit_code":1}"#,
         )
         .unwrap();
+
+        let parsed = read_run_scoped_exit_status_from_dir(dir.to_str().unwrap(), "run-a");
+        let _ = std::fs::remove_dir_all(dir);
+
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn run_scoped_status_requires_matching_run_id_field() {
+        let dir = std::env::temp_dir().join(format!("chaos-run-status-{}", uuid::Uuid::new_v4()));
+        let status_dir = dir.join("run-status");
+        std::fs::create_dir_all(&status_dir).unwrap();
+        std::fs::write(status_dir.join("run-a.json"), r#"{"exit_code":0}"#).unwrap();
 
         let parsed = read_run_scoped_exit_status_from_dir(dir.to_str().unwrap(), "run-a");
         let _ = std::fs::remove_dir_all(dir);

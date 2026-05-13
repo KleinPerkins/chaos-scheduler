@@ -161,6 +161,119 @@ export interface SchedulerStatus {
   recent_runs: Run[];
 }
 
+export interface DomainOption {
+  value: string;
+  label: string;
+  workflow_count: number;
+}
+
+export interface MissionControlPreferences {
+  default_landing: "mission_control" | "dashboard";
+  corpus_filter: "all" | WorkflowCorpus;
+  domain_filter: string;
+}
+
+export interface MissionControlHeader {
+  active_workflows: number;
+  running_count: number;
+  queued_count: number;
+  recent_failures: number;
+}
+
+export interface MissionControlSlaSummary {
+  violations_count: number;
+  success_rate_24h: number | null;
+  median_wait_seconds: number | null;
+  long_running_count: number;
+  blocked_count: number;
+}
+
+export interface MissionControlNeedsAttentionItem {
+  id: string;
+  severity: string;
+  title: string;
+  detail: string;
+  workflow_id?: string | null;
+  workflow_name?: string | null;
+  run_id?: string | null;
+  target: string;
+}
+
+export interface MissionControlActivityItem {
+  id: string;
+  workflow_id: string;
+  workflow_name: string;
+  corpus: WorkflowCorpus;
+  domain: string;
+  status: string;
+  started_at: string;
+  finished_at?: string | null;
+  run_id: string;
+}
+
+export interface MissionControlUpcomingRun {
+  workflow_id: string;
+  workflow_name: string;
+  corpus: WorkflowCorpus;
+  domain: string;
+  trigger_kind: string;
+  trigger_label: string;
+  next_time: string;
+}
+
+export interface MissionControlFreshnessItem {
+  asset_id: string;
+  asset_kind: string;
+  asset_namespace: string;
+  asset_partition: string;
+  last_action?: string | null;
+  last_written_at?: string | null;
+  workflow_id?: string | null;
+  workflow_name?: string | null;
+  corpus?: WorkflowCorpus | null;
+  domain: string;
+  attribution: string;
+}
+
+export interface MissionControlWorkflowTelemetry {
+  workflow_id: string;
+  workflow_name: string;
+  corpus: WorkflowCorpus;
+  domain: string;
+  max_cpu_percent?: number | null;
+  max_memory_rss_bytes?: number | null;
+  sample_count: number;
+  total_tokens: number;
+  token_call_count: number;
+}
+
+export interface MissionControlPanelAvailability {
+  panel: string;
+  source_tables: string[];
+  command: string;
+  filter_behavior: string;
+  empty_state: string;
+  degraded_state: string;
+  click_through_target?: string | null;
+  persistence_required: boolean;
+}
+
+export interface MissionControlSnapshot {
+  preferences: MissionControlPreferences;
+  domains: DomainOption[];
+  header: MissionControlHeader;
+  sla: MissionControlSlaSummary;
+  needs_attention: MissionControlNeedsAttentionItem[];
+  needs_attention_total: number;
+  needs_attention_truncated: boolean;
+  live_activity: MissionControlActivityItem[];
+  upcoming_runs: MissionControlUpcomingRun[];
+  freshness_ledger: MissionControlFreshnessItem[];
+  recent_runs: Run[];
+  workflow_telemetry: MissionControlWorkflowTelemetry[];
+  availability: MissionControlPanelAvailability[];
+}
+
 export interface QueueInfo {
   name: string;
   corpus: WorkflowCorpus;
@@ -185,6 +298,11 @@ export interface QueuedRun {
   queued_at: string;
   admitted_at?: string | null;
   finished_at?: string | null;
+  trigger_kind?: string | null;
+  trigger_payload?: string | null;
+  upstream_run_id?: string | null;
+  input_json?: string | null;
+  rerun_of_run_id?: string | null;
 }
 
 export interface AvailableScript {
@@ -317,6 +435,29 @@ export function queryTokenUsageRollup(
 
 export function getSchedulerStatus(): Promise<SchedulerStatus> {
   return invoke("get_scheduler_status");
+}
+
+export function getMissionControlPreferences(): Promise<MissionControlPreferences> {
+  return invoke("get_mission_control_preferences");
+}
+
+export function setMissionControlPreferences(
+  defaultLanding: MissionControlPreferences["default_landing"],
+  corpusFilter: MissionControlPreferences["corpus_filter"],
+  domainFilter: string,
+): Promise<MissionControlPreferences> {
+  return invoke("set_mission_control_preferences", {
+    defaultLanding,
+    corpusFilter,
+    domainFilter,
+  });
+}
+
+export function getMissionControlSnapshot(
+  corpusFilter?: MissionControlPreferences["corpus_filter"],
+  domainFilter?: string,
+): Promise<MissionControlSnapshot> {
+  return invoke("get_mission_control_snapshot", { corpusFilter, domainFilter });
 }
 
 export function queryStaleAssets(maxAgeSeconds = 24 * 60 * 60, assetKind?: string): Promise<SchedulerAsset[]> {

@@ -25,14 +25,20 @@ function draftFromQueue(queue: QueueInfo): QueueDraft {
 function parseOptionalInt(value: string): number | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
-  return Number.parseInt(trimmed, 10);
+  if (!/^\d+$/.test(trimmed)) return Number.NaN;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(parsed) ? parsed : Number.NaN;
 }
 
 function validateDraft(queue: QueueInfo, draft: QueueDraft): string | null {
-  const capacity = Number.parseInt(draft.capacity, 10);
+  const capacityText = draft.capacity.trim();
+  if (!/^\d+$/.test(capacityText)) {
+    return "Queue capacity must be a whole number.";
+  }
+  const capacity = Number.parseInt(capacityText, 10);
   const tagCap = parseOptionalInt(draft.tagCap);
   const maxQueued = parseOptionalInt(draft.maxQueued);
-  if (!Number.isFinite(capacity) || capacity < 1) {
+  if (!Number.isSafeInteger(capacity) || capacity < 1) {
     return "Queue capacity must be at least 1.";
   }
   if (capacity > queue.global_parallelism_cap) {
@@ -57,7 +63,11 @@ function formatDate(value?: string | null): string {
   return date.toLocaleString();
 }
 
-export default function QueueView() {
+interface QueueViewProps {
+  onBack?: () => void;
+}
+
+export default function QueueView({ onBack }: QueueViewProps) {
   const [queues, setQueues] = useState<QueueInfo[]>([]);
   const [queuedRuns, setQueuedRuns] = useState<QueuedRun[]>([]);
   const [drafts, setDrafts] = useState<Record<string, QueueDraft>>({});
@@ -151,9 +161,16 @@ export default function QueueView() {
             Capacity, tag caps, and queued workflow administration
           </p>
         </div>
-        <button className="btn btn-ghost" onClick={load}>
-          Refresh
-        </button>
+        <div className="queue-actions">
+          {onBack && (
+            <button className="btn btn-ghost" onClick={onBack}>
+              Back to Mission Control
+            </button>
+          )}
+          <button className="btn btn-ghost" onClick={load}>
+            Refresh
+          </button>
+        </div>
       </div>
 
       {error && <div className="queue-error">{error}</div>}
@@ -186,6 +203,8 @@ export default function QueueView() {
                     Capacity
                     <input
                       type="number"
+                      inputMode="numeric"
+                      pattern="\d+"
                       min={1}
                       max={queue.global_parallelism_cap}
                       value={draft.capacity}
@@ -201,6 +220,8 @@ export default function QueueView() {
                     Tag cap
                     <input
                       type="number"
+                      inputMode="numeric"
+                      pattern="\d+"
                       min={1}
                       value={draft.tagCap}
                       placeholder="inherits queue"
@@ -216,6 +237,8 @@ export default function QueueView() {
                     Max queued
                     <input
                       type="number"
+                      inputMode="numeric"
+                      pattern="\d+"
                       min={0}
                       value={draft.maxQueued}
                       placeholder="unbounded"

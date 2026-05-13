@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { getRunHistory, getWorkflowHistoryBuckets, openUrl, rerunWorkflow } from "../lib/commands";
 import type { Run, Workflow, WorkflowHistoryBucket } from "../lib/commands";
 import "./RunHistory.css";
@@ -30,19 +30,24 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
   const [buckets, setBuckets] = useState<WorkflowHistoryBucket[]>([]);
   const [loading, setLoading] = useState(true);
   const [rerunning, setRerunning] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const refreshRuns = () => {
+  const refreshRuns = useCallback(() => {
     setLoading(true);
+    setError(null);
     return Promise.all([
       getRunHistory(workflow.id, 50).then(setRuns),
       getWorkflowHistoryBuckets(workflow.id, 30).then(setBuckets),
     ])
+      .catch((e) => {
+        setError(String(e));
+      })
       .finally(() => setLoading(false));
-  };
+  }, [workflow.id]);
 
   useEffect(() => {
-    refreshRuns();
-  }, [workflow.id]);
+    void refreshRuns();
+  }, [refreshRuns]);
 
   const handleRerun = async (run: Run) => {
     const input = window.prompt(
@@ -60,6 +65,8 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
     try {
       await rerunWorkflow(workflow.id, run.id, input || "{}");
       await refreshRuns();
+    } catch (e) {
+      window.alert(`Failed to rerun workflow: ${e}`);
     } finally {
       setRerunning(null);
     }
@@ -79,6 +86,13 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
 
       {loading ? (
         <div className="rh-loading">Loading...</div>
+      ) : error ? (
+        <div className="rh-error">
+          <span>Run history failed to load: {error}</span>
+          <button className="btn btn-ghost btn-sm" onClick={() => void refreshRuns()}>
+            Retry
+          </button>
+        </div>
       ) : runs.length === 0 ? (
         <div className="rh-empty">No runs yet for this workflow.</div>
       ) : (
@@ -118,7 +132,7 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
             </thead>
             <tbody>
               {runs.map((run) => (
-                <tr key={run.id} className="rh-row-clickable" onClick={() => onViewLog(run.id)}>
+                <tr key={run.id}>
                   <td>
                     <span className={`status-badge ${run.status}`}>
                       {run.status}
@@ -136,8 +150,7 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
                     {run.result_url ? (
                       <button
                         className="btn btn-ghost btn-sm"
-                        onClick={(e) => {
-                          e.stopPropagation();
+                        onClick={() => {
                           openUrl(run.result_url!);
                         }}
                       >
@@ -150,15 +163,19 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
                   <td>
                     <button
                       className="btn btn-ghost btn-sm"
+                      onClick={() => onViewLog(run.id)}
+                        aria-label={`View details for ${run.status} run started ${formatDate(run.started_at)}`}
+                    >
+                      Details
+                    </button>
+                    <button
+                      className="btn btn-ghost btn-sm"
                       disabled={rerunning === run.id || run.status === "running"}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleRerun(run);
-                      }}
+                      onClick={() => handleRerun(run)}
+                      aria-label={`Rerun ${run.status} run started ${formatDate(run.started_at)}`}
                     >
                       {rerunning === run.id ? "Rerunning..." : "Rerun"}
                     </button>
-                    <span className="rh-detail-arrow">→</span>
                   </td>
                 </tr>
               ))}

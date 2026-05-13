@@ -1,7 +1,15 @@
-.rh-loading, .rh-empty {
+.rh-loading, .rh-empty, .rh-error {
   padding: 40px;
   text-align: center;
   color: var(--text-muted);
+}
+
+.rh-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--error);
 }
 
 .rh-table {
@@ -89,21 +97,6 @@
 .rh-exit {
   font-family: var(--font-mono);
   font-size: 12px;
-}
-
-.rh-row-clickable {
-  cursor: pointer;
-}
-
-.rh-detail-arrow {
-  color: var(--text-muted);
-  font-size: 14px;
-  transition: color 0.1s;
-  margin-left: 8px;
-}
-
-.rh-row-clickable:hover .rh-detail-arrow {
-  color: var(--accent);
 }
 
 .rh-trigger-kind {

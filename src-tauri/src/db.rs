@@ -10,6 +10,33 @@ fn default_source_corpus() -> String {
     "source".to_string()
 }
 
+fn normalize_mission_corpus_filter(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "source" => "source".to_string(),
+        "instance" => "instance".to_string(),
+        _ => "all".to_string(),
+    }
+}
+
+fn normalize_mission_domain_filter(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
+        "all".to_string()
+    } else if trimmed.eq_ignore_ascii_case("unowned") || trimmed.eq_ignore_ascii_case("__unowned__")
+    {
+        "__unowned__".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn owner_label(domain: Option<String>) -> String {
+    match domain.map(|value| value.trim().to_string()) {
+        Some(value) if !value.is_empty() => value,
+        _ => "Unowned".to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workflow {
     pub id: String,
@@ -285,6 +312,130 @@ pub struct WorkflowTokenUsageRollup {
     pub token_kind: Option<String>,
     pub total_tokens: i64,
     pub call_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainOption {
+    pub value: String,
+    pub label: String,
+    pub workflow_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionControlPreferences {
+    pub default_landing: String,
+    pub corpus_filter: String,
+    pub domain_filter: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionControlHeader {
+    pub active_workflows: i64,
+    pub running_count: i64,
+    pub queued_count: i64,
+    pub recent_failures: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionControlSlaSummary {
+    pub violations_count: i64,
+    pub success_rate_24h: Option<f64>,
+    pub median_wait_seconds: Option<i64>,
+    pub long_running_count: i64,
+    pub blocked_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionControlNeedsAttentionItem {
+    pub id: String,
+    pub severity: String,
+    pub title: String,
+    pub detail: String,
+    pub workflow_id: Option<String>,
+    pub workflow_name: Option<String>,
+    pub run_id: Option<String>,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionControlActivityItem {
+    pub id: String,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub corpus: String,
+    pub domain: String,
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionControlFreshnessItem {
+    pub asset_id: String,
+    pub asset_kind: String,
+    pub asset_namespace: String,
+    pub asset_partition: String,
+    pub last_action: Option<String>,
+    pub last_written_at: Option<String>,
+    pub workflow_id: Option<String>,
+    pub workflow_name: Option<String>,
+    pub corpus: Option<String>,
+    pub domain: String,
+    pub attribution: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionControlWorkflowTelemetry {
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub corpus: String,
+    pub domain: String,
+    pub max_cpu_percent: Option<f64>,
+    pub max_memory_rss_bytes: Option<i64>,
+    pub sample_count: i64,
+    pub total_tokens: i64,
+    pub token_call_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionControlUpcomingRun {
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub corpus: String,
+    pub domain: String,
+    pub trigger_kind: String,
+    pub trigger_label: String,
+    pub next_time: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionControlPanelAvailability {
+    pub panel: String,
+    pub source_tables: Vec<String>,
+    pub command: String,
+    pub filter_behavior: String,
+    pub empty_state: String,
+    pub degraded_state: String,
+    pub click_through_target: Option<String>,
+    pub persistence_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionControlSnapshot {
+    pub preferences: MissionControlPreferences,
+    pub domains: Vec<DomainOption>,
+    pub header: MissionControlHeader,
+    pub sla: MissionControlSlaSummary,
+    pub needs_attention: Vec<MissionControlNeedsAttentionItem>,
+    pub needs_attention_total: i64,
+    pub needs_attention_truncated: bool,
+    pub live_activity: Vec<MissionControlActivityItem>,
+    pub upcoming_runs: Vec<MissionControlUpcomingRun>,
+    pub freshness_ledger: Vec<MissionControlFreshnessItem>,
+    pub recent_runs: Vec<Run>,
+    pub workflow_telemetry: Vec<MissionControlWorkflowTelemetry>,
+    pub availability: Vec<MissionControlPanelAvailability>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -865,16 +1016,21 @@ impl Database {
     ) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let status = if exit_code == 0 { "success" } else { "failed" };
-        let conn = self.conn()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
             "UPDATE runs SET finished_at = ?2, exit_code = ?3, stdout = ?4, stderr = ?5, result_url = ?6, status = ?7 WHERE id = ?1",
             params![id, now, exit_code, stdout, stderr, result_url, status],
         )?;
-        conn.execute(
+        tx.execute(
             "UPDATE queued_runs SET status = ?2, finished_at = ?3 WHERE run_id = ?1",
             params![id, status, now],
         )?;
-        let _ = self.release_mutex_locks(id);
+        tx.execute(
+            "DELETE FROM workflow_mutex_locks WHERE run_id = ?1",
+            params![id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -886,16 +1042,21 @@ impl Database {
         stderr: &str,
     ) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        let conn = self.conn()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
             "UPDATE runs SET finished_at = ?2, stdout = ?3, stderr = ?4, status = ?5 WHERE id = ?1",
             params![id, now, stdout, stderr, status],
         )?;
-        conn.execute(
+        tx.execute(
             "UPDATE queued_runs SET status = ?2, finished_at = ?3 WHERE run_id = ?1",
             params![id, status, now],
         )?;
-        let _ = self.release_mutex_locks(id);
+        tx.execute(
+            "DELETE FROM workflow_mutex_locks WHERE run_id = ?1",
+            params![id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 }
@@ -1094,7 +1255,10 @@ impl Database {
              ON CONFLICT(asset_kind, asset_namespace, asset_partition) DO UPDATE SET
                 last_action = COALESCE(excluded.last_action, scheduler_assets.last_action),
                 last_written_at = COALESCE(excluded.last_written_at, scheduler_assets.last_written_at),
-                last_writer_run_id = COALESCE(excluded.last_writer_run_id, scheduler_assets.last_writer_run_id),
+                last_writer_run_id = CASE
+                    WHEN excluded.last_written_at IS NOT NULL THEN excluded.last_writer_run_id
+                    ELSE scheduler_assets.last_writer_run_id
+                END,
                 freshness_policy_json = COALESCE(excluded.freshness_policy_json, scheduler_assets.freshness_policy_json),
                 updated_at = datetime('now')",
             params![asset_id, asset_kind, asset_namespace, asset_partition, last_action, last_written_at, last_writer_run_id, freshness_policy_json],
@@ -1438,6 +1602,460 @@ impl Database {
         rows.collect()
     }
 
+    pub fn list_workflows_filtered(
+        &self,
+        corpus_filter: &str,
+        domain_filter: &str,
+    ) -> rusqlite::Result<Vec<Workflow>> {
+        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let domain_filter = normalize_mission_domain_filter(domain_filter);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config
+             FROM workflows w
+             WHERE (?1 = 'all' OR w.corpus = ?1)
+               AND (?2 = 'all'
+                 OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
+                 OR TRIM(w.domain) = ?2)
+             ORDER BY w.corpus, COALESCE(NULLIF(TRIM(w.domain), ''), 'Unowned'), w.name",
+        )?;
+        let rows = stmt.query_map(params![corpus_filter, domain_filter], |row| {
+            Ok(Workflow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                script_path: row.get(3)?,
+                cron_schedule: row.get(4)?,
+                enabled: row.get::<_, i32>(5)? != 0,
+                async_mode: row.get::<_, i32>(6).unwrap_or(0) != 0,
+                last_run_at: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+                email_on_failure: row.get::<_, i32>(10).unwrap_or(1) != 0,
+                timezone: row
+                    .get::<_, String>(11)
+                    .unwrap_or_else(|_| "UTC".to_string()),
+                corpus: row
+                    .get::<_, String>(12)
+                    .unwrap_or_else(|_| "source".to_string()),
+                domain: row.get(13).unwrap_or(None),
+                trigger_config: row.get(14).unwrap_or(None),
+                queue_config: row.get(15).unwrap_or(None),
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn mission_control_domains(
+        &self,
+        corpus_filter: &str,
+    ) -> rusqlite::Result<Vec<DomainOption>> {
+        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(NULLIF(TRIM(domain), ''), 'Unowned') AS owner, COUNT(*)
+             FROM workflows
+             WHERE (?1 = 'all' OR corpus = ?1)
+             GROUP BY owner
+             ORDER BY CASE owner WHEN 'Unowned' THEN 1 ELSE 0 END, owner",
+        )?;
+        let rows = stmt.query_map(params![corpus_filter], |row| {
+            let label: String = row.get(0)?;
+            Ok(DomainOption {
+                value: if label == "Unowned" {
+                    "__unowned__".to_string()
+                } else {
+                    label.clone()
+                },
+                label,
+                workflow_count: row.get(1)?,
+            })
+        })?;
+        let mut out = vec![DomainOption {
+            value: "all".to_string(),
+            label: "All".to_string(),
+            workflow_count: self.list_workflows_filtered(&corpus_filter, "all")?.len() as i64,
+        }];
+        out.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+        Ok(out)
+    }
+
+    pub fn mission_control_header(
+        &self,
+        corpus_filter: &str,
+        domain_filter: &str,
+    ) -> rusqlite::Result<MissionControlHeader> {
+        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let domain_filter = normalize_mission_domain_filter(domain_filter);
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT
+                COUNT(DISTINCT CASE WHEN w.enabled = 1 THEN w.id END) AS active_workflows,
+                SUM(CASE WHEN r.status = 'running' THEN 1 ELSE 0 END) AS running_count,
+                (SELECT COUNT(*)
+                   FROM queued_runs q JOIN workflows qw ON qw.id = q.workflow_id
+                  WHERE q.status IN ('queued', 'admitted')
+                    AND (?1 = 'all' OR qw.corpus = ?1)
+                    AND (?2 = 'all'
+                      OR (?2 = '__unowned__' AND (qw.domain IS NULL OR TRIM(qw.domain) = ''))
+                      OR TRIM(qw.domain) = ?2)) AS queued_count,
+                SUM(CASE WHEN r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
+                          AND datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', '-1 day')
+                         THEN 1 ELSE 0 END) AS recent_failures
+             FROM workflows w
+             LEFT JOIN runs r ON r.workflow_id = w.id
+             WHERE (?1 = 'all' OR w.corpus = ?1)
+               AND (?2 = 'all'
+                 OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
+                 OR TRIM(w.domain) = ?2)",
+            params![corpus_filter, domain_filter],
+            |row| {
+                Ok(MissionControlHeader {
+                    active_workflows: row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                    running_count: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    queued_count: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    recent_failures: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                })
+            },
+        )
+    }
+
+    pub fn mission_control_sla_summary(
+        &self,
+        corpus_filter: &str,
+        domain_filter: &str,
+        violations_count: i64,
+    ) -> rusqlite::Result<MissionControlSlaSummary> {
+        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let domain_filter = normalize_mission_domain_filter(domain_filter);
+        let conn = self.conn()?;
+        let (total, succeeded): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*),
+                    SUM(CASE WHEN r.status IN ('success', 'succeeded') THEN 1 ELSE 0 END)
+             FROM runs r
+             JOIN workflows w ON w.id = r.workflow_id
+             WHERE datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', '-1 day')
+               AND r.status IN ('success', 'succeeded', 'failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
+               AND (?1 = 'all' OR w.corpus = ?1)
+               AND (?2 = 'all'
+                 OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
+                 OR TRIM(w.domain) = ?2)",
+            params![corpus_filter, domain_filter],
+            |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+        )?;
+        let median_wait_seconds = conn
+            .query_row(
+                "SELECT CAST((julianday(admitted_at) - julianday(queued_at)) * 86400 AS INTEGER)
+                 FROM queued_runs q
+                 JOIN workflows w ON w.id = q.workflow_id
+                 WHERE q.admitted_at IS NOT NULL
+                   AND datetime(q.queued_at) >= datetime('now', '-1 day')
+                   AND (?1 = 'all' OR w.corpus = ?1)
+                   AND (?2 = 'all'
+                     OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
+                     OR TRIM(w.domain) = ?2)
+                 ORDER BY (julianday(admitted_at) - julianday(queued_at))
+                 LIMIT 1 OFFSET (
+                   SELECT COUNT(*) / 2
+                   FROM queued_runs mq
+                   JOIN workflows mw ON mw.id = mq.workflow_id
+                   WHERE mq.admitted_at IS NOT NULL
+                     AND datetime(mq.queued_at) >= datetime('now', '-1 day')
+                     AND (?1 = 'all' OR mw.corpus = ?1)
+                     AND (?2 = 'all'
+                       OR (?2 = '__unowned__' AND (mw.domain IS NULL OR TRIM(mw.domain) = ''))
+                       OR TRIM(mw.domain) = ?2)
+                 )",
+                params![corpus_filter, domain_filter],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let blocked_count: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM queued_runs q JOIN workflows w ON w.id = q.workflow_id
+             WHERE q.status = 'queued'
+               AND (?1 = 'all' OR w.corpus = ?1)
+               AND (?2 = 'all'
+                 OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
+                 OR TRIM(w.domain) = ?2)",
+            params![corpus_filter, domain_filter],
+            |row| row.get(0),
+        )?;
+        Ok(MissionControlSlaSummary {
+            violations_count,
+            success_rate_24h: if total > 0 {
+                Some(succeeded as f64 / total as f64)
+            } else {
+                None
+            },
+            median_wait_seconds,
+            long_running_count: violations_count,
+            blocked_count,
+        })
+    }
+
+    pub fn mission_control_recent_runs(
+        &self,
+        corpus_filter: &str,
+        domain_filter: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<Run>> {
+        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let domain_filter = normalize_mission_domain_filter(domain_filter);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis, r.trigger_kind, r.trigger_payload, r.upstream_run_id, r.input_json, r.rerun_of_run_id
+             FROM runs r
+             JOIN workflows w ON w.id = r.workflow_id
+             WHERE (?1 = 'all' OR w.corpus = ?1)
+               AND (?2 = 'all'
+                 OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
+                 OR TRIM(w.domain) = ?2)
+             ORDER BY r.started_at DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![corpus_filter, domain_filter, limit], |row| {
+            Ok(run_from_row(row))
+        })?;
+        rows.collect()
+    }
+
+    pub fn mission_control_failed_runs(
+        &self,
+        corpus_filter: &str,
+        domain_filter: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<Run>> {
+        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let domain_filter = normalize_mission_domain_filter(domain_filter);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "WITH ranked_terminal AS (
+                SELECT r.*,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY r.workflow_id
+                         ORDER BY COALESCE(r.finished_at, r.started_at) DESC, r.rowid DESC
+                       ) AS terminal_rank
+                FROM runs r
+                WHERE r.status IN ('success', 'succeeded', 'failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
+             ),
+             latest_terminal AS (
+                SELECT * FROM ranked_terminal WHERE terminal_rank = 1
+             )
+             SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis, r.trigger_kind, r.trigger_payload, r.upstream_run_id, r.input_json, r.rerun_of_run_id
+             FROM latest_terminal r
+             JOIN workflows w ON w.id = r.workflow_id
+             WHERE r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
+               AND (?1 = 'all' OR w.corpus = ?1)
+               AND (?2 = 'all'
+                 OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
+                 OR TRIM(w.domain) = ?2)
+             ORDER BY COALESCE(r.finished_at, r.started_at) DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![corpus_filter, domain_filter, limit], |row| {
+            Ok(run_from_row(row))
+        })?;
+        rows.collect()
+    }
+
+    pub fn mission_control_failed_run_count(
+        &self,
+        corpus_filter: &str,
+        domain_filter: &str,
+    ) -> rusqlite::Result<i64> {
+        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let domain_filter = normalize_mission_domain_filter(domain_filter);
+        let conn = self.conn()?;
+        conn.query_row(
+            "WITH ranked_terminal AS (
+                SELECT r.*,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY r.workflow_id
+                         ORDER BY COALESCE(r.finished_at, r.started_at) DESC, r.rowid DESC
+                       ) AS terminal_rank
+                FROM runs r
+                WHERE r.status IN ('success', 'succeeded', 'failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
+             ),
+             latest_terminal AS (
+                SELECT * FROM ranked_terminal WHERE terminal_rank = 1
+             )
+             SELECT COUNT(*)
+             FROM latest_terminal r
+             JOIN workflows w ON w.id = r.workflow_id
+             WHERE r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
+               AND (?1 = 'all' OR w.corpus = ?1)
+               AND (?2 = 'all'
+                 OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
+                 OR TRIM(w.domain) = ?2)",
+            params![corpus_filter, domain_filter],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn mission_control_live_activity(
+        &self,
+        corpus_filter: &str,
+        domain_filter: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<MissionControlActivityItem>> {
+        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let domain_filter = normalize_mission_domain_filter(domain_filter);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.workflow_id, w.name, w.corpus, w.domain, r.status, r.started_at, r.finished_at
+             FROM runs r
+             JOIN workflows w ON w.id = r.workflow_id
+             WHERE (?1 = 'all' OR w.corpus = ?1)
+               AND (?2 = 'all'
+                 OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
+                 OR TRIM(w.domain) = ?2)
+             ORDER BY CASE r.status WHEN 'running' THEN 0 ELSE 1 END, r.started_at DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![corpus_filter, domain_filter, limit], |row| {
+            let run_id: String = row.get(0)?;
+            Ok(MissionControlActivityItem {
+                id: run_id.clone(),
+                workflow_id: row.get(1)?,
+                workflow_name: row.get(2)?,
+                corpus: row.get(3)?,
+                domain: owner_label(row.get(4)?),
+                status: row.get(5)?,
+                started_at: row.get(6)?,
+                finished_at: row.get(7)?,
+                run_id,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn mission_control_freshness_ledger(
+        &self,
+        corpus_filter: &str,
+        domain_filter: &str,
+        max_age_seconds: i64,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<MissionControlFreshnessItem>> {
+        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let domain_filter = normalize_mission_domain_filter(domain_filter);
+        let modifier = format!("-{} seconds", max_age_seconds.max(0));
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT a.asset_id, a.asset_kind, a.asset_namespace, a.asset_partition, a.last_action,
+                    a.last_written_at, r.workflow_id, w.name, w.corpus, w.domain
+             FROM scheduler_assets a
+             LEFT JOIN runs r ON r.id = a.last_writer_run_id
+             LEFT JOIN workflows w ON w.id = r.workflow_id
+             WHERE (a.last_written_at IS NULL OR datetime(a.last_written_at) <= datetime('now', ?3))
+               AND (
+                 (w.id IS NOT NULL
+                   AND (?1 = 'all' OR w.corpus = ?1)
+                   AND (?2 = 'all'
+                     OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
+                     OR TRIM(w.domain) = ?2))
+                 OR (w.id IS NULL AND ?1 = 'all' AND ?2 = 'all')
+               )
+             ORDER BY COALESCE(a.last_written_at, '') ASC, a.asset_kind ASC, a.asset_namespace ASC
+             LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(
+            params![corpus_filter, domain_filter, modifier, limit],
+            |row| {
+                let workflow_id: Option<String> = row.get(6)?;
+                Ok(MissionControlFreshnessItem {
+                    asset_id: row.get(0)?,
+                    asset_kind: row.get(1)?,
+                    asset_namespace: row.get(2)?,
+                    asset_partition: row.get(3)?,
+                    last_action: row.get(4)?,
+                    last_written_at: row.get(5)?,
+                    workflow_id: workflow_id.clone(),
+                    workflow_name: row.get(7)?,
+                    corpus: row.get(8)?,
+                    domain: owner_label(row.get(9)?),
+                    attribution: if workflow_id.is_some() {
+                        "last_writer_run".to_string()
+                    } else {
+                        "unattributed_all_only".to_string()
+                    },
+                })
+            },
+        )?;
+        rows.collect()
+    }
+
+    pub fn mission_control_workflow_telemetry(
+        &self,
+        corpus_filter: &str,
+        domain_filter: &str,
+        window_modifier: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<MissionControlWorkflowTelemetry>> {
+        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let domain_filter = normalize_mission_domain_filter(domain_filter);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "WITH visible_workflows AS (
+                SELECT w.id, w.name, w.corpus, w.domain
+                FROM workflows w
+                WHERE w.enabled = 1
+                  AND (?1 = 'all' OR w.corpus = ?1)
+                  AND (?2 = 'all'
+                    OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
+                    OR TRIM(w.domain) = ?2)
+                ORDER BY w.corpus, COALESCE(NULLIF(TRIM(w.domain), ''), 'Unowned'), w.name
+                LIMIT ?4
+             ),
+             resource_rollup AS (
+                SELECT s.workflow_id,
+                       MAX(s.cpu_percent) AS max_cpu_percent,
+                       MAX(s.memory_rss_bytes) AS max_memory_rss_bytes,
+                       COUNT(s.id) AS sample_count
+                FROM workflow_resource_samples s
+                JOIN visible_workflows vw ON vw.id = s.workflow_id
+                WHERE datetime(s.sampled_at) >= datetime('now', ?3)
+                GROUP BY s.workflow_id
+             ),
+             token_rollup AS (
+                SELECT t.workflow_id,
+                       SUM(t.token_count) AS total_tokens,
+                       COUNT(DISTINCT COALESCE(json_extract(t.labels_json, '$.call_id'), t.id)) AS token_call_count
+                FROM workflow_token_usage t
+                JOIN visible_workflows vw ON vw.id = t.workflow_id
+                WHERE datetime(t.emitted_at) >= datetime('now', ?3)
+                GROUP BY t.workflow_id
+             )
+             SELECT vw.id, vw.name, vw.corpus, vw.domain,
+                    r.max_cpu_percent,
+                    r.max_memory_rss_bytes,
+                    COALESCE(r.sample_count, 0),
+                    COALESCE(t.total_tokens, 0),
+                    COALESCE(t.token_call_count, 0)
+             FROM visible_workflows vw
+             LEFT JOIN resource_rollup r ON r.workflow_id = vw.id
+             LEFT JOIN token_rollup t ON t.workflow_id = vw.id
+             ORDER BY vw.corpus, COALESCE(NULLIF(TRIM(vw.domain), ''), 'Unowned'), vw.name",
+        )?;
+        let rows = stmt.query_map(
+            params![corpus_filter, domain_filter, window_modifier, limit],
+            |row| {
+                Ok(MissionControlWorkflowTelemetry {
+                    workflow_id: row.get(0)?,
+                    workflow_name: row.get(1)?,
+                    corpus: row.get(2)?,
+                    domain: owner_label(row.get(3)?),
+                    max_cpu_percent: row.get(4)?,
+                    max_memory_rss_bytes: row.get(5)?,
+                    sample_count: row.get(6)?,
+                    total_tokens: row.get(7)?,
+                    token_call_count: row.get(8)?,
+                })
+            },
+        )?;
+        rows.collect()
+    }
+
     pub fn get_run_tasks(&self, run_id: &str) -> rusqlite::Result<Vec<RunTask>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -1581,8 +2199,8 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT substr(started_at, 1, 10) AS day,
                     COUNT(*) AS total,
-                    SUM(CASE WHEN status = 'failed' OR status = 'dead_letter' THEN 1 ELSE 0 END) AS failed,
-                    SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded
+                    SUM(CASE WHEN status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered') THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN status IN ('success', 'succeeded') THEN 1 ELSE 0 END) AS succeeded
              FROM runs
              WHERE workflow_id = ?1 AND datetime(started_at) >= datetime('now', ?2)
              GROUP BY day
@@ -1706,9 +2324,11 @@ impl Database {
             if let Some(min_rate) = sla.get("min_success_rate_24h").and_then(|v| v.as_f64()) {
                 let conn = self.conn()?;
                 let (total, succeeded): (i64, i64) = conn.query_row(
-                    "SELECT COUNT(*), SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END)
+                    "SELECT COUNT(*), SUM(CASE WHEN status IN ('success', 'succeeded') THEN 1 ELSE 0 END)
                      FROM runs
-                     WHERE workflow_id = ?1 AND datetime(started_at) >= datetime('now', '-1 day')",
+                     WHERE workflow_id = ?1
+                       AND datetime(started_at) >= datetime('now', '-1 day')
+                       AND status IN ('success', 'succeeded', 'failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')",
                     params![workflow.id],
                     |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
                 )?;
@@ -1873,6 +2493,16 @@ impl Database {
         Ok(())
     }
 
+    fn get_string_config(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT value FROM scheduler_config WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
     pub fn get_notification_prefs(&self) -> rusqlite::Result<(bool, bool)> {
         Ok((
             self.get_bool_config("notify_on_failure", true)?,
@@ -1888,6 +2518,61 @@ impl Database {
         self.set_bool_config("notify_on_failure", notify_on_failure)?;
         self.set_bool_config("notify_on_success", notify_on_success)?;
         Ok(())
+    }
+
+    pub fn get_mission_control_preferences(&self) -> rusqlite::Result<MissionControlPreferences> {
+        let default_landing = match self
+            .get_string_config("mission_control.default_landing")?
+            .unwrap_or_else(|| "mission_control".to_string())
+            .trim()
+        {
+            "dashboard" => "dashboard".to_string(),
+            _ => "mission_control".to_string(),
+        };
+        let corpus_filter = normalize_mission_corpus_filter(
+            &self
+                .get_string_config("mission_control.corpus_filter")?
+                .unwrap_or_else(|| "all".to_string()),
+        );
+        let domain_filter = normalize_mission_domain_filter(
+            &self
+                .get_string_config("mission_control.domain_filter")?
+                .unwrap_or_else(|| "all".to_string()),
+        );
+        Ok(MissionControlPreferences {
+            default_landing,
+            corpus_filter,
+            domain_filter,
+        })
+    }
+
+    pub fn set_mission_control_preferences(
+        &self,
+        default_landing: &str,
+        corpus_filter: &str,
+        domain_filter: &str,
+    ) -> rusqlite::Result<MissionControlPreferences> {
+        let default_landing = match default_landing.trim() {
+            "dashboard" => "dashboard".to_string(),
+            _ => "mission_control".to_string(),
+        };
+        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let domain_filter = normalize_mission_domain_filter(domain_filter);
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        for (key, value) in [
+            ("mission_control.default_landing", default_landing.as_str()),
+            ("mission_control.corpus_filter", corpus_filter.as_str()),
+            ("mission_control.domain_filter", domain_filter.as_str()),
+        ] {
+            tx.execute(
+                "INSERT INTO scheduler_config (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params![key, value],
+            )?;
+        }
+        tx.commit()?;
+        self.get_mission_control_preferences()
     }
 
     pub fn validate_queue_cap_lattice(&self) -> rusqlite::Result<Vec<String>> {
@@ -2272,6 +2957,7 @@ impl Database {
         Ok(true)
     }
 
+    #[allow(dead_code)]
     pub fn release_mutex_locks(&self, run_id: &str) -> rusqlite::Result<usize> {
         let conn = self.conn()?;
         conn.execute(
@@ -2733,6 +3419,427 @@ SUMMARY_JSON:{\"title\":\"current\"}
             )
             .unwrap();
         assert_eq!(updated.domain.as_deref(), Some("agent-ecosystem"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mission_control_preferences_fall_back_from_invalid_values() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let conn = db.conn().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO scheduler_config (key, value) VALUES ('mission_control.default_landing', 'surprise')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO scheduler_config (key, value) VALUES ('mission_control.corpus_filter', 'both')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO scheduler_config (key, value) VALUES ('mission_control.domain_filter', '  ')",
+            [],
+        )
+        .unwrap();
+
+        let prefs = db.get_mission_control_preferences().unwrap();
+        assert_eq!(prefs.default_landing, "mission_control");
+        assert_eq!(prefs.corpus_filter, "all");
+        assert_eq!(prefs.domain_filter, "all");
+
+        let prefs = db
+            .set_mission_control_preferences("dashboard", "source", "Unowned")
+            .unwrap();
+        assert_eq!(prefs.default_landing, "dashboard");
+        assert_eq!(prefs.corpus_filter, "source");
+        assert_eq!(prefs.domain_filter, "__unowned__");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mission_control_read_models_filter_before_limits_and_account_success_statuses() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let source = db
+            .create_workflow(
+                "Source Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let legacy_source = db
+            .create_workflow(
+                "Legacy Success Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 1 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let instance = db
+            .create_workflow(
+                "Instance Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 2 * * *",
+                false,
+                true,
+                "UTC",
+                "instance",
+                Some("card"),
+                None,
+                None,
+            )
+            .unwrap();
+        let unowned = db
+            .create_workflow(
+                "Unowned Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 3 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("   "),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let source_run = db
+            .create_terminal_run_with_context(&source.id, "success", None, None, None, None, None)
+            .unwrap();
+        db.create_terminal_run_with_context(&source.id, "success", None, None, None, None, None)
+            .unwrap();
+        db.create_terminal_run_with_context(
+            &legacy_source.id,
+            "succeeded",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let instance_run = db
+            .create_terminal_run_with_context(&instance.id, "failed", None, None, None, None, None)
+            .unwrap();
+        db.upsert_queued_run(&instance.id, "instance-default", 1)
+            .unwrap();
+
+        let source_header = db.mission_control_header("source", "scheduler").unwrap();
+        assert_eq!(source_header.active_workflows, 2);
+        assert_eq!(source_header.queued_count, 0);
+        assert_eq!(source_header.recent_failures, 0);
+
+        let instance_header = db.mission_control_header("instance", "all").unwrap();
+        assert_eq!(instance_header.queued_count, 1);
+        assert_eq!(instance_header.recent_failures, 1);
+
+        let source_runs = db
+            .mission_control_recent_runs("source", "scheduler", 1)
+            .unwrap();
+        assert_eq!(source_runs.len(), 1);
+        assert_ne!(source_runs[0].workflow_id, instance.id);
+
+        let sla = db
+            .mission_control_sla_summary("source", "scheduler", 0)
+            .unwrap();
+        assert_eq!(sla.success_rate_24h, Some(1.0));
+
+        let bucket = db.workflow_history_buckets(&legacy_source.id, 1).unwrap();
+        assert_eq!(bucket[0].succeeded, 1);
+
+        let unowned_rows = db.list_workflows_filtered("all", "__unowned__").unwrap();
+        assert_eq!(unowned_rows[0].id, unowned.id);
+
+        let domains = db.mission_control_domains("all").unwrap();
+        assert!(domains.iter().any(|domain| domain.value == "__unowned__"));
+        let source_domains = db.mission_control_domains("source").unwrap();
+        assert!(source_domains
+            .iter()
+            .any(|domain| domain.value == "scheduler"));
+        assert!(!source_domains.iter().any(|domain| domain.value == "card"));
+
+        db.upsert_scheduler_asset(
+            "source",
+            "kg",
+            "projects-attributed",
+            Some("write"),
+            Some(&source_run.id),
+            None,
+        )
+        .unwrap();
+        db.upsert_scheduler_asset(
+            "source",
+            "kg",
+            "projects-rewritten",
+            Some("write"),
+            Some(&source_run.id),
+            None,
+        )
+        .unwrap();
+        db.upsert_scheduler_asset(
+            "source",
+            "kg",
+            "projects-rewritten",
+            Some("write"),
+            None,
+            None,
+        )
+        .unwrap();
+        db.upsert_scheduler_asset("source", "manual", "unknown", Some("write"), None, None)
+            .unwrap();
+        let source_assets = db
+            .mission_control_freshness_ledger("source", "scheduler", 0, 10)
+            .unwrap();
+        assert_eq!(source_assets.len(), 1);
+        assert_eq!(source_assets[0].attribution, "last_writer_run");
+        assert_eq!(source_assets[0].asset_partition, "projects-attributed");
+        let all_assets = db
+            .mission_control_freshness_ledger("all", "all", 0, 10)
+            .unwrap();
+        assert!(all_assets
+            .iter()
+            .any(|asset| asset.attribution == "unattributed_all_only"));
+        let rewritten_asset = all_assets
+            .iter()
+            .find(|asset| asset.asset_partition == "projects-rewritten")
+            .unwrap();
+        assert_eq!(rewritten_asset.attribution, "unattributed_all_only");
+        assert!(rewritten_asset.workflow_id.is_none());
+        assert!(rewritten_asset.corpus.is_none());
+
+        assert_eq!(instance_run.status, "failed");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mission_control_failed_runs_count_current_terminal_failures_before_limit() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        let recovered = db
+            .create_workflow(
+                "Recovered Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        db.create_terminal_run_with_context(&recovered.id, "failed", None, None, None, None, None)
+            .unwrap();
+        db.create_terminal_run_with_context(&recovered.id, "success", None, None, None, None, None)
+            .unwrap();
+
+        let mut old_started_failure_id = None;
+        for idx in 0..6 {
+            let workflow = db
+                .create_workflow(
+                    &format!("Failing Workflow {}", idx),
+                    None,
+                    "scripts/workflows/noop.py",
+                    "0 0 * * *",
+                    false,
+                    true,
+                    "UTC",
+                    "source",
+                    Some("scheduler"),
+                    None,
+                    None,
+                )
+                .unwrap();
+            let run = db
+                .create_terminal_run_with_context(
+                    &workflow.id,
+                    "failed",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            if idx == 0 {
+                old_started_failure_id = Some(run.id);
+            }
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        db.conn()
+            .unwrap()
+            .execute(
+                "UPDATE runs SET started_at = ?2, finished_at = ?3 WHERE id = ?1",
+                params![
+                    old_started_failure_id.unwrap(),
+                    "2000-01-01T00:00:00+00:00",
+                    now
+                ],
+            )
+            .unwrap();
+
+        let failed_count = db
+            .mission_control_failed_run_count("source", "scheduler")
+            .unwrap();
+        assert_eq!(failed_count, 6);
+
+        let displayed = db
+            .mission_control_failed_runs("source", "scheduler", 4)
+            .unwrap();
+        assert_eq!(displayed.len(), 4);
+        assert!(!displayed.iter().any(|run| run.workflow_id == recovered.id));
+
+        let header = db.mission_control_header("source", "scheduler").unwrap();
+        assert_eq!(header.recent_failures, 7);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mission_control_telemetry_batches_visible_workflows() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let source = db
+            .create_workflow(
+                "Source Telemetry",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let instance = db
+            .create_workflow(
+                "Instance Telemetry",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "instance",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let second_source = db
+            .create_workflow(
+                "Z Source Outside Limit",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.insert_workflow_resource_sample(&WorkflowResourceSample {
+            id: String::new(),
+            run_id: None,
+            workflow_id: source.id.clone(),
+            queue_name: Some("source-default".to_string()),
+            corpus: "source".to_string(),
+            pid: None,
+            sampled_at: now.clone(),
+            cpu_percent: Some(42.0),
+            memory_rss_bytes: Some(256 * 1024 * 1024),
+            memory_vms_bytes: None,
+            swap_bytes: None,
+            labels: None,
+        })
+        .unwrap();
+        db.insert_workflow_resource_sample(&WorkflowResourceSample {
+            id: String::new(),
+            run_id: None,
+            workflow_id: instance.id.clone(),
+            queue_name: Some("instance-default".to_string()),
+            corpus: "instance".to_string(),
+            pid: None,
+            sampled_at: now.clone(),
+            cpu_percent: Some(99.0),
+            memory_rss_bytes: Some(512 * 1024 * 1024),
+            memory_vms_bytes: None,
+            swap_bytes: None,
+            labels: None,
+        })
+        .unwrap();
+        db.insert_workflow_token_usage(&WorkflowTokenUsage {
+            id: String::new(),
+            run_id: None,
+            workflow_id: source.id.clone(),
+            task_id: None,
+            provider: "anthropic".to_string(),
+            model: Some("claude".to_string()),
+            token_kind: "input".to_string(),
+            token_count: 123,
+            emitted_at: now,
+            labels: Some(serde_json::json!({"call_id": "call-source"})),
+        })
+        .unwrap();
+        db.insert_workflow_token_usage(&WorkflowTokenUsage {
+            id: String::new(),
+            run_id: None,
+            workflow_id: second_source.id.clone(),
+            task_id: None,
+            provider: "anthropic".to_string(),
+            model: Some("claude".to_string()),
+            token_kind: "input".to_string(),
+            token_count: 999,
+            emitted_at: chrono::Utc::now().to_rfc3339(),
+            labels: Some(serde_json::json!({"call_id": "call-outside-limit"})),
+        })
+        .unwrap();
+
+        let rows = db
+            .mission_control_workflow_telemetry("source", "scheduler", "-24 hours", 1)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].workflow_id, source.id);
+        assert_eq!(rows[0].max_cpu_percent, Some(42.0));
+        assert_eq!(rows[0].total_tokens, 123);
+        assert_eq!(rows[0].token_call_count, 1);
 
         let _ = std::fs::remove_dir_all(dir);
     }

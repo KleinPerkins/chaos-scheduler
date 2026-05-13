@@ -1,10 +1,15 @@
 use crate::db::{
-    Database, EmailConfig, NextRun, QueueInfo, QueuedRun, Run, RunAttempt, RunMetric, RunTask,
-    SchedulerAsset, SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
-    WorkflowResourceSample, WorkflowTokenUsageRollup,
+    Database, EmailConfig, MissionControlNeedsAttentionItem, MissionControlPanelAvailability,
+    MissionControlPreferences, MissionControlSnapshot, MissionControlUpcomingRun, NextRun,
+    QueueInfo, QueuedRun, Run, RunAttempt, RunMetric, RunTask, SchedulerAsset, SchedulerStatus,
+    SlaViolation, Workflow, WorkflowHistoryBucket, WorkflowResourceSample,
+    WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 use tauri::State;
 
 pub struct AppState {
@@ -345,6 +350,399 @@ fn normalize_time_bucket(value: Option<&str>) -> Result<String, String> {
     }
 }
 
+fn normalize_mission_corpus_filter(value: Option<String>, default: &str) -> String {
+    match value
+        .as_deref()
+        .unwrap_or(default)
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "source" => "source".to_string(),
+        "instance" => "instance".to_string(),
+        _ => "all".to_string(),
+    }
+}
+
+fn normalize_mission_domain_filter(value: Option<String>, default: &str) -> String {
+    let raw = value.unwrap_or_else(|| default.to_string());
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
+        "all".to_string()
+    } else if trimmed.eq_ignore_ascii_case("unowned") || trimmed.eq_ignore_ascii_case("__unowned__")
+    {
+        "__unowned__".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn workflow_owner(workflow: &Workflow) -> String {
+    workflow
+        .domain
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Unowned")
+        .to_string()
+}
+
+fn mission_attention_severity_rank(severity: &str) -> i32 {
+    match severity {
+        "critical" => 0,
+        "error" => 1,
+        "warning" => 2,
+        _ => 3,
+    }
+}
+
+fn cron_triggers_for_workflow(workflow: &Workflow) -> Vec<(String, String)> {
+    let legacy = || vec![("legacy_cron".to_string(), workflow.cron_schedule.clone())];
+    let Some(raw) = workflow
+        .trigger_config
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return legacy();
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return legacy();
+    };
+    let triggers = parsed
+        .as_array()
+        .cloned()
+        .or_else(|| parsed.get("triggers").and_then(|v| v.as_array()).cloned())
+        .unwrap_or_default();
+    if triggers.is_empty() {
+        return legacy();
+    }
+    triggers
+        .into_iter()
+        .filter(|trigger| trigger.get("kind").and_then(|v| v.as_str()) == Some("cron"))
+        .filter_map(|trigger| {
+            trigger
+                .get("cron")
+                .and_then(|v| v.as_str())
+                .map(|cron| ("cron".to_string(), cron.to_string()))
+        })
+        .collect()
+}
+
+fn mission_control_availability() -> Vec<MissionControlPanelAvailability> {
+    vec![
+        MissionControlPanelAvailability {
+            panel: "Header status".to_string(),
+            source_tables: vec![
+                "workflows".to_string(),
+                "runs".to_string(),
+                "queued_runs".to_string(),
+            ],
+            command: "get_mission_control_snapshot".to_string(),
+            filter_behavior: "corpus/domain filters apply before counting".to_string(),
+            empty_state: "No workflows match the current filters".to_string(),
+            degraded_state: "Counts omit unavailable scheduler.db rows".to_string(),
+            click_through_target: Some("Dashboard workflows".to_string()),
+            persistence_required: false,
+        },
+        MissionControlPanelAvailability {
+            panel: "SLA strip".to_string(),
+            source_tables: vec![
+                "runs".to_string(),
+                "queued_runs".to_string(),
+                "workflows.queue_config".to_string(),
+            ],
+            command: "get_mission_control_snapshot".to_string(),
+            filter_behavior: "success-rate and queue waits are computed after workflow filters"
+                .to_string(),
+            empty_state: "No recent terminal runs yet".to_string(),
+            degraded_state: "SLA metrics show partial state when no wait samples exist".to_string(),
+            click_through_target: Some("Run history".to_string()),
+            persistence_required: false,
+        },
+        MissionControlPanelAvailability {
+            panel: "Needs Attention".to_string(),
+            source_tables: vec![
+                "runs".to_string(),
+                "queued_runs".to_string(),
+                "workflows.queue_config".to_string(),
+            ],
+            command: "get_mission_control_snapshot".to_string(),
+            filter_behavior: "items are generated only from filtered durable rows".to_string(),
+            empty_state: "No persisted issues need attention".to_string(),
+            degraded_state:
+                "Dependency wait reasons only appear when persisted queue/run state exists"
+                    .to_string(),
+            click_through_target: Some("Run detail or Queue".to_string()),
+            persistence_required: false,
+        },
+        MissionControlPanelAvailability {
+            panel: "Live Activity".to_string(),
+            source_tables: vec!["runs".to_string(), "workflows".to_string()],
+            command: "get_mission_control_snapshot".to_string(),
+            filter_behavior: "filtered before ordering and limit".to_string(),
+            empty_state: "No run activity for this filter".to_string(),
+            degraded_state: "Only persisted run transitions are shown".to_string(),
+            click_through_target: Some("Run detail".to_string()),
+            persistence_required: false,
+        },
+        MissionControlPanelAvailability {
+            panel: "Upcoming Runs".to_string(),
+            source_tables: vec![
+                "workflows".to_string(),
+                "workflows.trigger_config".to_string(),
+            ],
+            command: "get_mission_control_snapshot".to_string(),
+            filter_behavior: "enabled workflows are filtered before cron expansion".to_string(),
+            empty_state: "No fixed-time cron triggers match this filter".to_string(),
+            degraded_state:
+                "Event-driven triggers have no ETA until durable readiness state exists".to_string(),
+            click_through_target: Some("Dashboard workflows".to_string()),
+            persistence_required: false,
+        },
+        MissionControlPanelAvailability {
+            panel: "SLA & Freshness ledger".to_string(),
+            source_tables: vec![
+                "scheduler_assets".to_string(),
+                "runs".to_string(),
+                "workflows".to_string(),
+            ],
+            command: "get_mission_control_snapshot".to_string(),
+            filter_behavior:
+                "assets join through last_writer_run_id; unattributed assets show only in All"
+                    .to_string(),
+            empty_state: "No stale assets for this filter".to_string(),
+            degraded_state:
+                "Unattributed assets are labeled and withheld from corpus/domain filters"
+                    .to_string(),
+            click_through_target: None,
+            persistence_required: false,
+        },
+        MissionControlPanelAvailability {
+            panel: "Per-workflow telemetry".to_string(),
+            source_tables: vec![
+                "workflow_resource_samples".to_string(),
+                "workflow_token_usage".to_string(),
+            ],
+            command: "get_mission_control_snapshot".to_string(),
+            filter_behavior: "one bounded backend batch over visible workflows".to_string(),
+            empty_state: "No resource or token samples yet".to_string(),
+            degraded_state: "Cards show no-sample state instead of synthetic sparklines"
+                .to_string(),
+            click_through_target: Some("Run history".to_string()),
+            persistence_required: false,
+        },
+    ]
+}
+
+#[tauri::command]
+pub fn get_mission_control_preferences(
+    state: State<AppState>,
+) -> Result<MissionControlPreferences, String> {
+    state
+        .db
+        .get_mission_control_preferences()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_mission_control_preferences(
+    state: State<AppState>,
+    default_landing: String,
+    corpus_filter: String,
+    domain_filter: String,
+) -> Result<MissionControlPreferences, String> {
+    state
+        .db
+        .set_mission_control_preferences(&default_landing, &corpus_filter, &domain_filter)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_mission_control_snapshot(
+    state: State<AppState>,
+    corpus_filter: Option<String>,
+    domain_filter: Option<String>,
+) -> Result<MissionControlSnapshot, String> {
+    let preferences = state
+        .db
+        .get_mission_control_preferences()
+        .map_err(|e| e.to_string())?;
+    let explicit_domain_filter = domain_filter.is_some();
+    let corpus_filter = normalize_mission_corpus_filter(corpus_filter, &preferences.corpus_filter);
+    let requested_domain_filter =
+        normalize_mission_domain_filter(domain_filter, &preferences.domain_filter);
+    let domains = state
+        .db
+        .mission_control_domains(&corpus_filter)
+        .map_err(|e| e.to_string())?;
+    let known_domains: HashSet<String> =
+        domains.iter().map(|domain| domain.value.clone()).collect();
+    let domain_known =
+        requested_domain_filter == "all" || known_domains.contains(&requested_domain_filter);
+    let domain_filter = if domain_known {
+        requested_domain_filter.clone()
+    } else {
+        if !explicit_domain_filter {
+            let _ = state.db.set_mission_control_preferences(
+                &preferences.default_landing,
+                &corpus_filter,
+                "all",
+            );
+        }
+        "all".to_string()
+    };
+
+    let workflows = state
+        .db
+        .list_workflows_filtered(&corpus_filter, &domain_filter)
+        .map_err(|e| e.to_string())?;
+    let visible_workflow_ids: HashSet<String> = workflows
+        .iter()
+        .map(|workflow| workflow.id.clone())
+        .collect();
+
+    let sla_violations: Vec<SlaViolation> = state
+        .db
+        .evaluate_sla_violations()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|violation| visible_workflow_ids.contains(&violation.workflow_id))
+        .collect();
+
+    let header = state
+        .db
+        .mission_control_header(&corpus_filter, &domain_filter)
+        .map_err(|e| e.to_string())?;
+    let sla = state
+        .db
+        .mission_control_sla_summary(&corpus_filter, &domain_filter, sla_violations.len() as i64)
+        .map_err(|e| e.to_string())?;
+    let recent_runs = state
+        .db
+        .mission_control_recent_runs(&corpus_filter, &domain_filter, 12)
+        .map_err(|e| e.to_string())?;
+    let failed_runs = state
+        .db
+        .mission_control_failed_runs(&corpus_filter, &domain_filter, 4)
+        .map_err(|e| e.to_string())?;
+    let failed_run_count = state
+        .db
+        .mission_control_failed_run_count(&corpus_filter, &domain_filter)
+        .map_err(|e| e.to_string())?;
+    let live_activity = state
+        .db
+        .mission_control_live_activity(&corpus_filter, &domain_filter, 10)
+        .map_err(|e| e.to_string())?;
+    let freshness_ledger = state
+        .db
+        .mission_control_freshness_ledger(&corpus_filter, &domain_filter, 24 * 60 * 60, 12)
+        .map_err(|e| e.to_string())?;
+    let workflow_telemetry = state
+        .db
+        .mission_control_workflow_telemetry(&corpus_filter, &domain_filter, "-24 hours", 12)
+        .map_err(|e| e.to_string())?;
+
+    let mut upcoming_runs = workflows
+        .iter()
+        .filter(|workflow| workflow.enabled)
+        .flat_map(|workflow| {
+            cron_triggers_for_workflow(workflow).into_iter().filter_map(
+                move |(trigger_kind, cron)| {
+                    scheduler::get_next_run_time(&cron, &workflow.timezone).map(|next_time| {
+                        MissionControlUpcomingRun {
+                            workflow_id: workflow.id.clone(),
+                            workflow_name: workflow.name.clone(),
+                            corpus: workflow.corpus.clone(),
+                            domain: workflow_owner(workflow),
+                            trigger_kind,
+                            trigger_label: cron,
+                            next_time,
+                        }
+                    })
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    upcoming_runs.sort_by(|a, b| a.next_time.cmp(&b.next_time));
+    upcoming_runs.truncate(12);
+
+    let mut needs_attention = sla_violations
+        .into_iter()
+        .map(|violation| MissionControlNeedsAttentionItem {
+            id: format!("sla:{}:{}", violation.workflow_id, violation.violation_type),
+            severity: violation.severity,
+            title: format!("SLA risk: {}", violation.workflow_name),
+            detail: violation.message,
+            workflow_id: Some(violation.workflow_id),
+            workflow_name: Some(violation.workflow_name),
+            run_id: None,
+            target: "history".to_string(),
+        })
+        .collect::<Vec<_>>();
+    needs_attention.extend(
+        failed_runs
+            .iter()
+            .map(|run| MissionControlNeedsAttentionItem {
+                id: format!("run:{}", run.id),
+                severity: "error".to_string(),
+                title: format!(
+                    "{} failed",
+                    run.workflow_name
+                        .as_deref()
+                        .unwrap_or(run.workflow_id.as_str())
+                ),
+                detail: format!("Terminal status: {}", run.status),
+                workflow_id: Some(run.workflow_id.clone()),
+                workflow_name: run.workflow_name.clone(),
+                run_id: Some(run.id.clone()),
+                target: "run_detail".to_string(),
+            }),
+    );
+    if sla.blocked_count > 0 {
+        needs_attention.push(MissionControlNeedsAttentionItem {
+            id: "queued:blocking".to_string(),
+            severity: "warning".to_string(),
+            title: format!("{} queued runs waiting", sla.blocked_count),
+            detail: "Queue-capacity, dependency, or mutex wait reasons are shown when persisted in scheduler.db.".to_string(),
+            workflow_id: None,
+            workflow_name: None,
+            run_id: None,
+            target: "queues".to_string(),
+        });
+    }
+    needs_attention.sort_by(|a, b| {
+        mission_attention_severity_rank(&a.severity)
+            .cmp(&mission_attention_severity_rank(&b.severity))
+            .then_with(|| a.title.cmp(&b.title))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let hidden_failed_run_count = failed_run_count.saturating_sub(failed_runs.len() as i64);
+    let needs_attention_total = needs_attention.len() as i64 + hidden_failed_run_count;
+    needs_attention.truncate(8);
+    let needs_attention_truncated = needs_attention_total > needs_attention.len() as i64;
+
+    Ok(MissionControlSnapshot {
+        preferences: MissionControlPreferences {
+            default_landing: preferences.default_landing,
+            corpus_filter,
+            domain_filter,
+        },
+        domains,
+        header,
+        sla,
+        needs_attention,
+        needs_attention_total,
+        needs_attention_truncated,
+        live_activity,
+        upcoming_runs,
+        freshness_ledger,
+        recent_runs,
+        workflow_telemetry,
+        availability: mission_control_availability(),
+    })
+}
+
 #[tauri::command]
 pub fn get_scheduler_status(state: State<AppState>) -> Result<SchedulerStatus, String> {
     let workflows = state.db.list_workflows().map_err(|e| e.to_string())?;
@@ -352,18 +750,23 @@ pub fn get_scheduler_status(state: State<AppState>) -> Result<SchedulerStatus, S
     let active_workflows = workflows.iter().filter(|w| w.enabled).count();
     let running_count = state.db.get_running_count().map_err(|e| e.to_string())?;
 
-    let next_runs: Vec<NextRun> = workflows
+    let mut next_runs: Vec<NextRun> = workflows
         .iter()
         .filter(|w| w.enabled)
-        .filter_map(|w| {
-            scheduler::get_next_run_time(&w.cron_schedule, &w.timezone).map(|t| NextRun {
-                workflow_id: w.id.clone(),
-                workflow_name: w.name.clone(),
-                corpus: w.corpus.clone(),
-                next_time: t,
-            })
+        .flat_map(|w| {
+            cron_triggers_for_workflow(w)
+                .into_iter()
+                .filter_map(|(_, cron)| {
+                    scheduler::get_next_run_time(&cron, &w.timezone).map(|t| NextRun {
+                        workflow_id: w.id.clone(),
+                        workflow_name: w.name.clone(),
+                        corpus: w.corpus.clone(),
+                        next_time: t,
+                    })
+                })
         })
         .collect();
+    next_runs.sort_by(|a, b| a.next_time.cmp(&b.next_time));
 
     let recent_runs = state.db.get_recent_runs(10).map_err(|e| e.to_string())?;
 
@@ -373,6 +776,70 @@ pub fn get_scheduler_status(state: State<AppState>) -> Result<SchedulerStatus, S
         next_runs,
         recent_runs,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workflow_with_trigger(trigger_config: Option<&str>, legacy_cron: &str) -> Workflow {
+        Workflow {
+            id: "wf".to_string(),
+            name: "Workflow".to_string(),
+            description: None,
+            script_path: "scripts/workflows/noop.py".to_string(),
+            cron_schedule: legacy_cron.to_string(),
+            enabled: true,
+            async_mode: false,
+            email_on_failure: true,
+            corpus: "source".to_string(),
+            domain: Some("scheduler".to_string()),
+            timezone: "UTC".to_string(),
+            trigger_config: trigger_config.map(str::to_string),
+            queue_config: None,
+            last_run_at: None,
+            created_at: "2026-05-12T00:00:00Z".to_string(),
+            updated_at: "2026-05-12T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn cron_triggers_fall_back_to_legacy_only_when_config_is_missing_or_invalid() {
+        let missing = workflow_with_trigger(None, "0 0 * * *");
+        assert_eq!(
+            cron_triggers_for_workflow(&missing),
+            vec![("legacy_cron".to_string(), "0 0 * * *".to_string())]
+        );
+
+        let invalid = workflow_with_trigger(Some("{not-json"), "0 1 * * *");
+        assert_eq!(
+            cron_triggers_for_workflow(&invalid),
+            vec![("legacy_cron".to_string(), "0 1 * * *".to_string())]
+        );
+
+        let event_only = workflow_with_trigger(
+            Some(r#"{"triggers":[{"kind":"file_arrival","path":"data/*.json"}]}"#),
+            "0 2 * * *",
+        );
+        assert!(cron_triggers_for_workflow(&event_only).is_empty());
+    }
+
+    #[test]
+    fn cron_triggers_use_explicit_cron_entries() {
+        let workflow = workflow_with_trigger(
+            Some(
+                r#"{"triggers":[{"kind":"cron","cron":"0 3 * * *"},{"kind":"cron","cron":"30 3 * * *"}]}"#,
+            ),
+            "0 2 * * *",
+        );
+        assert_eq!(
+            cron_triggers_for_workflow(&workflow),
+            vec![
+                ("cron".to_string(), "0 3 * * *".to_string()),
+                ("cron".to_string(), "30 3 * * *".to_string()),
+            ]
+        );
+    }
 }
 
 #[tauri::command]
@@ -417,10 +884,12 @@ pub fn cancel_queued_run(state: State<AppState>, id: String) -> Result<(), Strin
 
 #[tauri::command]
 pub fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::Manager;
+    use tauri::{Emitter, Manager};
     if let Some(main) = app.get_webview_window("main") {
         main.show().map_err(|e| e.to_string())?;
         main.set_focus().map_err(|e| e.to_string())?;
+        main.emit("navigate-to-mission-control", serde_json::json!({}))
+            .map_err(|e| e.to_string())?;
     }
     if let Some(popup) = app.get_webview_window("popup") {
         let _ = popup.hide();

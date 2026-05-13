@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import WorkflowList from "./WorkflowList";
 import WorkflowEditor from "./WorkflowEditor";
@@ -6,35 +6,79 @@ import RunHistory from "./RunHistory";
 import RunDetail from "./RunDetail";
 import QueueView from "./QueueView";
 import Settings from "./Settings";
-import { getSchedulerStatus, getSlaViolations, getWorkflow } from "../lib/commands";
+import MissionControl, { type MissionControlReturnState, type MissionTab } from "./MissionControl";
+import { getMissionControlPreferences, getSchedulerStatus, getSlaViolations, getWorkflow } from "../lib/commands";
 import type { SchedulerStatus, SlaViolation, Workflow } from "../lib/commands";
 import "./Dashboard.css";
 
-type View = "workflows" | "editor" | "history" | "detail" | "queues" | "settings";
+type View = "mission" | "workflows" | "editor" | "history" | "detail" | "queues" | "settings";
 
 interface NavState {
   view: View;
   workflow?: Workflow;
   runId?: string;
+  missionTab?: MissionTab;
+  missionCorpus?: MissionControlReturnState["corpus"];
+  missionDomain?: string;
+  returnTo?: NavState;
 }
 
 export default function Dashboard() {
-  const [nav, setNav] = useState<NavState>({ view: "workflows" });
+  const [nav, setNav] = useState<NavState>({ view: "mission" });
   const [refreshKey, setRefreshKey] = useState(0);
   const [status, setStatus] = useState<SchedulerStatus | null>(null);
   const [slaViolations, setSlaViolations] = useState<SlaViolation[]>([]);
+  const [landingResolved, setLandingResolved] = useState(false);
+  const forcedMissionLanding = useRef(false);
 
   const triggerRefresh = () => setRefreshKey((k) => k + 1);
+  const openRunFromMission = async (
+    runId: string,
+    workflowId: string,
+    returnState: MissionControlReturnState,
+  ) => {
+    const returnTo: NavState = {
+      view: "mission",
+      missionTab: returnState.tab,
+      missionCorpus: returnState.corpus,
+      missionDomain: returnState.domain,
+    };
+    try {
+      const workflow = await getWorkflow(workflowId);
+      setNav({ view: "detail", workflow, runId, returnTo });
+    } catch {
+      setNav({ view: "detail", runId, returnTo });
+    }
+  };
+
+  const openHistoryFromMission = async (
+    workflowId: string,
+    returnState: MissionControlReturnState,
+  ) => {
+    const returnTo: NavState = {
+      view: "mission",
+      missionTab: returnState.tab,
+      missionCorpus: returnState.corpus,
+      missionDomain: returnState.domain,
+    };
+    try {
+      const workflow = await getWorkflow(workflowId);
+      setNav({ view: "history", workflow, returnTo });
+    } catch {
+      setNav(returnTo);
+    }
+  };
 
   useEffect(() => {
     const unlisten = listen<{ runId: string; workflowId: string }>(
       "navigate-to-run",
       async (event) => {
+        const returnTo: NavState = { view: "mission", missionTab: "activity" };
         try {
           const wf = await getWorkflow(event.payload.workflowId);
-          setNav({ view: "detail", workflow: wf, runId: event.payload.runId });
+          setNav({ view: "detail", workflow: wf, runId: event.payload.runId, returnTo });
         } catch {
-          setNav({ view: "detail", runId: event.payload.runId });
+          setNav({ view: "detail", runId: event.payload.runId, returnTo });
         }
       }
     );
@@ -42,10 +86,39 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
+    const unlisten = listen("navigate-to-mission-control", () => {
+      forcedMissionLanding.current = true;
+      setLandingResolved(true);
+      setNav({ view: "mission" });
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    getMissionControlPreferences()
+      .then((prefs) => {
+        if (cancelled || forcedMissionLanding.current || prefs.default_landing !== "dashboard") return;
+        setNav((current) => (current.view === "mission" ? { view: "workflows" } : current));
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLandingResolved(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     if (nav.view !== "workflows") return;
     getSchedulerStatus().then(setStatus).catch(() => setStatus(null));
     getSlaViolations().then(setSlaViolations).catch(() => setSlaViolations([]));
   }, [nav.view, refreshKey]);
+
+  if (!landingResolved) {
+    return <div className="dashboard-loading">Loading Scheduler...</div>;
+  }
 
   return (
     <div className="dashboard">
@@ -56,11 +129,18 @@ export default function Dashboard() {
         </div>
         <nav className="sidebar-nav">
           <button
+            className={`sidebar-link ${nav.view === "mission" ? "active" : ""}`}
+            onClick={() => setNav({ view: "mission" })}
+          >
+            <span className="sidebar-icon">&#9673;</span>
+            Mission Control
+          </button>
+          <button
             className={`sidebar-link ${["workflows", "editor", "history", "detail"].includes(nav.view) ? "active" : ""}`}
             onClick={() => setNav({ view: "workflows" })}
           >
             <span className="sidebar-icon">&#9776;</span>
-            Workflows
+            Dashboard
           </button>
           <button
             className={`sidebar-link ${nav.view === "queues" ? "active" : ""}`}
@@ -83,6 +163,27 @@ export default function Dashboard() {
       </aside>
 
       <main className="dashboard-main">
+        {nav.view === "mission" && (
+          <MissionControl
+            initialTab={nav.missionTab}
+            initialCorpus={nav.missionCorpus}
+            initialDomain={nav.missionDomain}
+            onOpenRun={openRunFromMission}
+            onOpenQueues={(returnState) =>
+              setNav({
+                view: "queues",
+                returnTo: {
+                  view: "mission",
+                  missionTab: returnState.tab,
+                  missionCorpus: returnState.corpus,
+                  missionDomain: returnState.domain,
+                },
+              })
+            }
+            onOpenHistory={openHistoryFromMission}
+            onOpenDashboard={() => setNav({ view: "workflows" })}
+          />
+        )}
         {nav.view === "workflows" && (
           <>
             {status && (
@@ -136,9 +237,14 @@ export default function Dashboard() {
         {nav.view === "history" && nav.workflow && (
           <RunHistory
             workflow={nav.workflow}
-            onBack={() => setNav({ view: "workflows" })}
+            onBack={() => setNav(nav.returnTo ?? { view: "workflows" })}
             onViewLog={(runId) =>
-              setNav({ view: "detail", workflow: nav.workflow, runId })
+              setNav({
+                view: "detail",
+                workflow: nav.workflow,
+                runId,
+                returnTo: { view: "history", workflow: nav.workflow, returnTo: nav.returnTo },
+              })
             }
           />
         )}
@@ -146,11 +252,13 @@ export default function Dashboard() {
           <RunDetail
             runId={nav.runId}
             onBack={() =>
-              setNav({ view: "history", workflow: nav.workflow })
+              setNav(nav.returnTo ?? { view: "history", workflow: nav.workflow })
             }
           />
         )}
-        {nav.view === "queues" && <QueueView />}
+        {nav.view === "queues" && (
+          <QueueView onBack={nav.returnTo ? () => setNav(nav.returnTo!) : undefined} />
+        )}
         {nav.view === "settings" && <Settings />}
       </main>
     </div>

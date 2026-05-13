@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSchedulerStatus } from "../hooks/useSchedulerStatus";
 import { triggerWorkflow, quitApp, openDashboard, hidePopup, openRunDetail } from "../lib/commands";
 import "./MenuBarPopup.css";
@@ -26,8 +26,10 @@ function corpusFor(nextRun: { corpus?: string }): "source" | "instance" {
 }
 
 export default function MenuBarPopup() {
-  const { status, refresh } = useSchedulerStatus(30000);
+  const { status, error, refresh } = useSchedulerStatus(30000);
   const showTime = useRef(0);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [runningWorkflowId, setRunningWorkflowId] = useState<string | null>(null);
 
   useEffect(() => {
     const onFocus = () => {
@@ -48,18 +50,24 @@ export default function MenuBarPopup() {
   }, []);
 
   const handleRun = async (workflowId: string) => {
+    setActionError(null);
+    setRunningWorkflowId(workflowId);
     try {
       await triggerWorkflow(workflowId);
-      refresh();
+      await refresh();
     } catch (e) {
-      console.error("Failed to trigger workflow:", e);
+      setActionError(`Failed to trigger workflow: ${String(e)}`);
+    } finally {
+      setRunningWorkflowId(null);
     }
   };
 
   if (!status) {
     return (
       <div className="popup">
-        <div className="popup-loading">Loading...</div>
+        <div className={error ? "popup-loading popup-error" : "popup-loading"}>
+          {error ? `Status failed to load: ${error}` : "Loading..."}
+        </div>
       </div>
     );
   }
@@ -83,6 +91,8 @@ export default function MenuBarPopup() {
           )}
         </span>
       </div>
+      {error && <div className="popup-inline-error">Status refresh failed: {error}</div>}
+      {actionError && <div className="popup-inline-error">{actionError}</div>}
 
       <div className="popup-scroll">
         <div className="popup-section">
@@ -114,9 +124,11 @@ export default function MenuBarPopup() {
                           <button
                             className="btn btn-ghost btn-sm"
                             onClick={() => handleRun(nr.workflow_id)}
+                            disabled={runningWorkflowId === nr.workflow_id}
                             title="Run now"
+                            aria-label={`Run ${nr.workflow_name} now`}
                           >
-                            &#9654;
+                            {runningWorkflowId === nr.workflow_id ? "..." : "▶"}
                           </button>
                         </div>
                       ))}
@@ -135,7 +147,7 @@ export default function MenuBarPopup() {
           ) : (
             <div className="popup-list">
               {status.recent_runs.map((run) => (
-                <div
+                <button
                   key={run.id}
                   className="popup-item popup-item-clickable"
                   onClick={() => openRunDetail(run.id, run.workflow_id)}
@@ -150,7 +162,7 @@ export default function MenuBarPopup() {
                   <span className={`status-badge ${run.status}`}>
                     {run.status}
                   </span>
-                </div>
+                </button>
               ))}
             </div>
           )}
@@ -159,7 +171,7 @@ export default function MenuBarPopup() {
 
       <div className="popup-footer">
         <button className="btn btn-primary btn-sm" onClick={() => openDashboard()}>
-          Open Dashboard
+          Open Mission Control
         </button>
         <button className="btn btn-ghost btn-sm" onClick={() => quitApp()}>
           Quit

@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import "./ScheduleBuilder.css";
 
+/* eslint-disable react-refresh/only-export-components */
+
 type Frequency = "hourly" | "daily" | "weekdays" | "weekly" | "monthly";
 
 interface Props {
@@ -158,7 +160,7 @@ export function cronToHuman(cron: string, timezone?: string): string {
     const parts = normalized.trim().split(/\s+/);
     if (parts.length >= 6) {
       const [, min, hour, dom, , rawDow] = parts;
-      let dow = normalizeDow(rawDow);
+      const dow = normalizeDow(rawDow);
       const pieces: string[] = [];
       if (hour.startsWith("*/")) {
         pieces.push(`every ${hour.slice(2)}h`);
@@ -384,7 +386,7 @@ function validateRawCron(cron: string): string | null {
     if (parts.length < 5 || parts.length > 7) {
       return `Expected 5-7 fields, got ${parts.length} in "${seg}"`;
     }
-    const validChars = /^[\d\*\/,\-a-zA-Z]+$/;
+    const validChars = /^[\d*/,a-zA-Z-]+$/;
     for (let i = 0; i < parts.length; i++) {
       if (!validChars.test(parts[i])) {
         return `Invalid characters in field ${i + 1}: "${parts[i]}"`;
