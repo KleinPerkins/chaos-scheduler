@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { createWorkflow, updateWorkflow, listAvailableScripts, generateWorkflowDescription } from "../lib/commands";
 import type { Workflow, AvailableScript } from "../lib/commands";
-import ScheduleBuilder from "./ScheduleBuilder";
+import ScheduleBuilder, { cronToHuman } from "./ScheduleBuilder";
 import "./WorkflowEditor.css";
 
 interface Props {
@@ -14,6 +14,7 @@ const LOCAL_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
   const isEdit = !!workflow;
+  const isSourceControlled = isEdit && (workflow?.corpus ?? "source") === "source";
   const [name, setName] = useState(workflow?.name ?? "");
   const [description, setDescription] = useState(workflow?.description ?? "");
   const [scriptPath, setScriptPath] = useState(workflow?.script_path ?? "");
@@ -84,12 +85,12 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
       if (isEdit && workflow) {
         await updateWorkflow({
           id: workflow.id,
-          name,
-          description: description || undefined,
-          scriptPath,
-          cronSchedule,
+          name: isSourceControlled ? workflow.name : name,
+          description: isSourceControlled ? workflow.description || undefined : description || undefined,
+          scriptPath: isSourceControlled ? workflow.script_path : scriptPath,
+          cronSchedule: isSourceControlled ? workflow.cron_schedule : cronSchedule,
           enabled,
-          asyncMode,
+          asyncMode: isSourceControlled ? workflow.async_mode : asyncMode,
           emailOnFailure,
           timezone: LOCAL_TZ,
           corpus: workflow.corpus ?? "source",
@@ -130,6 +131,13 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
 
       <form className="editor-form" onSubmit={handleSubmit}>
         {error && <div className="editor-error">{error}</div>}
+        {isSourceControlled && (
+          <div className="editor-hint">
+            Source workflow definitions are managed in git. Runtime preferences
+            such as enabled state, email alerts, and display timezone can be
+            saved here; definition fields are read-only.
+          </div>
+        )}
 
         <div className="editor-field">
           <label className="editor-label">Script</label>
@@ -153,6 +161,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
               <select
                 value={isCustomScript ? "__custom__" : scriptPath}
                 onChange={(e) => handleScriptChange(e.target.value)}
+                disabled={isSourceControlled}
               >
                 {scripts.map((s) => (
                   <option key={s.path} value={s.path}>
@@ -168,6 +177,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
                   onChange={(e) => setScriptPath(e.target.value)}
                   placeholder="scripts/workflows/my_script.py"
                   required
+                  disabled={isSourceControlled}
                   style={{ marginTop: 8 }}
                 />
               ) : selectedScript?.description ? (
@@ -190,6 +200,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
             onChange={(e) => setName(e.target.value)}
             placeholder="e.g. Weekly Pod Status"
             required
+            disabled={isSourceControlled}
           />
         </div>
 
@@ -201,7 +212,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
                 type="button"
                 className="btn-ai"
                 onClick={handleGenerateDescription}
-                disabled={generatingDesc}
+                disabled={generatingDesc || isSourceControlled}
                 title="Use AI to generate a description based on the workflow script"
               >
                 {generatingDesc ? (
@@ -220,11 +231,21 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
             onChange={(e) => setDescription(e.target.value)}
             placeholder="What does this workflow do?"
             rows={2}
+            disabled={isSourceControlled}
           />
         </div>
 
         <div className="editor-field">
-          <ScheduleBuilder value={cronSchedule} onChange={setCronSchedule} timezone={workflow?.timezone} />
+          {isSourceControlled ? (
+            <>
+              <label className="editor-label">Schedule</label>
+              <div className="editor-hint">
+                {cronToHuman(workflow?.cron_schedule ?? cronSchedule, workflow?.timezone)}
+              </div>
+            </>
+          ) : (
+            <ScheduleBuilder value={cronSchedule} onChange={setCronSchedule} timezone={workflow?.timezone} />
+          )}
         </div>
 
         {isEdit && (
@@ -247,6 +268,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
               type="checkbox"
               checked={asyncMode}
               onChange={(e) => setAsyncMode(e.target.checked)}
+                disabled={isSourceControlled}
               style={{ marginRight: 8 }}
             />
             Async mode

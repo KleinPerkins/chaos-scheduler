@@ -37,6 +37,40 @@ pub fn get_workflow(state: State<AppState>, id: String) -> Result<Workflow, Stri
     state.db.get_workflow(&id).map_err(|e| e.to_string())
 }
 
+fn normalized_opt(value: Option<&str>) -> Option<String> {
+    value.and_then(|v| {
+        let trimmed = v.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn source_definition_changed(
+    existing: &Workflow,
+    name: &str,
+    description: Option<&str>,
+    script_path: &str,
+    cron_schedule: &str,
+    async_mode: bool,
+    corpus: &str,
+    domain: Option<&str>,
+    trigger_config: Option<&str>,
+    queue_config: Option<&str>,
+) -> bool {
+    existing.name != name
+        || existing.description != normalized_opt(description)
+        || existing.script_path != script_path
+        || existing.cron_schedule != cron_schedule
+        || existing.async_mode != async_mode
+        || existing.corpus != corpus
+        || existing.domain != normalized_opt(domain)
+        || existing.trigger_config != normalized_opt(trigger_config)
+        || existing.queue_config != normalized_opt(queue_config)
+}
+
 #[tauri::command]
 pub fn create_workflow(
     state: State<AppState>,
@@ -52,6 +86,9 @@ pub fn create_workflow(
     trigger_config: Option<String>,
     queue_config: Option<String>,
 ) -> Result<Workflow, String> {
+    if corpus.as_deref().unwrap_or("instance") == "source" {
+        return Err("source-corpus workflow definitions are source-controlled; create instance workflows from the Scheduler UI".to_string());
+    }
     state
         .db
         .create_workflow(
@@ -88,6 +125,29 @@ pub fn update_workflow(
     queue_config: Option<String>,
 ) -> Result<Workflow, String> {
     let existing = state.db.get_workflow(&id).map_err(|e| e.to_string())?;
+    let next_corpus = corpus.as_deref().unwrap_or(&existing.corpus);
+    let next_domain = domain.as_deref().or(existing.domain.as_deref());
+    let next_trigger_config = trigger_config
+        .as_deref()
+        .or(existing.trigger_config.as_deref());
+    let next_queue_config = queue_config.as_deref().or(existing.queue_config.as_deref());
+    let next_async_mode = async_mode.unwrap_or(existing.async_mode);
+    if existing.corpus == "source"
+        && source_definition_changed(
+            &existing,
+            &name,
+            description.as_deref(),
+            &script_path,
+            &cron_schedule,
+            next_async_mode,
+            next_corpus,
+            next_domain,
+            next_trigger_config,
+            next_queue_config,
+        )
+    {
+        return Err("source-corpus workflow definitions are source-controlled; only enabled, email, and timezone runtime preferences are editable in the Scheduler UI".to_string());
+    }
     state
         .db
         .update_workflow(
@@ -97,21 +157,23 @@ pub fn update_workflow(
             &script_path,
             &cron_schedule,
             enabled,
-            async_mode.unwrap_or(false),
+            next_async_mode,
             email_on_failure.unwrap_or(true),
             timezone.as_deref().unwrap_or("UTC"),
-            corpus.as_deref().unwrap_or(&existing.corpus),
-            domain.as_deref().or(existing.domain.as_deref()),
-            trigger_config
-                .as_deref()
-                .or(existing.trigger_config.as_deref()),
-            queue_config.as_deref().or(existing.queue_config.as_deref()),
+            next_corpus,
+            next_domain,
+            next_trigger_config,
+            next_queue_config,
         )
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn delete_workflow(state: State<AppState>, id: String) -> Result<(), String> {
+    let existing = state.db.get_workflow(&id).map_err(|e| e.to_string())?;
+    if existing.corpus == "source" {
+        return Err("source-corpus workflows are source-controlled; remove them from the product registry instead of deleting from the Scheduler UI".to_string());
+    }
     state.db.delete_workflow(&id).map_err(|e| e.to_string())
 }
 
@@ -839,6 +901,51 @@ mod tests {
                 ("cron".to_string(), "30 3 * * *".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn source_definition_change_detects_only_source_controlled_fields() {
+        let workflow = workflow_with_trigger(
+            Some(r#"{"triggers":[{"kind":"cron","cron":"0 3 * * *"}]}"#),
+            "0 2 * * *",
+        );
+
+        assert!(!source_definition_changed(
+            &workflow,
+            "Workflow",
+            None,
+            "scripts/workflows/noop.py",
+            "0 2 * * *",
+            false,
+            "source",
+            Some("scheduler"),
+            Some(r#"{"triggers":[{"kind":"cron","cron":"0 3 * * *"}]}"#),
+            None,
+        ));
+        assert!(source_definition_changed(
+            &workflow,
+            "Workflow",
+            None,
+            "scripts/workflows/replaced.py",
+            "0 2 * * *",
+            false,
+            "source",
+            Some("scheduler"),
+            Some(r#"{"triggers":[{"kind":"cron","cron":"0 3 * * *"}]}"#),
+            None,
+        ));
+        assert!(source_definition_changed(
+            &workflow,
+            "Workflow",
+            None,
+            "scripts/workflows/noop.py",
+            "0 2 * * *",
+            false,
+            "instance",
+            Some("scheduler"),
+            Some(r#"{"triggers":[{"kind":"cron","cron":"0 3 * * *"}]}"#),
+            None,
+        ));
     }
 }
 
