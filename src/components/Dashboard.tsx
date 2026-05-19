@@ -4,6 +4,7 @@ import WorkflowList from "./WorkflowList";
 import WorkflowEditor from "./WorkflowEditor";
 import RunHistory from "./RunHistory";
 import RunDetail from "./RunDetail";
+import GlobalHistory from "./GlobalHistory";
 import QueueView from "./QueueView";
 import Settings from "./Settings";
 import MissionControl, { type MissionControlReturnState, type MissionTab } from "./MissionControl";
@@ -11,7 +12,7 @@ import { getMissionControlPreferences, getSchedulerStatus, getSlaViolations, get
 import type { SchedulerStatus, SlaViolation, Workflow } from "../lib/commands";
 import "./Dashboard.css";
 
-type View = "mission" | "workflows" | "editor" | "history" | "detail" | "queues" | "settings";
+type View = "mission" | "workflows" | "editor" | "history" | "detail" | "global_history" | "queues" | "settings";
 
 interface NavState {
   view: View;
@@ -143,6 +144,13 @@ export default function Dashboard() {
             Dashboard
           </button>
           <button
+            className={`sidebar-link ${nav.view === "global_history" ? "active" : ""}`}
+            onClick={() => setNav({ view: "global_history" })}
+          >
+            <span className="sidebar-icon">&#8635;</span>
+            History
+          </button>
+          <button
             className={`sidebar-link ${nav.view === "queues" ? "active" : ""}`}
             onClick={() => setNav({ view: "queues" })}
           >
@@ -253,6 +261,13 @@ export default function Dashboard() {
             runId={nav.runId}
             onBack={() =>
               setNav(nav.returnTo ?? { view: "history", workflow: nav.workflow })
+            }
+          />
+        )}
+        {nav.view === "global_history" && (
+          <GlobalHistory
+            onViewRun={(run) =>
+              setNav({ view: "detail", runId: run.id, returnTo: { view: "global_history" } })
             }
           />
         )}

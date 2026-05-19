@@ -162,6 +162,15 @@ pub struct RunRelationship {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetentionPreview {
+    pub cutoff: String,
+    pub candidate_runs: i64,
+    pub preserved_dead_letter_runs: i64,
+    pub dry_run: bool,
+    pub deleted_runs: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct RunAttempt {
     pub id: String,
@@ -1839,6 +1848,113 @@ impl Database {
         )?;
         let rows = stmt.query_map(params![limit], |row| Ok(run_from_row(row)))?;
         rows.collect()
+    }
+
+    pub fn get_global_run_history(
+        &self,
+        status_filter: Option<&str>,
+        trigger_kind: Option<&str>,
+        corpus_filter: Option<&str>,
+        domain_filter: Option<&str>,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<Run>> {
+        let status_filter = status_filter.unwrap_or("all");
+        let trigger_kind = trigger_kind.unwrap_or("all");
+        let corpus_filter = corpus_filter.unwrap_or("all");
+        let domain_filter = domain_filter.unwrap_or("all");
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis, r.trigger_kind, r.trigger_payload, r.upstream_run_id, r.input_json, r.rerun_of_run_id
+             FROM runs r
+             LEFT JOIN workflows w ON r.workflow_id = w.id
+             WHERE (?1 = 'all' OR r.status = ?1)
+               AND (?2 = 'all' OR COALESCE(r.trigger_kind, 'cron') = ?2)
+               AND (?3 = 'all' OR w.corpus = ?3)
+               AND (?4 = 'all'
+                 OR (?4 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
+                 OR TRIM(w.domain) = ?4)
+             ORDER BY r.started_at DESC
+             LIMIT ?5",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                status_filter,
+                trigger_kind,
+                corpus_filter,
+                domain_filter,
+                limit
+            ],
+            |row| Ok(run_from_row(row)),
+        )?;
+        rows.collect()
+    }
+
+    pub fn retention_preview(
+        &self,
+        older_than_days: i64,
+        dry_run: bool,
+    ) -> rusqlite::Result<RetentionPreview> {
+        let days = older_than_days.max(1);
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+        let conn = self.conn()?;
+        let preserved_dead_letter_runs: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM runs r
+             JOIN scheduler_dead_letters d ON d.run_id = r.id
+             WHERE datetime(COALESCE(r.finished_at, r.started_at)) < datetime(?1)",
+            params![cutoff],
+            |row| row.get(0),
+        )?;
+        let candidate_runs: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM runs r
+             WHERE datetime(COALESCE(r.finished_at, r.started_at)) < datetime(?1)
+               AND NOT EXISTS (SELECT 1 FROM scheduler_dead_letters d WHERE d.run_id = r.id)",
+            params![cutoff],
+            |row| row.get(0),
+        )?;
+        Ok(RetentionPreview {
+            cutoff,
+            candidate_runs,
+            preserved_dead_letter_runs,
+            dry_run,
+            deleted_runs: 0,
+        })
+    }
+
+    pub fn cleanup_retention(
+        &self,
+        older_than_days: i64,
+        dry_run: bool,
+    ) -> rusqlite::Result<RetentionPreview> {
+        let mut preview = self.retention_preview(older_than_days, dry_run)?;
+        if dry_run {
+            return Ok(preview);
+        }
+        let conn = self.conn()?;
+        let deleted = conn.execute(
+            "DELETE FROM runs
+             WHERE datetime(COALESCE(finished_at, started_at)) < datetime(?1)
+               AND NOT EXISTS (SELECT 1 FROM scheduler_dead_letters d WHERE d.run_id = runs.id)",
+            params![preview.cutoff],
+        )?;
+        preview.deleted_runs = deleted as i64;
+        preview.dry_run = false;
+        let details = serde_json::json!({
+            "cutoff": preview.cutoff,
+            "deleted_runs": preview.deleted_runs,
+            "preserved_dead_letter_runs": preview.preserved_dead_letter_runs,
+        });
+        let _ = self.insert_queue_event(
+            "retention",
+            "scheduler",
+            None,
+            None,
+            "retention_cleanup",
+            Some("manual retention cleanup"),
+            Some(&details),
+        );
+        Ok(preview)
     }
 
     pub fn list_workflows_filtered(
@@ -4446,6 +4562,74 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(row.acknowledged_reason.as_deref(), Some("handled"));
         assert_eq!(row.acknowledged_by.as_deref(), Some("test"));
         assert_eq!(row.recovery_run_id.as_deref(), Some(recovery.id.as_str()));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn retention_cleanup_preserves_dead_letter_runs() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = db
+            .create_workflow(
+                "Retention Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                Some(r#"{"queue":"source-default"}"#),
+            )
+            .unwrap();
+        let deletable = db
+            .create_terminal_run_with_context(&workflow.id, "success", None, None, None, None, None)
+            .unwrap();
+        let preserved = db
+            .create_terminal_run_with_context(
+                &workflow.id,
+                "dead_lettered",
+                Some("backfill"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let conn = db.conn().unwrap();
+        conn.execute(
+            "UPDATE runs SET started_at = datetime('now', '-120 days'), finished_at = datetime('now', '-120 days') WHERE id IN (?1, ?2)",
+            params![deletable.id, preserved.id],
+        )
+        .unwrap();
+        db.upsert_scheduler_dead_letter(&preserved.id, &workflow.id, None, None, "boom")
+            .unwrap();
+
+        let dry = db.cleanup_retention(90, true).unwrap();
+        assert_eq!(dry.candidate_runs, 1);
+        assert_eq!(dry.preserved_dead_letter_runs, 1);
+        assert_eq!(dry.deleted_runs, 0);
+
+        let applied = db.cleanup_retention(90, false).unwrap();
+        assert_eq!(applied.deleted_runs, 1);
+        assert!(db.get_run(&deletable.id).is_err());
+        assert!(db.get_run(&preserved.id).is_ok());
+
+        let filtered = db
+            .get_global_run_history(
+                Some("dead_lettered"),
+                Some("backfill"),
+                Some("source"),
+                Some("scheduler"),
+                10,
+            )
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, preserved.id);
 
         let _ = std::fs::remove_dir_all(dir);
     }

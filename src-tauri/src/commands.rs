@@ -1,9 +1,9 @@
 use crate::db::{
     Database, EmailConfig, MissionControlNeedsAttentionItem, MissionControlPanelAvailability,
     MissionControlPreferences, MissionControlSnapshot, MissionControlUpcomingRun, NextRun,
-    QueueInfo, QueuedRun, Run, RunAttempt, RunMetric, RunRelationship, RunTask, SchedulerAsset,
-    SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
-    WorkflowResourceSample, WorkflowTokenUsageRollup,
+    QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask,
+    SchedulerAsset, SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow,
+    WorkflowHistoryBucket, WorkflowResourceSample, WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
@@ -548,6 +548,39 @@ pub fn get_run_history(
     state
         .db
         .get_run_history(&workflow_id, limit.unwrap_or(20))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_global_run_history(
+    state: State<AppState>,
+    status_filter: Option<String>,
+    trigger_kind: Option<String>,
+    corpus_filter: Option<String>,
+    domain_filter: Option<String>,
+    limit: Option<i64>,
+) -> Result<Vec<Run>, String> {
+    state
+        .db
+        .get_global_run_history(
+            status_filter.as_deref(),
+            trigger_kind.as_deref(),
+            corpus_filter.as_deref(),
+            domain_filter.as_deref(),
+            limit.unwrap_or(100),
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn cleanup_retention(
+    state: State<AppState>,
+    older_than_days: i64,
+    dry_run: bool,
+) -> Result<RetentionPreview, String> {
+    state
+        .db
+        .cleanup_retention(older_than_days, dry_run)
         .map_err(|e| e.to_string())
 }
 

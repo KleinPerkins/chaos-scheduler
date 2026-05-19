@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   acknowledgeDeadLetter,
   cancelQueuedRun,
+  cleanupRetention,
   dispatchBackfill,
   listDeadLetters,
   listQueuedRuns,
@@ -10,7 +11,7 @@ import {
   recoverDeadLetter,
   updateQueue,
 } from "../lib/commands";
-import type { BackfillPlan, QueueInfo, QueuedRun, SchedulerDeadLetter } from "../lib/commands";
+import type { BackfillPlan, QueueInfo, QueuedRun, RetentionPreview, SchedulerDeadLetter } from "../lib/commands";
 import "./QueueView.css";
 
 interface QueueDraft {
@@ -83,6 +84,8 @@ export default function QueueView({ onBack }: QueueViewProps) {
   const [backfillMaxRuns, setBackfillMaxRuns] = useState("10");
   const [backfillPlan, setBackfillPlan] = useState<BackfillPlan | null>(null);
   const [deadLetterReason, setDeadLetterReason] = useState<Record<string, string>>({});
+  const [retentionDays, setRetentionDays] = useState("90");
+  const [retentionPreview, setRetentionPreview] = useState<RetentionPreview | null>(null);
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -214,6 +217,22 @@ export default function QueueView({ onBack }: QueueViewProps) {
     try {
       await recoverDeadLetter(id, true);
       await load();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const runRetention = async (dryRun: boolean) => {
+    const days = Number.parseInt(retentionDays, 10);
+    if (!Number.isSafeInteger(days) || days < 1) {
+      setError("Retention days must be a positive whole number.");
+      return;
+    }
+    setError(null);
+    try {
+      const result = await cleanupRetention(days, dryRun);
+      setRetentionPreview(result);
+      if (!dryRun) await load();
     } catch (e) {
       setError(String(e));
     }
@@ -451,6 +470,43 @@ export default function QueueView({ onBack }: QueueViewProps) {
             ))}
           </div>
         )}
+      </section>
+
+      <section className="queue-section">
+        <div className="queue-section-header">
+          <h2>Retention Cleanup</h2>
+          <span>Dry-run first; dead-letter evidence is preserved</span>
+        </div>
+        <div className="queue-card">
+          <div className="queue-fields">
+            <label>
+              Delete runs older than days
+              <input
+                value={retentionDays}
+                inputMode="numeric"
+                pattern="\d+"
+                onChange={(e) => setRetentionDays(e.target.value)}
+              />
+            </label>
+          </div>
+          <div className="queue-card-footer">
+            <span className="queue-validation">
+              {retentionPreview
+                ? `${retentionPreview.candidate_runs} candidate run(s), ${retentionPreview.preserved_dead_letter_runs} dead-letter run(s) preserved`
+                : "Retention cleanup never deletes scheduler_dead_letters evidence."}
+            </span>
+            <button className="btn btn-ghost btn-sm" onClick={() => runRetention(true)}>
+              Dry Run
+            </button>
+            <button
+              className="btn btn-danger btn-sm"
+              disabled={!retentionPreview || retentionPreview.candidate_runs === 0}
+              onClick={() => runRetention(false)}
+            >
+              Apply Cleanup
+            </button>
+          </div>
+        </div>
       </section>
 
       <section className="queue-section">

@@ -22,6 +22,8 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
   const [enabled, setEnabled] = useState(workflow?.enabled ?? true);
   const [asyncMode, setAsyncMode] = useState(workflow?.async_mode ?? false);
   const [emailOnFailure, setEmailOnFailure] = useState(workflow?.email_on_failure ?? true);
+  const [triggerConfig, setTriggerConfig] = useState(workflow?.trigger_config ?? "");
+  const [queueConfig, setQueueConfig] = useState(workflow?.queue_config ?? "");
   const [isCustomScript, setIsCustomScript] = useState(false);
   const [scripts, setScripts] = useState<AvailableScript[]>([]);
   const [scriptsLoading, setScriptsLoading] = useState(true);
@@ -82,6 +84,11 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
     setError(null);
     setSaving(true);
     try {
+      for (const value of [triggerConfig, queueConfig]) {
+        if (value.trim()) {
+          JSON.parse(value);
+        }
+      }
       if (isEdit && workflow) {
         await updateWorkflow({
           id: workflow.id,
@@ -95,6 +102,8 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           timezone: LOCAL_TZ,
           corpus: workflow.corpus ?? "source",
           domain: workflow.domain,
+          triggerConfig: isSourceControlled ? workflow.trigger_config || undefined : triggerConfig || undefined,
+          queueConfig: isSourceControlled ? workflow.queue_config || undefined : queueConfig || undefined,
         });
       } else {
         await createWorkflow({
@@ -106,11 +115,13 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           emailOnFailure,
           timezone: LOCAL_TZ,
           corpus: "instance",
+          triggerConfig: triggerConfig || undefined,
+          queueConfig: queueConfig || undefined,
         });
       }
       onSaved();
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof SyntaxError ? "Trigger and queue metadata must be valid JSON." : String(e));
     } finally {
       setSaving(false);
     }
@@ -290,6 +301,34 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           </label>
           <span className="editor-hint">
             Send an email alert when this workflow fails. Requires email alerts to be configured in Settings.
+          </span>
+        </div>
+
+        <div className="editor-field">
+          <label className="editor-label">Trigger metadata JSON</label>
+          <textarea
+            value={triggerConfig}
+            onChange={(e) => setTriggerConfig(e.target.value)}
+            placeholder='{"triggers":[{"kind":"cron","cron":"0 9 * * *"}]}'
+            rows={4}
+            disabled={isSourceControlled}
+          />
+          <span className="editor-hint">
+            Use SDK-compatible trigger metadata. Source workflow triggers are read-only and come from git.
+          </span>
+        </div>
+
+        <div className="editor-field">
+          <label className="editor-label">Queue, dependency, and SLA JSON</label>
+          <textarea
+            value={queueConfig}
+            onChange={(e) => setQueueConfig(e.target.value)}
+            placeholder='{"queue":"instance-default","priority":0,"depends_on":[],"waits_for":[],"tags":[]}'
+            rows={4}
+            disabled={isSourceControlled}
+          />
+          <span className="editor-hint">
+            Instance workflows can declare queue, priority, dependency, mutex/tag, and SLA metadata here.
           </span>
         </div>
 

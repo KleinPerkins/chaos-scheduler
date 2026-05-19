@@ -365,6 +365,14 @@ export interface RunRelationship {
   updated_at: string;
 }
 
+export interface RetentionPreview {
+  cutoff: string;
+  candidate_runs: number;
+  preserved_dead_letter_runs: number;
+  dry_run: boolean;
+  deleted_runs: number;
+}
+
 export interface AvailableScript {
   name: string;
   path: string;
@@ -494,6 +502,29 @@ export function recoverDeadLetter(
 
 export function getRunHistory(workflowId: string, limit?: number): Promise<Run[]> {
   return invoke("get_run_history", { workflowId, limit });
+}
+
+export function getGlobalRunHistory(
+  statusFilter = "all",
+  triggerKind = "all",
+  corpusFilter = "all",
+  domainFilter = "all",
+  limit = 100,
+): Promise<Run[]> {
+  return invoke("get_global_run_history", {
+    statusFilter,
+    triggerKind,
+    corpusFilter,
+    domainFilter,
+    limit,
+  });
+}
+
+export function cleanupRetention(
+  olderThanDays: number,
+  dryRun: boolean,
+): Promise<RetentionPreview> {
+  return invoke("cleanup_retention", { olderThanDays, dryRun });
 }
 
 export function getRunLog(runId: string): Promise<Run> {
