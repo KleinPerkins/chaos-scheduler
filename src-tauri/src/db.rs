@@ -144,6 +144,24 @@ pub struct SchedulerDeadLetter {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunRelationship {
+    pub id: String,
+    pub parent_run_id: String,
+    pub child_run_id: Option<String>,
+    pub queued_run_id: Option<String>,
+    pub child_workflow_id: String,
+    pub child_workflow_name: Option<String>,
+    pub relationship: String,
+    pub task_id: Option<String>,
+    pub wait: bool,
+    pub status: String,
+    pub reason: Option<String>,
+    pub details: Option<serde_json::Value>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct RunAttempt {
     pub id: String,
@@ -744,6 +762,21 @@ impl Database {
                 exported_at TEXT,
                 export_status TEXT
             );
+            CREATE TABLE IF NOT EXISTS run_relationships (
+                id TEXT PRIMARY KEY,
+                parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                child_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+                queued_run_id TEXT REFERENCES queued_runs(id) ON DELETE SET NULL,
+                child_workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+                relationship TEXT NOT NULL,
+                task_id TEXT,
+                wait INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                reason TEXT,
+                details_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS scheduler_idempotency_keys (
                 key TEXT PRIMARY KEY,
                 run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
@@ -832,6 +865,8 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_run_assets_identity_time ON run_assets(asset_kind, asset_namespace, asset_partition, emitted_at);
             CREATE INDEX IF NOT EXISTS idx_run_lineage_run ON run_lineage(run_id);
             CREATE INDEX IF NOT EXISTS idx_run_lineage_time ON run_lineage(emitted_at);
+            CREATE INDEX IF NOT EXISTS idx_run_relationships_parent ON run_relationships(parent_run_id);
+            CREATE INDEX IF NOT EXISTS idx_run_relationships_child ON run_relationships(child_run_id);
             CREATE INDEX IF NOT EXISTS idx_idempotency_run_task ON scheduler_idempotency_keys(run_id, task_id);
             CREATE INDEX IF NOT EXISTS idx_checkpoints_run_task ON scheduler_checkpoints(run_id, task_id);
             CREATE INDEX IF NOT EXISTS idx_dead_letters_workflow ON scheduler_dead_letters(workflow_id, last_failure_at);
@@ -1374,6 +1409,80 @@ impl Database {
             params![id, run_id, task_id, attempt_id, openlineage_event_json, emitted_at],
         )?;
         Ok(id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_run_relationship(
+        &self,
+        parent_run_id: &str,
+        child_run_id: Option<&str>,
+        queued_run_id: Option<&str>,
+        child_workflow_id: &str,
+        relationship: &str,
+        task_id: Option<&str>,
+        wait: bool,
+        status: &str,
+        reason: Option<&str>,
+        details: Option<&serde_json::Value>,
+    ) -> rusqlite::Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let details_json = json_to_string(details)?;
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO run_relationships (
+                id, parent_run_id, child_run_id, queued_run_id, child_workflow_id, relationship,
+                task_id, wait, status, reason, details_json, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+            params![
+                id,
+                parent_run_id,
+                child_run_id,
+                queued_run_id,
+                child_workflow_id,
+                relationship,
+                task_id,
+                wait,
+                status,
+                reason,
+                details_json,
+                now,
+            ],
+        )?;
+        Ok(id)
+    }
+
+    pub fn list_run_relationships(&self, run_id: &str) -> rusqlite::Result<Vec<RunRelationship>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT rr.id, rr.parent_run_id, rr.child_run_id, rr.queued_run_id,
+                    rr.child_workflow_id, w.name, rr.relationship, rr.task_id, rr.wait,
+                    rr.status, rr.reason, rr.details_json, rr.created_at, rr.updated_at
+             FROM run_relationships rr
+             LEFT JOIN workflows w ON w.id = rr.child_workflow_id
+             WHERE rr.parent_run_id = ?1 OR rr.child_run_id = ?1
+             ORDER BY rr.created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![run_id], |row| {
+            let details_json: Option<String> = row.get(11)?;
+            Ok(RunRelationship {
+                id: row.get(0)?,
+                parent_run_id: row.get(1)?,
+                child_run_id: row.get(2)?,
+                queued_run_id: row.get(3)?,
+                child_workflow_id: row.get(4)?,
+                child_workflow_name: row.get(5)?,
+                relationship: row.get(6)?,
+                task_id: row.get(7)?,
+                wait: row.get::<_, i64>(8)? != 0,
+                status: row.get(9)?,
+                reason: row.get(10)?,
+                details: parse_json_opt(details_json),
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
+            })
+        })?;
+        rows.collect()
     }
 
     pub fn latest_asset_write_matching(
@@ -3241,6 +3350,10 @@ fn json_to_string(value: Option<&serde_json::Value>) -> rusqlite::Result<Option<
         .map(serde_json::to_string)
         .transpose()
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+fn parse_json_opt(value: Option<String>) -> Option<serde_json::Value> {
+    value.as_deref().and_then(|s| serde_json::from_str(s).ok())
 }
 
 fn workflow_resource_sample_from_row(row: &rusqlite::Row) -> WorkflowResourceSample {

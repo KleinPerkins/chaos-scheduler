@@ -348,6 +348,23 @@ export interface SchedulerDeadLetter {
   updated_at: string;
 }
 
+export interface RunRelationship {
+  id: string;
+  parent_run_id: string;
+  child_run_id?: string | null;
+  queued_run_id?: string | null;
+  child_workflow_id: string;
+  child_workflow_name?: string | null;
+  relationship: string;
+  task_id?: string | null;
+  wait: boolean;
+  status: string;
+  reason?: string | null;
+  details?: unknown;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AvailableScript {
   name: string;
   path: string;
@@ -493,6 +510,10 @@ export function getRunAttempts(runId: string): Promise<RunAttempt[]> {
 
 export function getRunMetrics(runId: string): Promise<RunMetric[]> {
   return invoke("get_run_metrics", { runId });
+}
+
+export function getRunRelationships(runId: string): Promise<RunRelationship[]> {
+  return invoke("get_run_relationships", { runId });
 }
 
 export function getWorkflowHistoryBuckets(

@@ -1,9 +1,9 @@
 use crate::db::{
     Database, EmailConfig, MissionControlNeedsAttentionItem, MissionControlPanelAvailability,
     MissionControlPreferences, MissionControlSnapshot, MissionControlUpcomingRun, NextRun,
-    QueueInfo, QueuedRun, Run, RunAttempt, RunMetric, RunTask, SchedulerAsset, SchedulerDeadLetter,
-    SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket, WorkflowResourceSample,
-    WorkflowTokenUsageRollup,
+    QueueInfo, QueuedRun, Run, RunAttempt, RunMetric, RunRelationship, RunTask, SchedulerAsset,
+    SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
+    WorkflowResourceSample, WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
@@ -572,6 +572,17 @@ pub fn get_run_attempts(state: State<AppState>, run_id: String) -> Result<Vec<Ru
 #[tauri::command]
 pub fn get_run_metrics(state: State<AppState>, run_id: String) -> Result<Vec<RunMetric>, String> {
     state.db.get_run_metrics(&run_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_run_relationships(
+    state: State<AppState>,
+    run_id: String,
+) -> Result<Vec<RunRelationship>, String> {
+    state
+        .db
+        .list_run_relationships(&run_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

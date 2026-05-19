@@ -626,6 +626,12 @@ pub struct NonCronDispatchOptions<'a> {
     pub app_handle: Option<tauri::AppHandle>,
 }
 
+#[derive(Default)]
+struct ChildDispatchSummary {
+    failure_count: usize,
+    notes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct QueueConfig {
     #[serde(default)]
@@ -1043,6 +1049,141 @@ pub fn dispatch_non_cron_workflow(
     })
 }
 
+fn dispatch_child_workflow_requests(
+    db: &Arc<Database>,
+    chaos_labs_root: &str,
+    python_path: &str,
+    parent_run_id: &str,
+    parent_workflow_id: &str,
+    raw_events: &str,
+    app_handle: Option<tauri::AppHandle>,
+) -> ChildDispatchSummary {
+    let mut summary = ChildDispatchSummary::default();
+    for event_line in valid_task_event_lines(raw_events) {
+        let Ok(event) = serde_json::from_str::<Value>(&event_line) else {
+            continue;
+        };
+        if event.get("status").and_then(Value::as_str) != Some("subworkflow_requested") {
+            continue;
+        }
+        let task_id = event.get("task_id").and_then(Value::as_str);
+        let details = event.get("details").cloned().unwrap_or(Value::Null);
+        let Some(child_workflow_id) = details.get("workflow_id").and_then(Value::as_str) else {
+            summary
+                .notes
+                .push("subworkflow request missing workflow_id".to_string());
+            continue;
+        };
+        let wait = details.get("wait").and_then(Value::as_bool).unwrap_or(true);
+        let inputs = details
+            .get("inputs")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let correlation_id = details.get("correlation_id").and_then(Value::as_str);
+        let trigger_payload = serde_json::json!({
+            "parent_run_id": parent_run_id,
+            "parent_workflow_id": parent_workflow_id,
+            "parent_task_id": task_id,
+            "wait": wait,
+            "correlation_id": correlation_id,
+        })
+        .to_string();
+        let input_json = serde_json::to_string(&inputs).unwrap_or_else(|_| "{}".to_string());
+
+        if child_workflow_id == parent_workflow_id {
+            let reason = "child workflow loop rejected: child workflow matches parent";
+            let _ = db.insert_run_relationship(
+                parent_run_id,
+                None,
+                None,
+                child_workflow_id,
+                "child_workflow",
+                task_id,
+                wait,
+                "rejected",
+                Some(reason),
+                Some(&details),
+            );
+            if wait {
+                summary.failure_count += 1;
+            }
+            summary.notes.push(reason.to_string());
+            continue;
+        }
+
+        match dispatch_non_cron_workflow(
+            db,
+            chaos_labs_root,
+            python_path,
+            child_workflow_id,
+            NonCronDispatchOptions {
+                notify_on_success: false,
+                notify_on_failure: true,
+                email_on_failure_enabled: false,
+                trigger_kind: "child_workflow",
+                trigger_payload: Some(&trigger_payload),
+                upstream_run_id: Some(parent_run_id),
+                input_json: Some(&input_json),
+                rerun_of_run_id: None,
+                suppress_completion_triggers: false,
+                dedupe: false,
+                app_handle: app_handle.clone(),
+            },
+        ) {
+            Ok(outcome) => {
+                let status = outcome.status.clone();
+                let _ = db.insert_run_relationship(
+                    parent_run_id,
+                    outcome.run_id.as_deref(),
+                    outcome.queued_run_id.as_deref(),
+                    child_workflow_id,
+                    "child_workflow",
+                    task_id,
+                    wait,
+                    &status,
+                    outcome.reason.as_deref(),
+                    Some(&details),
+                );
+                if wait {
+                    if status == "skipped" {
+                        summary.failure_count += 1;
+                    }
+                    if let Some(child_run_id) = outcome.run_id.as_deref() {
+                        if let Ok(child_run) = db.get_run(child_run_id) {
+                            if is_failure_terminal(&child_run.status) {
+                                summary.failure_count += 1;
+                                summary.notes.push(format!(
+                                    "child workflow {} finished as {}",
+                                    child_workflow_id, child_run.status
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = db.insert_run_relationship(
+                    parent_run_id,
+                    None,
+                    None,
+                    child_workflow_id,
+                    "child_workflow",
+                    task_id,
+                    wait,
+                    "failed",
+                    Some(&e),
+                    Some(&details),
+                );
+                if wait {
+                    summary.failure_count += 1;
+                }
+                summary.notes.push(e);
+            }
+        }
+    }
+    summary
+}
+
 pub fn execute_workflow_with_context(
     db: &Arc<Database>,
     chaos_labs_root: &str,
@@ -1145,6 +1286,15 @@ pub fn execute_workflow_with_context(
             let exit_code = output.status.code().unwrap_or(-1);
             let stdout = stdout_with_task_events(stdout, &task_events_raw);
             persist_task_events(db, &run.id, &workflow.id, &task_events_raw);
+            let child_summary = dispatch_child_workflow_requests(
+                db,
+                chaos_labs_root,
+                python_path,
+                &run.id,
+                &workflow.id,
+                &task_events_raw,
+                app_handle.clone(),
+            );
 
             let result_url = extract_result_url(&stdout);
 
@@ -1198,10 +1348,36 @@ pub fn execute_workflow_with_context(
                 });
             }
 
-            db.finish_run(&run.id, exit_code, &stdout, &stderr, result_url.as_deref())
-                .map_err(|e| format!("Failed to update run: {}", e))?;
+            let final_exit_code = if exit_code == 0 && child_summary.failure_count > 0 {
+                1
+            } else {
+                exit_code
+            };
+            let stderr = if child_summary.failure_count > 0 {
+                let mut combined = stderr;
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(&format!(
+                    "Child workflow dispatch reported {} failure(s): {}",
+                    child_summary.failure_count,
+                    child_summary.notes.join("; ")
+                ));
+                combined
+            } else {
+                stderr
+            };
 
-            let success = exit_code == 0;
+            db.finish_run(
+                &run.id,
+                final_exit_code,
+                &stdout,
+                &stderr,
+                result_url.as_deref(),
+            )
+            .map_err(|e| format!("Failed to update run: {}", e))?;
+
+            let success = final_exit_code == 0;
             Ok(RunResult {
                 run_id: run.id,
                 workflow_name: workflow.name,
@@ -3298,6 +3474,117 @@ not json
         let rows = db.list_queued_runs(10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].trigger_kind.as_deref(), Some("backfill"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn subworkflow_requests_create_child_relationships_through_admission() {
+        let dir = std::env::temp_dir().join(format!("chaos-child-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Database::new(&dir));
+        let parent = db
+            .create_workflow(
+                "Parent Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                Some(r#"{"queue":"source-default"}"#),
+            )
+            .unwrap();
+        let child = db
+            .create_workflow(
+                "Child Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                Some(r#"{"queue":"source-default","depends_on":["missing-upstream"]}"#),
+            )
+            .unwrap();
+        let parent_run = db
+            .create_run_with_context(&parent.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        let raw = format!(
+            r#"{{"schema_version":"scheduler.task_event.v1","ts":"2026-05-19T00:00:00Z","task_id":"fanout","status":"subworkflow_requested","details":{{"workflow_id":"{}","inputs":{{"partition":"p1"}},"wait":true,"correlation_id":"c1"}}}}"#,
+            child.id
+        );
+
+        let summary = dispatch_child_workflow_requests(
+            &db,
+            dir.to_str().unwrap(),
+            "python3",
+            &parent_run.id,
+            &parent.id,
+            &raw,
+            None,
+        );
+
+        assert_eq!(summary.failure_count, 0);
+        let relationships = db.list_run_relationships(&parent_run.id).unwrap();
+        assert_eq!(relationships.len(), 1);
+        assert_eq!(relationships[0].child_workflow_id, child.id);
+        assert_eq!(relationships[0].status, "queued");
+        assert!(relationships[0].queued_run_id.is_some());
+        assert_eq!(relationships[0].task_id.as_deref(), Some("fanout"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn subworkflow_requests_reject_immediate_parent_child_loops() {
+        let dir =
+            std::env::temp_dir().join(format!("chaos-child-loop-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Database::new(&dir));
+        let parent = db
+            .create_workflow(
+                "Parent Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                Some(r#"{"queue":"source-default"}"#),
+            )
+            .unwrap();
+        let parent_run = db
+            .create_run_with_context(&parent.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        let raw = format!(
+            r#"{{"schema_version":"scheduler.task_event.v1","ts":"2026-05-19T00:00:00Z","task_id":"fanout","status":"subworkflow_requested","details":{{"workflow_id":"{}","inputs":{{}},"wait":true}}}}"#,
+            parent.id
+        );
+
+        let summary = dispatch_child_workflow_requests(
+            &db,
+            dir.to_str().unwrap(),
+            "python3",
+            &parent_run.id,
+            &parent.id,
+            &raw,
+            None,
+        );
+
+        assert_eq!(summary.failure_count, 1);
+        let relationships = db.list_run_relationships(&parent_run.id).unwrap();
+        assert_eq!(relationships[0].status, "rejected");
+        assert!(relationships[0].reason.as_deref().unwrap().contains("loop"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

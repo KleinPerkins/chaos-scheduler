@@ -1,6 +1,14 @@
 import { useState, useEffect } from "react";
-import { getRunLog, getRunTasks, getRunAttempts, getRunMetrics, openUrl, analyzeRunError } from "../lib/commands";
-import type { Run, RunTask, RunAttempt, RunMetric, ErrorAnalysis } from "../lib/commands";
+import {
+  getRunAttempts,
+  getRunLog,
+  getRunMetrics,
+  getRunRelationships,
+  getRunTasks,
+  openUrl,
+  analyzeRunError,
+} from "../lib/commands";
+import type { ErrorAnalysis, Run, RunAttempt, RunMetric, RunRelationship, RunTask } from "../lib/commands";
 import "./RunDetail.css";
 
 interface Props {
@@ -235,6 +243,7 @@ export default function RunDetail({ runId, onBack }: Props) {
   const [tasks, setTasks] = useState<RunTask[]>([]);
   const [attempts, setAttempts] = useState<RunAttempt[]>([]);
   const [metrics, setMetrics] = useState<RunMetric[]>([]);
+  const [relationships, setRelationships] = useState<RunRelationship[]>([]);
   const [showLogs, setShowLogs] = useState(false);
   const [logTab, setLogTab] = useState<"stdout" | "stderr">("stdout");
   const [analysis, setAnalysis] = useState<ErrorAnalysis | null>(null);
@@ -252,6 +261,7 @@ export default function RunDetail({ runId, onBack }: Props) {
     getRunTasks(runId).then(setTasks).catch(() => setTasks([]));
     getRunAttempts(runId).then(setAttempts).catch(() => setAttempts([]));
     getRunMetrics(runId).then(setMetrics).catch(() => setMetrics([]));
+    getRunRelationships(runId).then(setRelationships).catch(() => setRelationships([]));
   }, [runId]);
 
   const handleAnalyze = async () => {
@@ -394,6 +404,41 @@ export default function RunDetail({ runId, onBack }: Props) {
                   <td>{formatDate(metric.emitted_at)}</td>
                 </tr>
               ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {relationships.length > 0 && (
+        <div className="rd-observability-card">
+          <h3 className="rd-section-title">Child Workflow Lineage</h3>
+          <table className="rd-table">
+            <thead>
+              <tr>
+                <th>Direction</th>
+                <th>Workflow</th>
+                <th>Task</th>
+                <th>Wait</th>
+                <th>Status</th>
+                <th>Run / Queue</th>
+              </tr>
+            </thead>
+            <tbody>
+              {relationships.map((rel) => {
+                const isParent = rel.parent_run_id === run.id;
+                return (
+                  <tr key={rel.id}>
+                    <td>{isParent ? "child" : "parent"}</td>
+                    <td>{rel.child_workflow_name ?? rel.child_workflow_id}</td>
+                    <td>{rel.task_id ?? "workflow"}</td>
+                    <td>{rel.wait ? "wait" : "fire-and-forget"}</td>
+                    <td><span className={`status-badge ${rel.status}`}>{rel.status}</span></td>
+                    <td className="rd-meta-mono">
+                      {rel.child_run_id ?? rel.queued_run_id ?? rel.reason ?? "pending"}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
