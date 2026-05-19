@@ -1,11 +1,13 @@
 use crate::db::{
     Database, EmailConfig, MissionControlNeedsAttentionItem, MissionControlPanelAvailability,
     MissionControlPreferences, MissionControlSnapshot, MissionControlUpcomingRun, NextRun,
-    QueueInfo, QueuedRun, Run, RunAttempt, RunMetric, RunTask, SchedulerAsset, SchedulerStatus,
-    SlaViolation, Workflow, WorkflowHistoryBucket, WorkflowResourceSample,
+    QueueInfo, QueuedRun, Run, RunAttempt, RunMetric, RunTask, SchedulerAsset, SchedulerDeadLetter,
+    SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket, WorkflowResourceSample,
     WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
+use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
+use serde::Serialize;
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
@@ -17,6 +19,22 @@ pub struct AppState {
     pub scheduler: Arc<Mutex<WorkflowScheduler>>,
     pub chaos_labs_root: String,
     pub python_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BackfillPlan {
+    pub workflow_id: String,
+    pub trigger_kind: String,
+    pub chain_suppressed: bool,
+    pub logical_dates: Vec<String>,
+    pub count: usize,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BackfillDispatchResult {
+    pub plan: BackfillPlan,
+    pub outcomes: Vec<scheduler::DispatchOutcome>,
 }
 
 #[tauri::command]
@@ -257,6 +275,268 @@ pub fn rerun_workflow(
         );
     }
     Ok(result.run_id)
+}
+
+fn parse_backfill_dt(value: &str) -> Result<DateTime<Utc>, String> {
+    let parsed = DateTime::parse_from_rfc3339(value)
+        .map_err(|e| format!("Invalid RFC3339 datetime {value:?}: {e}"))?;
+    Ok(parsed.with_timezone(&Utc))
+}
+
+fn field_matches(field: &str, value: u32) -> bool {
+    if field == "*" {
+        return true;
+    }
+    field
+        .split(',')
+        .any(|part| part.parse::<u32>().ok() == Some(value))
+}
+
+fn cron_matches(expr: &str, instant: DateTime<Utc>) -> bool {
+    let mut fields: Vec<&str> = expr.split_whitespace().collect();
+    if fields.len() == 6 {
+        fields.remove(0);
+    }
+    if fields.len() != 5 {
+        return false;
+    }
+    let weekday = instant.weekday().num_days_from_sunday();
+    field_matches(fields[0], instant.minute())
+        && field_matches(fields[1], instant.hour())
+        && field_matches(fields[2], instant.day())
+        && field_matches(fields[3], instant.month())
+        && field_matches(fields[4], weekday)
+}
+
+fn cron_entries_for_workflow(workflow: &Workflow) -> Vec<String> {
+    let mut entries = vec![];
+    if let Some(raw) = workflow.trigger_config.as_deref() {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
+            let triggers = parsed
+                .get("triggers")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .or_else(|| parsed.as_array().cloned())
+                .unwrap_or_default();
+            for trigger in triggers {
+                if trigger.get("kind").and_then(serde_json::Value::as_str) == Some("cron") {
+                    if let Some(cron) = trigger.get("cron").and_then(serde_json::Value::as_str) {
+                        entries.push(cron.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if entries.is_empty() {
+        entries.extend(
+            workflow
+                .cron_schedule
+                .split(';')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string),
+        );
+    }
+    entries
+}
+
+fn build_backfill_plan(
+    db: &Arc<Database>,
+    workflow_id: &str,
+    since: &str,
+    until: &str,
+    max_runs: Option<i64>,
+    dry_run: bool,
+) -> Result<BackfillPlan, String> {
+    let workflow = db.get_workflow(workflow_id).map_err(|e| e.to_string())?;
+    let since = parse_backfill_dt(since)?.with_second(0).unwrap();
+    let until = parse_backfill_dt(until)?.with_second(0).unwrap();
+    if until < since {
+        return Err("Backfill until must be >= since".to_string());
+    }
+    let max_runs = max_runs.unwrap_or(i64::MAX).max(0) as usize;
+    let cron_entries = cron_entries_for_workflow(&workflow);
+    let mut logical_dates = vec![];
+    let mut cursor = since;
+    while cursor <= until && logical_dates.len() < max_runs {
+        if cron_entries.iter().any(|expr| cron_matches(expr, cursor)) {
+            logical_dates.push(cursor.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        }
+        cursor += Duration::minutes(1);
+    }
+    Ok(BackfillPlan {
+        workflow_id: workflow_id.to_string(),
+        trigger_kind: "backfill".to_string(),
+        chain_suppressed: true,
+        count: logical_dates.len(),
+        logical_dates,
+        dry_run,
+    })
+}
+
+#[tauri::command]
+pub fn plan_backfill(
+    state: State<AppState>,
+    workflow_id: String,
+    since: String,
+    until: String,
+    max_runs: Option<i64>,
+) -> Result<BackfillPlan, String> {
+    build_backfill_plan(&state.db, &workflow_id, &since, &until, max_runs, true)
+}
+
+#[tauri::command]
+pub fn dispatch_backfill(
+    state: State<AppState>,
+    workflow_id: String,
+    since: String,
+    until: String,
+    max_runs: Option<i64>,
+    dry_run: Option<bool>,
+) -> Result<BackfillDispatchResult, String> {
+    let dry_run = dry_run.unwrap_or(false);
+    let plan = build_backfill_plan(&state.db, &workflow_id, &since, &until, max_runs, dry_run)?;
+    if dry_run {
+        return Ok(BackfillDispatchResult {
+            plan,
+            outcomes: vec![],
+        });
+    }
+    let mut outcomes = vec![];
+    for logical_date in &plan.logical_dates {
+        let payload = serde_json::json!({
+            "logical_date": logical_date,
+            "chain_suppressed": true,
+        })
+        .to_string();
+        let input = serde_json::json!({
+            "backfill": {
+                "logical_date": logical_date,
+            }
+        })
+        .to_string();
+        outcomes.push(scheduler::dispatch_non_cron_workflow(
+            &state.db,
+            &state.chaos_labs_root,
+            &state.python_path,
+            &workflow_id,
+            scheduler::NonCronDispatchOptions {
+                notify_on_success: false,
+                notify_on_failure: true,
+                email_on_failure_enabled: false,
+                trigger_kind: "backfill",
+                trigger_payload: Some(&payload),
+                upstream_run_id: None,
+                input_json: Some(&input),
+                rerun_of_run_id: None,
+                suppress_completion_triggers: true,
+                dedupe: true,
+                app_handle: None,
+            },
+        )?);
+    }
+    Ok(BackfillDispatchResult { plan, outcomes })
+}
+
+#[tauri::command]
+pub fn list_dead_letters(
+    state: State<AppState>,
+    include_acknowledged: Option<bool>,
+    limit: Option<i64>,
+) -> Result<Vec<SchedulerDeadLetter>, String> {
+    state
+        .db
+        .list_scheduler_dead_letters(include_acknowledged.unwrap_or(false), limit.unwrap_or(50))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_dead_letter(state: State<AppState>, id: String) -> Result<SchedulerDeadLetter, String> {
+    state
+        .db
+        .get_scheduler_dead_letter(&id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn acknowledge_dead_letter(
+    state: State<AppState>,
+    id: String,
+    reason: String,
+    operator: Option<String>,
+    reenable_workflow: Option<bool>,
+) -> Result<SchedulerDeadLetter, String> {
+    if reason.trim().is_empty() {
+        return Err("Acknowledgement reason is required".to_string());
+    }
+    let before = state
+        .db
+        .get_scheduler_dead_letter(&id)
+        .map_err(|e| e.to_string())?;
+    let updated = state
+        .db
+        .acknowledge_scheduler_dead_letter(&id, reason.trim(), operator.as_deref())
+        .map_err(|e| e.to_string())?;
+    if updated == 0 {
+        return Err("Dead-letter row is already acknowledged or missing".to_string());
+    }
+    if reenable_workflow.unwrap_or(false) {
+        state
+            .db
+            .set_workflow_enabled(&before.workflow_id, true)
+            .map_err(|e| e.to_string())?;
+    }
+    state
+        .db
+        .get_scheduler_dead_letter(&id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn recover_dead_letter(
+    state: State<AppState>,
+    id: String,
+    reenable_workflow: Option<bool>,
+) -> Result<scheduler::DispatchOutcome, String> {
+    let dead_letter = state
+        .db
+        .get_scheduler_dead_letter(&id)
+        .map_err(|e| e.to_string())?;
+    if reenable_workflow.unwrap_or(false) {
+        state
+            .db
+            .set_workflow_enabled(&dead_letter.workflow_id, true)
+            .map_err(|e| e.to_string())?;
+    }
+    let payload = serde_json::json!({
+        "dead_letter_id": dead_letter.id,
+        "source_run_id": dead_letter.run_id,
+        "task_id": dead_letter.task_id,
+    })
+    .to_string();
+    let outcome = scheduler::dispatch_non_cron_workflow(
+        &state.db,
+        &state.chaos_labs_root,
+        &state.python_path,
+        &dead_letter.workflow_id,
+        scheduler::NonCronDispatchOptions {
+            notify_on_success: false,
+            notify_on_failure: true,
+            email_on_failure_enabled: false,
+            trigger_kind: "dead_letter_recovery",
+            trigger_payload: Some(&payload),
+            upstream_run_id: Some(&dead_letter.run_id),
+            input_json: None,
+            rerun_of_run_id: Some(&dead_letter.run_id),
+            suppress_completion_triggers: true,
+            dedupe: false,
+            app_handle: None,
+        },
+    )?;
+    if let Some(run_id) = outcome.run_id.as_deref() {
+        let _ = state.db.link_dead_letter_recovery(&id, run_id);
+    }
+    Ok(outcome)
 }
 
 #[tauri::command]

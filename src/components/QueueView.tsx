@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  acknowledgeDeadLetter,
   cancelQueuedRun,
+  dispatchBackfill,
+  listDeadLetters,
   listQueuedRuns,
   listQueues,
+  planBackfill,
+  recoverDeadLetter,
   updateQueue,
 } from "../lib/commands";
-import type { QueueInfo, QueuedRun } from "../lib/commands";
+import type { BackfillPlan, QueueInfo, QueuedRun, SchedulerDeadLetter } from "../lib/commands";
 import "./QueueView.css";
 
 interface QueueDraft {
@@ -70,7 +75,14 @@ interface QueueViewProps {
 export default function QueueView({ onBack }: QueueViewProps) {
   const [queues, setQueues] = useState<QueueInfo[]>([]);
   const [queuedRuns, setQueuedRuns] = useState<QueuedRun[]>([]);
+  const [deadLetters, setDeadLetters] = useState<SchedulerDeadLetter[]>([]);
   const [drafts, setDrafts] = useState<Record<string, QueueDraft>>({});
+  const [backfillWorkflowId, setBackfillWorkflowId] = useState("");
+  const [backfillSince, setBackfillSince] = useState("");
+  const [backfillUntil, setBackfillUntil] = useState("");
+  const [backfillMaxRuns, setBackfillMaxRuns] = useState("10");
+  const [backfillPlan, setBackfillPlan] = useState<BackfillPlan | null>(null);
+  const [deadLetterReason, setDeadLetterReason] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -78,12 +90,14 @@ export default function QueueView({ onBack }: QueueViewProps) {
   const load = async () => {
     setError(null);
     try {
-      const [queueRows, runRows] = await Promise.all([
+      const [queueRows, runRows, deadLetterRows] = await Promise.all([
         listQueues(),
         listQueuedRuns(50),
+        listDeadLetters(false, 50),
       ]);
       setQueues(queueRows);
       setQueuedRuns(runRows);
+      setDeadLetters(deadLetterRows);
       setDrafts((current) => {
         const next = { ...current };
         for (const queue of queueRows) {
@@ -142,6 +156,63 @@ export default function QueueView({ onBack }: QueueViewProps) {
     setError(null);
     try {
       await cancelQueuedRun(id);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const maxRunsValue = () => {
+    const parsed = parseOptionalInt(backfillMaxRuns);
+    return parsed == null || !Number.isFinite(parsed) ? null : parsed;
+  };
+
+  const previewBackfill = async () => {
+    setError(null);
+    try {
+      const plan = await planBackfill(backfillWorkflowId.trim(), backfillSince, backfillUntil, maxRunsValue());
+      setBackfillPlan(plan);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const dispatchBackfillPlan = async () => {
+    setError(null);
+    try {
+      const result = await dispatchBackfill(
+        backfillWorkflowId.trim(),
+        backfillSince,
+        backfillUntil,
+        maxRunsValue(),
+        false,
+      );
+      setBackfillPlan(result.plan);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const acknowledge = async (id: string) => {
+    const reason = (deadLetterReason[id] ?? "").trim();
+    if (!reason) {
+      setError("Acknowledgement reason is required.");
+      return;
+    }
+    setError(null);
+    try {
+      await acknowledgeDeadLetter(id, reason, "scheduler-ui", false);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const recover = async (id: string) => {
+    setError(null);
+    try {
+      await recoverDeadLetter(id, true);
       await load();
     } catch (e) {
       setError(String(e));
@@ -268,6 +339,118 @@ export default function QueueView({ onBack }: QueueViewProps) {
             );
           })}
         </div>
+      </section>
+
+      <section className="queue-section">
+        <div className="queue-section-header">
+          <h2>Backfill Dispatch</h2>
+          <span>Historical runs use normal queue and dependency admission</span>
+        </div>
+        <div className="queue-card">
+          <div className="queue-fields">
+            <label>
+              Workflow ID
+              <input
+                value={backfillWorkflowId}
+                placeholder="daily-digest"
+                onChange={(e) => setBackfillWorkflowId(e.target.value)}
+              />
+            </label>
+            <label>
+              Since
+              <input
+                value={backfillSince}
+                placeholder="2026-05-01T00:00:00Z"
+                onChange={(e) => setBackfillSince(e.target.value)}
+              />
+            </label>
+            <label>
+              Until
+              <input
+                value={backfillUntil}
+                placeholder="2026-05-03T00:00:00Z"
+                onChange={(e) => setBackfillUntil(e.target.value)}
+              />
+            </label>
+            <label>
+              Max runs
+              <input
+                value={backfillMaxRuns}
+                inputMode="numeric"
+                pattern="\d+"
+                onChange={(e) => setBackfillMaxRuns(e.target.value)}
+              />
+            </label>
+          </div>
+          <div className="queue-card-footer">
+            <span className="queue-validation">
+              {backfillPlan
+                ? `${backfillPlan.count} logical slot(s), chain suppression on`
+                : "Preview before dispatching."}
+            </span>
+            <button
+              className="btn btn-ghost btn-sm"
+              disabled={!backfillWorkflowId || !backfillSince || !backfillUntil}
+              onClick={previewBackfill}
+            >
+              Preview
+            </button>
+            <button
+              className="btn btn-primary btn-sm"
+              disabled={!backfillPlan || backfillPlan.count === 0}
+              onClick={dispatchBackfillPlan}
+            >
+              Dispatch
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="queue-section">
+        <div className="queue-section-header">
+          <h2>Dead Letters</h2>
+          <span>Acknowledge or recover failed task runs with audit state</span>
+        </div>
+        {deadLetters.length === 0 ? (
+          <div className="queue-empty">No unacknowledged dead-letter rows.</div>
+        ) : (
+          <div className="queue-run-table">
+            <div className="queue-run-row header">
+              <span>Workflow</span>
+              <span>Task</span>
+              <span>Failure</span>
+              <span>Reason</span>
+              <span />
+            </div>
+            {deadLetters.map((row) => (
+              <div key={row.id} className="queue-run-row">
+                <span>
+                  <strong>{row.workflow_name ?? row.workflow_id}</strong>
+                  <small>{row.run_status ?? "unknown"}</small>
+                </span>
+                <span>{row.task_id ?? "-"}</span>
+                <span>{formatDate(row.last_failure_at)}</span>
+                <span>
+                  <input
+                    value={deadLetterReason[row.id] ?? ""}
+                    placeholder="ack reason"
+                    onChange={(e) =>
+                      setDeadLetterReason((current) => ({ ...current, [row.id]: e.target.value }))
+                    }
+                  />
+                </span>
+                <span>
+                  <button className="btn btn-ghost btn-sm" onClick={() => acknowledge(row.id)}>
+                    Ack
+                  </button>
+                  <button className="btn btn-primary btn-sm" onClick={() => recover(row.id)}>
+                    Recover
+                  </button>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="queue-section">

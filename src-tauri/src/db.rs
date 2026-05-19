@@ -125,6 +125,25 @@ pub struct QueuedRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchedulerDeadLetter {
+    pub id: String,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_name: Option<String>,
+    pub task_id: Option<String>,
+    pub last_attempt_id: Option<String>,
+    pub last_failure_at: String,
+    pub last_exception: String,
+    pub acknowledged_at: Option<String>,
+    pub acknowledged_reason: Option<String>,
+    pub acknowledged_by: Option<String>,
+    pub recovery_run_id: Option<String>,
+    pub run_status: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct RunAttempt {
     pub id: String,
@@ -752,6 +771,9 @@ impl Database {
                 last_failure_at TEXT NOT NULL,
                 last_exception TEXT NOT NULL,
                 acknowledged_at TEXT,
+                acknowledged_reason TEXT,
+                acknowledged_by TEXT,
+                recovery_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
             );
@@ -820,6 +842,12 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_token_usage_workflow_time ON workflow_token_usage(workflow_id, emitted_at);
             CREATE INDEX IF NOT EXISTS idx_token_usage_run ON workflow_token_usage(run_id);",
         )?;
+        let _ = conn.execute_batch(
+            "ALTER TABLE scheduler_dead_letters ADD COLUMN acknowledged_reason TEXT;",
+        );
+        let _ = conn
+            .execute_batch("ALTER TABLE scheduler_dead_letters ADD COLUMN acknowledged_by TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE scheduler_dead_letters ADD COLUMN recovery_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL;");
         conn.execute_batch(
             "INSERT OR IGNORE INTO scheduler_config (key, value) VALUES ('global_parallelism_cap', '4');
              INSERT OR IGNORE INTO scheduler_config (key, value) VALUES ('notify_on_failure', 'true');
@@ -1481,6 +1509,108 @@ impl Database {
             "SELECT id FROM scheduler_dead_letters WHERE run_id = ?1",
             params![run_id],
             |row| row.get(0),
+        )
+    }
+
+    fn scheduler_dead_letter_from_row(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<SchedulerDeadLetter> {
+        Ok(SchedulerDeadLetter {
+            id: row.get(0)?,
+            run_id: row.get(1)?,
+            workflow_id: row.get(2)?,
+            workflow_name: row.get(3)?,
+            task_id: row.get(4)?,
+            last_attempt_id: row.get(5)?,
+            last_failure_at: row.get(6)?,
+            last_exception: row.get(7)?,
+            acknowledged_at: row.get(8)?,
+            acknowledged_reason: row.get(9)?,
+            acknowledged_by: row.get(10)?,
+            recovery_run_id: row.get(11)?,
+            run_status: row.get(12)?,
+            created_at: row.get(13)?,
+            updated_at: row.get(14)?,
+        })
+    }
+
+    pub fn list_scheduler_dead_letters(
+        &self,
+        include_acknowledged: bool,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<SchedulerDeadLetter>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT d.id, d.run_id, d.workflow_id, w.name, d.task_id, d.last_attempt_id,
+                    d.last_failure_at, d.last_exception, d.acknowledged_at,
+                    d.acknowledged_reason, d.acknowledged_by, d.recovery_run_id,
+                    r.status, d.created_at, d.updated_at
+             FROM scheduler_dead_letters d
+             LEFT JOIN workflows w ON w.id = d.workflow_id
+             LEFT JOIN runs r ON r.id = d.run_id
+             WHERE (?1 OR d.acknowledged_at IS NULL)
+             ORDER BY d.acknowledged_at IS NOT NULL, d.last_failure_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![include_acknowledged, limit], |row| {
+            Self::scheduler_dead_letter_from_row(row)
+        })?;
+        rows.collect()
+    }
+
+    pub fn get_scheduler_dead_letter(&self, id: &str) -> rusqlite::Result<SchedulerDeadLetter> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT d.id, d.run_id, d.workflow_id, w.name, d.task_id, d.last_attempt_id,
+                    d.last_failure_at, d.last_exception, d.acknowledged_at,
+                    d.acknowledged_reason, d.acknowledged_by, d.recovery_run_id,
+                    r.status, d.created_at, d.updated_at
+             FROM scheduler_dead_letters d
+             LEFT JOIN workflows w ON w.id = d.workflow_id
+             LEFT JOIN runs r ON r.id = d.run_id
+             WHERE d.id = ?1",
+            params![id],
+            |row| Self::scheduler_dead_letter_from_row(row),
+        )
+    }
+
+    pub fn acknowledge_scheduler_dead_letter(
+        &self,
+        id: &str,
+        reason: &str,
+        operator: Option<&str>,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE scheduler_dead_letters
+             SET acknowledged_at = ?2,
+                 acknowledged_reason = ?3,
+                 acknowledged_by = ?4,
+                 updated_at = datetime('now')
+             WHERE id = ?1 AND acknowledged_at IS NULL",
+            params![id, chrono::Utc::now().to_rfc3339(), reason, operator],
+        )
+    }
+
+    pub fn link_dead_letter_recovery(
+        &self,
+        id: &str,
+        recovery_run_id: &str,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE scheduler_dead_letters
+             SET recovery_run_id = ?2, updated_at = datetime('now')
+             WHERE id = ?1",
+            params![id, recovery_run_id],
+        )
+    }
+
+    pub fn set_workflow_enabled(&self, id: &str, enabled: bool) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE workflows SET enabled = ?2, updated_at = datetime('now') WHERE id = ?1",
+            params![id, enabled],
         )
     }
 
@@ -2733,6 +2863,97 @@ impl Database {
         rows.collect()
     }
 
+    pub fn find_run_by_dispatch_context(
+        &self,
+        workflow_id: &str,
+        trigger_kind: Option<&str>,
+        trigger_payload: Option<&str>,
+        input_json: Option<&str>,
+        rerun_of_run_id: Option<&str>,
+    ) -> rusqlite::Result<Option<Run>> {
+        let conn = self.conn()?;
+        let id = conn
+            .query_row(
+                "SELECT id FROM runs
+                 WHERE workflow_id = ?1
+                   AND COALESCE(trigger_kind, '') = COALESCE(?2, '')
+                   AND COALESCE(trigger_payload, '') = COALESCE(?3, '')
+                   AND COALESCE(input_json, '') = COALESCE(?4, '')
+                   AND COALESCE(rerun_of_run_id, '') = COALESCE(?5, '')
+                 ORDER BY started_at DESC LIMIT 1",
+                params![
+                    workflow_id,
+                    trigger_kind,
+                    trigger_payload,
+                    input_json,
+                    rerun_of_run_id
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match id {
+            Some(id) => self.get_run(&id).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub fn find_queued_run_by_dispatch_context(
+        &self,
+        workflow_id: &str,
+        trigger_kind: Option<&str>,
+        trigger_payload: Option<&str>,
+        input_json: Option<&str>,
+        rerun_of_run_id: Option<&str>,
+    ) -> rusqlite::Result<Option<QueuedRun>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, w.corpus, q.priority,
+                    q.status, q.queued_at, q.admitted_at, q.finished_at, q.trigger_kind,
+                    q.trigger_payload, q.upstream_run_id, q.input_json, q.rerun_of_run_id
+             FROM queued_runs q
+             LEFT JOIN workflows w ON q.workflow_id = w.id
+             WHERE q.workflow_id = ?1
+               AND q.status = 'queued'
+               AND COALESCE(q.trigger_kind, '') = COALESCE(?2, '')
+               AND COALESCE(q.trigger_payload, '') = COALESCE(?3, '')
+               AND COALESCE(q.input_json, '') = COALESCE(?4, '')
+               AND COALESCE(q.rerun_of_run_id, '') = COALESCE(?5, '')
+             ORDER BY q.queued_at ASC LIMIT 1",
+        )?;
+        stmt.query_row(
+            params![
+                workflow_id,
+                trigger_kind,
+                trigger_payload,
+                input_json,
+                rerun_of_run_id
+            ],
+            |row| {
+                Ok(QueuedRun {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    workflow_id: row.get(2)?,
+                    workflow_name: row.get(3)?,
+                    queue_name: row.get(4)?,
+                    corpus: row
+                        .get::<_, Option<String>>(5)?
+                        .unwrap_or_else(|| "source".to_string()),
+                    priority: row.get(6)?,
+                    status: row.get(7)?,
+                    queued_at: row.get(8)?,
+                    admitted_at: row.get(9)?,
+                    finished_at: row.get(10)?,
+                    trigger_kind: row.get(11)?,
+                    trigger_payload: row.get(12)?,
+                    upstream_run_id: row.get(13)?,
+                    input_json: row.get(14)?,
+                    rerun_of_run_id: row.get(15)?,
+                })
+            },
+        )
+        .optional()
+    }
+
     #[allow(dead_code)]
     pub fn upsert_queued_run(
         &self,
@@ -3955,6 +4176,163 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let admitted = rows.iter().find(|row| row.id == queued_id).unwrap();
         assert_eq!(admitted.status, "admitted");
         assert_eq!(admitted.run_id.as_deref(), Some(run.id.as_str()));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dispatch_context_lookup_deduplicates_backfill_slots() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = db
+            .create_workflow(
+                "Backfill Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                None,
+                None,
+                Some(r#"{"queue":"source-default","priority":5}"#),
+            )
+            .unwrap();
+        let payload = r#"{"logical_date":"2026-05-01T00:00:00Z","chain_suppressed":true}"#;
+        let input = r#"{"backfill":{"logical_date":"2026-05-01T00:00:00Z"}}"#;
+
+        assert!(db
+            .find_run_by_dispatch_context(
+                &workflow.id,
+                Some("backfill"),
+                Some(payload),
+                Some(input),
+                None
+            )
+            .unwrap()
+            .is_none());
+        let run = db
+            .create_run_with_context(
+                &workflow.id,
+                Some("backfill"),
+                Some(payload),
+                None,
+                Some(input),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            db.find_run_by_dispatch_context(
+                &workflow.id,
+                Some("backfill"),
+                Some(payload),
+                Some(input),
+                None
+            )
+            .unwrap()
+            .unwrap()
+            .id,
+            run.id
+        );
+
+        let queued_id = db
+            .upsert_queued_run_with_context(
+                &workflow.id,
+                "source-default",
+                5,
+                Some("backfill"),
+                Some(r#"{"logical_date":"2026-05-02T00:00:00Z","chain_suppressed":true}"#),
+                None,
+                Some(r#"{"backfill":{"logical_date":"2026-05-02T00:00:00Z"}}"#),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            db.find_queued_run_by_dispatch_context(
+                &workflow.id,
+                Some("backfill"),
+                Some(r#"{"logical_date":"2026-05-02T00:00:00Z","chain_suppressed":true}"#),
+                Some(r#"{"backfill":{"logical_date":"2026-05-02T00:00:00Z"}}"#),
+                None
+            )
+            .unwrap()
+            .unwrap()
+            .id,
+            queued_id
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dead_letters_can_be_acknowledged_and_linked_to_recovery() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = db
+            .create_workflow(
+                "Dead Letter Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "source",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let run = db
+            .create_terminal_run_with_context(
+                &workflow.id,
+                "dead_lettered",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let dead_letter_id = db
+            .upsert_scheduler_dead_letter(&run.id, &workflow.id, Some("extract"), None, "boom")
+            .unwrap();
+
+        let rows = db.list_scheduler_dead_letters(false, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].task_id.as_deref(), Some("extract"));
+        assert_eq!(db.set_workflow_enabled(&workflow.id, true).unwrap(), 1);
+        assert_eq!(
+            db.acknowledge_scheduler_dead_letter(&dead_letter_id, "handled", Some("test"))
+                .unwrap(),
+            1
+        );
+        assert!(db
+            .list_scheduler_dead_letters(false, 10)
+            .unwrap()
+            .is_empty());
+        let recovery = db
+            .create_run_with_context(
+                &workflow.id,
+                Some("dead_letter_recovery"),
+                None,
+                Some(&run.id),
+                None,
+                Some(&run.id),
+            )
+            .unwrap();
+        assert_eq!(
+            db.link_dead_letter_recovery(&dead_letter_id, &recovery.id)
+                .unwrap(),
+            1
+        );
+        let row = db.get_scheduler_dead_letter(&dead_letter_id).unwrap();
+        assert_eq!(row.acknowledged_reason.as_deref(), Some("handled"));
+        assert_eq!(row.acknowledged_by.as_deref(), Some("test"));
+        assert_eq!(row.recovery_run_id.as_deref(), Some(recovery.id.as_str()));
 
         let _ = std::fs::remove_dir_all(dir);
     }

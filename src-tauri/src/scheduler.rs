@@ -2,7 +2,7 @@ use crate::db::{Database, WorkflowResourceSample};
 use chrono::Utc;
 use chrono_tz::Tz;
 use cron::Schedule;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -600,6 +600,32 @@ pub struct DueWorkflow {
     pub rerun_of_run_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DispatchOutcome {
+    pub workflow_id: String,
+    pub status: String,
+    pub run_id: Option<String>,
+    pub queued_run_id: Option<String>,
+    pub queue_name: String,
+    pub trigger_kind: Option<String>,
+    pub trigger_payload: Option<String>,
+    pub reason: Option<String>,
+}
+
+pub struct NonCronDispatchOptions<'a> {
+    pub notify_on_success: bool,
+    pub notify_on_failure: bool,
+    pub email_on_failure_enabled: bool,
+    pub trigger_kind: &'a str,
+    pub trigger_payload: Option<&'a str>,
+    pub upstream_run_id: Option<&'a str>,
+    pub input_json: Option<&'a str>,
+    pub rerun_of_run_id: Option<&'a str>,
+    pub suppress_completion_triggers: bool,
+    pub dedupe: bool,
+    pub app_handle: Option<tauri::AppHandle>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct QueueConfig {
     #[serde(default)]
@@ -836,6 +862,187 @@ fn simple_wildcard_match(pattern: &str, candidate: &str) -> bool {
 }
 
 /// Execute a workflow subprocess. Does not require the scheduler mutex.
+pub fn dispatch_non_cron_workflow(
+    db: &Arc<Database>,
+    chaos_labs_root: &str,
+    python_path: &str,
+    workflow_id: &str,
+    options: NonCronDispatchOptions<'_>,
+) -> Result<DispatchOutcome, String> {
+    let workflow = db
+        .get_workflow(workflow_id)
+        .map_err(|e| format!("Failed to get workflow: {}", e))?;
+    let queue_config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
+    let trigger_kind = Some(options.trigger_kind);
+
+    if !workflow.enabled {
+        return Err(format!("Workflow {} is disabled", workflow.id));
+    }
+
+    if options.dedupe {
+        if let Some(run) = db
+            .find_run_by_dispatch_context(
+                &workflow.id,
+                trigger_kind,
+                options.trigger_payload,
+                options.input_json,
+                options.rerun_of_run_id,
+            )
+            .map_err(|e| format!("Failed to check existing runs: {}", e))?
+        {
+            return Ok(DispatchOutcome {
+                workflow_id: workflow.id,
+                status: "duplicate".to_string(),
+                run_id: Some(run.id),
+                queued_run_id: None,
+                queue_name: queue_config.queue,
+                trigger_kind: trigger_kind.map(str::to_string),
+                trigger_payload: options.trigger_payload.map(str::to_string),
+                reason: Some("matching run already exists".to_string()),
+            });
+        }
+        if let Some(queued) = db
+            .find_queued_run_by_dispatch_context(
+                &workflow.id,
+                trigger_kind,
+                options.trigger_payload,
+                options.input_json,
+                options.rerun_of_run_id,
+            )
+            .map_err(|e| format!("Failed to check existing queued runs: {}", e))?
+        {
+            return Ok(DispatchOutcome {
+                workflow_id: workflow.id,
+                status: "queued".to_string(),
+                run_id: queued.run_id,
+                queued_run_id: Some(queued.id),
+                queue_name: queue_config.queue,
+                trigger_kind: trigger_kind.map(str::to_string),
+                trigger_payload: options.trigger_payload.map(str::to_string),
+                reason: Some("matching queued run already exists".to_string()),
+            });
+        }
+    }
+
+    let queue_due_to = |reason: String| -> Result<DispatchOutcome, String> {
+        let queued_id = db
+            .upsert_queued_run_with_context(
+                &workflow.id,
+                &queue_config.queue,
+                queue_config.priority,
+                trigger_kind,
+                options.trigger_payload,
+                options.upstream_run_id,
+                options.input_json,
+                options.rerun_of_run_id,
+            )
+            .map_err(|e| format!("Failed to queue workflow: {}", e))?;
+        let _ = db.insert_queue_event(
+            &queue_config.queue,
+            &queue_config.corpus,
+            Some(&workflow.id),
+            None,
+            "deferred",
+            Some(&reason),
+            Some(&serde_json::json!({
+                "trigger_kind": options.trigger_kind,
+                "trigger_payload": options.trigger_payload,
+            })),
+        );
+        Ok(DispatchOutcome {
+            workflow_id: workflow.id.clone(),
+            status: "queued".to_string(),
+            run_id: None,
+            queued_run_id: Some(queued_id),
+            queue_name: queue_config.queue.clone(),
+            trigger_kind: trigger_kind.map(str::to_string),
+            trigger_payload: options.trigger_payload.map(str::to_string),
+            reason: Some(reason),
+        })
+    };
+
+    match dependency_decision_for_db(db, &workflow, &queue_config) {
+        DependencyDecision::Ready => {}
+        DependencyDecision::Waiting(reason) => return queue_due_to(reason),
+        DependencyDecision::CascadeSkip(reason) => {
+            let payload = serde_json::json!({
+                "reason": reason,
+                "original_trigger_kind": options.trigger_kind,
+                "original_trigger_payload": options.trigger_payload,
+            })
+            .to_string();
+            let run = db
+                .create_terminal_run_with_context(
+                    &workflow.id,
+                    "cascade-skipped",
+                    trigger_kind,
+                    Some(&payload),
+                    options.upstream_run_id,
+                    options.input_json,
+                    options.rerun_of_run_id,
+                )
+                .map_err(|e| format!("Failed to create cascade-skip run: {}", e))?;
+            return Ok(DispatchOutcome {
+                workflow_id: workflow.id,
+                status: "skipped".to_string(),
+                run_id: Some(run.id),
+                queued_run_id: None,
+                queue_name: queue_config.queue,
+                trigger_kind: trigger_kind.map(str::to_string),
+                trigger_payload: Some(payload),
+                reason: Some("dependency cascade skip".to_string()),
+            });
+        }
+    }
+
+    if !has_runtime_capacity(db, &queue_config)? {
+        return queue_due_to(format!(
+            "queue {} is at capacity or constrained by global/tag caps",
+            queue_config.queue
+        ));
+    }
+
+    let result = execute_workflow_with_context(
+        db,
+        chaos_labs_root,
+        python_path,
+        &workflow.id,
+        options.notify_on_success,
+        options.notify_on_failure,
+        options.email_on_failure_enabled,
+        trigger_kind,
+        options.trigger_payload,
+        options.upstream_run_id,
+        options.input_json,
+        options.rerun_of_run_id,
+        None,
+        options.app_handle.clone(),
+    )?;
+    if result.completed && !options.suppress_completion_triggers {
+        trigger_on_completion(
+            db,
+            chaos_labs_root,
+            python_path,
+            &workflow.id,
+            &result.run_id,
+            result.success,
+            options.notify_on_success,
+            options.notify_on_failure,
+            options.email_on_failure_enabled,
+        );
+    }
+    Ok(DispatchOutcome {
+        workflow_id: workflow.id,
+        status: "admitted".to_string(),
+        run_id: Some(result.run_id),
+        queued_run_id: None,
+        queue_name: queue_config.queue,
+        trigger_kind: trigger_kind.map(str::to_string),
+        trigger_payload: options.trigger_payload.map(str::to_string),
+        reason: None,
+    })
+}
+
 pub fn execute_workflow_with_context(
     db: &Arc<Database>,
     chaos_labs_root: &str,
@@ -3040,6 +3247,59 @@ not json
         let keys = mutex_keys("capture", &config);
 
         assert_eq!(keys, vec!["exclude:capture::refresh".to_string()]);
+    }
+
+    #[test]
+    fn non_cron_dispatch_returns_queued_for_expected_dependency_wait() {
+        let dir =
+            std::env::temp_dir().join(format!("chaos-scheduler-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Database::new(&dir));
+        let workflow = db
+            .create_workflow(
+                "Backfill Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                Some(r#"{"queue":"source-default","depends_on":["upstream"]}"#),
+            )
+            .unwrap();
+
+        let outcome = dispatch_non_cron_workflow(
+            &db,
+            dir.to_str().unwrap(),
+            "python3",
+            &workflow.id,
+            NonCronDispatchOptions {
+                notify_on_success: false,
+                notify_on_failure: false,
+                email_on_failure_enabled: false,
+                trigger_kind: "backfill",
+                trigger_payload: Some(r#"{"logical_date":"2026-05-01T00:00:00Z"}"#),
+                upstream_run_id: None,
+                input_json: Some(r#"{"backfill":{"logical_date":"2026-05-01T00:00:00Z"}}"#),
+                rerun_of_run_id: None,
+                suppress_completion_triggers: true,
+                dedupe: true,
+                app_handle: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.status, "queued");
+        assert!(outcome.queued_run_id.is_some());
+        assert!(outcome.reason.unwrap().contains("depends_on upstream"));
+        let rows = db.list_queued_runs(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].trigger_kind.as_deref(), Some("backfill"));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

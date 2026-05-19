@@ -305,6 +305,49 @@ export interface QueuedRun {
   rerun_of_run_id?: string | null;
 }
 
+export interface DispatchOutcome {
+  workflow_id: string;
+  status: "admitted" | "queued" | "skipped" | "duplicate" | string;
+  run_id?: string | null;
+  queued_run_id?: string | null;
+  queue_name: string;
+  trigger_kind?: string | null;
+  trigger_payload?: string | null;
+  reason?: string | null;
+}
+
+export interface BackfillPlan {
+  workflow_id: string;
+  trigger_kind: "backfill";
+  chain_suppressed: boolean;
+  logical_dates: string[];
+  count: number;
+  dry_run: boolean;
+}
+
+export interface BackfillDispatchResult {
+  plan: BackfillPlan;
+  outcomes: DispatchOutcome[];
+}
+
+export interface SchedulerDeadLetter {
+  id: string;
+  run_id: string;
+  workflow_id: string;
+  workflow_name?: string | null;
+  task_id?: string | null;
+  last_attempt_id?: string | null;
+  last_failure_at: string;
+  last_exception: string;
+  acknowledged_at?: string | null;
+  acknowledged_reason?: string | null;
+  acknowledged_by?: string | null;
+  recovery_run_id?: string | null;
+  run_status?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AvailableScript {
   name: string;
   path: string;
@@ -384,6 +427,52 @@ export function rerunWorkflow(
   inputOverrideJson?: string,
 ): Promise<string> {
   return invoke("rerun_workflow", { workflowId, sourceRunId, inputOverrideJson });
+}
+
+export function planBackfill(
+  workflowId: string,
+  since: string,
+  until: string,
+  maxRuns?: number | null,
+): Promise<BackfillPlan> {
+  return invoke("plan_backfill", { workflowId, since, until, maxRuns });
+}
+
+export function dispatchBackfill(
+  workflowId: string,
+  since: string,
+  until: string,
+  maxRuns?: number | null,
+  dryRun = false,
+): Promise<BackfillDispatchResult> {
+  return invoke("dispatch_backfill", { workflowId, since, until, maxRuns, dryRun });
+}
+
+export function listDeadLetters(
+  includeAcknowledged = false,
+  limit = 50,
+): Promise<SchedulerDeadLetter[]> {
+  return invoke("list_dead_letters", { includeAcknowledged, limit });
+}
+
+export function getDeadLetter(id: string): Promise<SchedulerDeadLetter> {
+  return invoke("get_dead_letter", { id });
+}
+
+export function acknowledgeDeadLetter(
+  id: string,
+  reason: string,
+  operator?: string,
+  reenableWorkflow = false,
+): Promise<SchedulerDeadLetter> {
+  return invoke("acknowledge_dead_letter", { id, reason, operator, reenableWorkflow });
+}
+
+export function recoverDeadLetter(
+  id: string,
+  reenableWorkflow = false,
+): Promise<DispatchOutcome> {
+  return invoke("recover_dead_letter", { id, reenableWorkflow });
 }
 
 export function getRunHistory(workflowId: string, limit?: number): Promise<Run[]> {
