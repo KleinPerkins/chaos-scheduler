@@ -21,6 +21,10 @@ use std::os::unix::process::CommandExt;
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static SLA_NOTIFICATION_CACHE: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
 
+pub const SCHEDULER_BUNDLE_ID: &str = "com.chaoslabs.scheduler";
+pub const CANONICAL_EXECUTABLE_PATH: &str =
+    "/Applications/Chaos Labs Scheduler.app/Contents/MacOS/chaos-labs-scheduler";
+
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
@@ -2725,7 +2729,7 @@ fn send_failure_email(db: &Database, chaos_labs_root: &str, result: &RunResult) 
 pub fn install_launchd_plist(app_path: &str) -> Result<String, String> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     let plist_dir = format!("{}/Library/LaunchAgents", home);
-    let plist_path = format!("{}/com.chaoslabs.scheduler.plist", plist_dir);
+    let plist_path = format!("{}/{}.plist", plist_dir, SCHEDULER_BUNDLE_ID);
 
     let plist_content = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -2733,7 +2737,7 @@ pub fn install_launchd_plist(app_path: &str) -> Result<String, String> {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.chaoslabs.scheduler</string>
+    <string>{}</string>
     <key>ProgramArguments</key>
     <array>
         <string>{}</string>
@@ -2744,6 +2748,7 @@ pub fn install_launchd_plist(app_path: &str) -> Result<String, String> {
     <false/>
 </dict>
 </plist>"#,
+        SCHEDULER_BUNDLE_ID,
         app_path
     );
 
@@ -2761,8 +2766,8 @@ pub fn install_launchd_plist(app_path: &str) -> Result<String, String> {
 pub fn uninstall_launchd_plist() -> Result<(), String> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     let plist_path = format!(
-        "{}/Library/LaunchAgents/com.chaoslabs.scheduler.plist",
-        home
+        "{}/Library/LaunchAgents/{}.plist",
+        home, SCHEDULER_BUNDLE_ID
     );
 
     if std::path::Path::new(&plist_path).exists() {

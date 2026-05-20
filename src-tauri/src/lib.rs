@@ -21,7 +21,21 @@ pub struct TrayState {
     pub _icon: TrayIcon,
 }
 
+/// Holds the singleton listener for the lifetime of the process.
+pub struct SingleInstanceState {
+    pub _listener: TcpListener,
+}
+
 const TRAY_ID: &str = "chaos-labs-scheduler-tray";
+const SINGLE_INSTANCE_ADDR: &str = "127.0.0.1:9616";
+
+fn acquire_single_instance_lock() -> std::io::Result<TcpListener> {
+    acquire_single_instance_lock_at(SINGLE_INSTANCE_ADDR)
+}
+
+fn acquire_single_instance_lock_at(addr: &str) -> std::io::Result<TcpListener> {
+    TcpListener::bind(addr)
+}
 
 fn detect_chaos_labs_root() -> String {
     if let Ok(home) = std::env::var("HOME") {
@@ -134,6 +148,19 @@ pub fn run() {
                     .level(log::LevelFilter::Info)
                     .build(),
             )?;
+
+            let single_instance_listener = match acquire_single_instance_lock() {
+                Ok(listener) => listener,
+                Err(err) => {
+                    log::warn!(
+                        "Another Chaos Labs Scheduler instance is already active; exiting before startup ({err})"
+                    );
+                    std::process::exit(0);
+                }
+            };
+            app.manage(SingleInstanceState {
+                _listener: single_instance_listener,
+            });
 
             let app_data_dir = app
                 .path()
@@ -321,4 +348,20 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_instance_lock_blocks_second_listener_until_first_drops() {
+        let first = acquire_single_instance_lock_at("127.0.0.1:0").unwrap();
+        let addr = first.local_addr().unwrap();
+
+        assert!(acquire_single_instance_lock_at(&addr.to_string()).is_err());
+
+        drop(first);
+        assert!(acquire_single_instance_lock_at(&addr.to_string()).is_ok());
+    }
 }

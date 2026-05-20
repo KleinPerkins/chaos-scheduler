@@ -1382,8 +1382,9 @@ pub fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
 pub fn get_launch_at_login() -> Result<bool, String> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     let plist_path = format!(
-        "{}/Library/LaunchAgents/com.chaoslabs.scheduler.plist",
-        home
+        "{}/Library/LaunchAgents/{}.plist",
+        home,
+        scheduler::SCHEDULER_BUNDLE_ID
     );
     Ok(std::path::Path::new(&plist_path).exists())
 }
@@ -1391,11 +1392,7 @@ pub fn get_launch_at_login() -> Result<bool, String> {
 #[tauri::command]
 pub fn set_launch_at_login(enabled: bool) -> Result<String, String> {
     if enabled {
-        let exe = std::env::current_exe()
-            .map_err(|e| e.to_string())?
-            .to_string_lossy()
-            .to_string();
-        scheduler::install_launchd_plist(&exe)
+        scheduler::install_launchd_plist(scheduler::CANONICAL_EXECUTABLE_PATH)
     } else {
         scheduler::uninstall_launchd_plist()?;
         Ok("Removed".to_string())
