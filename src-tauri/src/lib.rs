@@ -38,16 +38,20 @@ fn acquire_single_instance_lock_at(addr: &str) -> std::io::Result<TcpListener> {
 }
 
 fn detect_chaos_labs_root() -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        let candidate = format!("{}/chaos-labs", home);
-        if std::path::Path::new(&candidate).exists() {
-            return candidate;
+    // The data root is configuration, not a hardcode: honor CHAOS_LABS_ROOT
+    // (set by the launchd plist) when present, then fall back to the canonical
+    // repo location where the data, Python scripts, and venv actually live.
+    if let Ok(root) = std::env::var("CHAOS_LABS_ROOT") {
+        let root = root.trim();
+        if !root.is_empty() {
+            return root.to_string();
         }
     }
-    eprintln!("WARNING: ~/chaos-labs not found; defaulting to $HOME/chaos-labs");
-    std::env::var("HOME")
-        .map(|h| format!("{}/chaos-labs", h))
-        .unwrap_or_else(|_| String::from("/tmp/chaos-labs"))
+    if let Ok(home) = std::env::var("HOME") {
+        return format!("{}/dev/personal/chaos-labs", home);
+    }
+    eprintln!("WARNING: HOME not set; defaulting to /tmp/chaos-labs");
+    String::from("/tmp/chaos-labs")
 }
 
 fn detect_python_path(chaos_labs_root: &str) -> String {
