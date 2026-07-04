@@ -115,7 +115,7 @@ jobs:
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
 
       - name: Build, sign, notarize, and upload artifacts
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # --- Apple codesigning + notarization (hardened runtime) ---
@@ -137,7 +137,8 @@ jobs:
           # pubkey/endpoints (GitHub Releases latest/download/latest.json) are set
           # in src-tauri/tauri.conf.json by the desktop worker; the private half
           # (TAURI_SIGNING_PRIVATE_KEY) signs the artifacts here so they verify.
-          includeUpdaterJson: true
+          # NOTE: renamed from `includeUpdaterJson` in tauri-action v1.
+          uploadUpdaterJson: true
 
   # ---------------------------------------------------------------------------
   # npm: publish the TypeScript SDK with provenance.
