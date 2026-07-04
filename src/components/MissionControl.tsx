@@ -525,8 +525,15 @@ export default function MissionControl({
     [],
   );
 
+  // Defer the initial snapshot load to a macrotask so loadSnapshot's
+  // synchronous state updates do not run inside the effect body (avoids
+  // react-hooks/set-state-in-effect). Mirrors useSchedulerStatus.
   useEffect(() => {
-    void loadSnapshot(initialCorpus, initialDomain, false);
+    const id = setTimeout(
+      () => void loadSnapshot(initialCorpus, initialDomain, false),
+      0,
+    );
+    return () => clearTimeout(id);
   }, [initialCorpus, initialDomain, loadSnapshot]);
 
   useEffect(() => {

@@ -1,5 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
-import { getRunHistory, getWorkflowHistoryBuckets, openUrl, rerunWorkflow } from "../lib/commands";
+import {
+  getRunHistory,
+  getWorkflowHistoryBuckets,
+  openUrl,
+  rerunWorkflow,
+} from "../lib/commands";
 import type { Run, Workflow, WorkflowHistoryBucket } from "../lib/commands";
 import "./RunHistory.css";
 
@@ -20,9 +25,15 @@ function formatDuration(start: string, end: string | null): string {
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
-  return d.toLocaleDateString([], { month: "short", day: "numeric" }) +
+  return (
+    d.toLocaleDateString([], { month: "short", day: "numeric" }) +
     " " +
-    d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
+    d.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZoneName: "short",
+    })
+  );
 }
 
 export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
@@ -45,8 +56,12 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
       .finally(() => setLoading(false));
   }, [workflow.id]);
 
+  // Defer the initial load to a macrotask so refreshRuns' synchronous
+  // setLoading(true)/setError(null) do not run inside the effect body
+  // (avoids react-hooks/set-state-in-effect). Mirrors useSchedulerStatus.
   useEffect(() => {
-    void refreshRuns();
+    const id = setTimeout(() => void refreshRuns(), 0);
+    return () => clearTimeout(id);
   }, [refreshRuns]);
 
   const handleRerun = async (run: Run) => {
@@ -89,7 +104,10 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
       ) : error ? (
         <div className="rh-error">
           <span>Run history failed to load: {error}</span>
-          <button className="btn btn-ghost btn-sm" onClick={() => void refreshRuns()}>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => void refreshRuns()}
+          >
             Retry
           </button>
         </div>
@@ -100,12 +118,17 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
           <div className="rh-heatmap">
             <div className="rh-heatmap-header">
               <h3>30-day failure heatmap</h3>
-              <span>{buckets.reduce((sum, b) => sum + b.failed, 0)} failed runs</span>
+              <span>
+                {buckets.reduce((sum, b) => sum + b.failed, 0)} failed runs
+              </span>
             </div>
             <div className="rh-heatmap-grid">
               {buckets.map((bucket) => {
-                const failureRate = bucket.total ? bucket.failed / bucket.total : 0;
-                const level = failureRate === 0 ? "ok" : failureRate < 0.5 ? "warn" : "bad";
+                const failureRate = bucket.total
+                  ? bucket.failed / bucket.total
+                  : 0;
+                const level =
+                  failureRate === 0 ? "ok" : failureRate < 0.5 ? "warn" : "bad";
                 return (
                   <div
                     key={bucket.day}
@@ -144,7 +167,9 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
                     {run.exit_code !== null ? run.exit_code : "—"}
                   </td>
                   <td>
-                    <span className="rh-trigger-kind">{run.trigger_kind ?? "cron"}</span>
+                    <span className="rh-trigger-kind">
+                      {run.trigger_kind ?? "cron"}
+                    </span>
                   </td>
                   <td>
                     {run.result_url ? (
@@ -164,13 +189,15 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
                     <button
                       className="btn btn-ghost btn-sm"
                       onClick={() => onViewLog(run.id)}
-                        aria-label={`View details for ${run.status} run started ${formatDate(run.started_at)}`}
+                      aria-label={`View details for ${run.status} run started ${formatDate(run.started_at)}`}
                     >
                       Details
                     </button>
                     <button
                       className="btn btn-ghost btn-sm"
-                      disabled={rerunning === run.id || run.status === "running"}
+                      disabled={
+                        rerunning === run.id || run.status === "running"
+                      }
                       onClick={() => handleRerun(run)}
                       aria-label={`Rerun ${run.status} run started ${formatDate(run.started_at)}`}
                     >
