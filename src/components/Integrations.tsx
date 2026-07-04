@@ -76,8 +76,12 @@ export default function Integrations() {
     }
   };
 
+  // Defer the initial load to a macrotask so the fetch's state updates do
+  // not run inside the effect body (avoids react-hooks/set-state-in-effect).
+  // Mirrors the established pattern in useSchedulerStatus.
   useEffect(() => {
-    loadKeys();
+    const id = setTimeout(() => void loadKeys(), 0);
+    return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

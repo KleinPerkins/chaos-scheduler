@@ -126,8 +126,12 @@ export default function QueueView({ onBack }: QueueViewProps) {
     }
   };
 
+  // Defer the initial load to a macrotask so load()'s synchronous
+  // setError(null) does not run inside the effect body (avoids
+  // react-hooks/set-state-in-effect). Mirrors useSchedulerStatus.
   useEffect(() => {
-    load();
+    const id = setTimeout(() => void load(), 0);
+    return () => clearTimeout(id);
   }, []);
 
   const validationByQueue = useMemo(() => {

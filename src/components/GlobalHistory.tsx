@@ -46,8 +46,12 @@ export default function GlobalHistory({ onViewRun }: Props) {
       .finally(() => setLoading(false));
   };
 
+  // Defer the initial load to a macrotask so load()'s synchronous
+  // setLoading(true)/setError(null) do not run inside the effect body
+  // (avoids react-hooks/set-state-in-effect). Mirrors useSchedulerStatus.
   useEffect(() => {
-    load();
+    const id = setTimeout(load, 0);
+    return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

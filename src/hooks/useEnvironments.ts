@@ -24,8 +24,13 @@ export function useEnvironments() {
     }
   }, []);
 
+  // Defer the initial load to a macrotask so the fetch's synchronous
+  // setLoading(true) does not run inside the effect body (avoids the
+  // cascading-render pattern flagged by react-hooks/set-state-in-effect).
+  // Mirrors the established pattern in useSchedulerStatus.
   useEffect(() => {
-    refresh();
+    const id = setTimeout(() => void refresh(), 0);
+    return () => clearTimeout(id);
   }, [refresh]);
 
   return { environments, loading, error, refresh };
