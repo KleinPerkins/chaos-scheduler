@@ -40,7 +40,7 @@ jobs:
       mcp_tag_name: ${{ steps.release.outputs['packages/mcp-server--tag_name'] }}
       mcp_version: ${{ steps.release.outputs['packages/mcp-server--version'] }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: release
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
