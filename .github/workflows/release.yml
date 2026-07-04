@@ -83,7 +83,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.desktop_tag }}
 
@@ -151,7 +151,7 @@ jobs:
       contents: read
       id-token: write # required for npm provenance
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.sdk_tag }}
       - uses: actions/setup-node@v4
@@ -185,7 +185,7 @@ jobs:
       contents: read
       id-token: write # required for npm provenance
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.mcp_tag }}
       - uses: actions/setup-node@v4
