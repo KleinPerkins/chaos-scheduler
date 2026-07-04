@@ -1,6 +1,6 @@
 {
   "name": "@chaos-scheduler/sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TypeScript SDK for the Chaos Scheduler REST API (/api/v1) — register environments/workflows, run/enqueue on demand, poll runs, and verify webhook signatures.",
   "license": "MIT",
   "repository": {
