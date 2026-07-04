@@ -1,0 +1,139 @@
+.environments {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.env-status {
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.env-status--info {
+  background: rgba(124, 108, 255, 0.08);
+  color: var(--text-secondary);
+}
+
+.env-status--success {
+  background: rgba(52, 168, 83, 0.12);
+  color: var(--success, #34a853);
+}
+
+.env-status--error {
+  background: rgba(234, 67, 53, 0.1);
+  color: var(--error);
+}
+
+.env-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-top: 16px;
+}
+
+.env-section-title {
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0 0 12px;
+}
+
+.env-create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 640px;
+}
+
+.env-form-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.env-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 140px;
+}
+
+.env-field > span {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.env-field-grow {
+  flex: 2;
+}
+
+.env-empty {
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 8px 0;
+}
+
+.env-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.env-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.env-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.env-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.env-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.env-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.env-meta dt {
+  color: var(--text-muted);
+}
+
+.env-meta dd {
+  margin: 0;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.env-card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.env-card-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}

@@ -1,4 +1,4 @@
-use crate::db::{Database, WorkflowResourceSample};
+use crate::db::{Database, Workflow, WorkflowResourceSample};
 use chrono::Utc;
 use chrono_tz::Tz;
 use cron::Schedule;
@@ -21,9 +21,8 @@ use std::os::unix::process::CommandExt;
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static SLA_NOTIFICATION_CACHE: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
 
-pub const SCHEDULER_BUNDLE_ID: &str = "com.chaoslabs.scheduler";
-pub const CANONICAL_EXECUTABLE_PATH: &str =
-    "/Applications/Chaos Labs Scheduler.app/Contents/MacOS/chaos-labs-scheduler";
+pub const SCHEDULER_BUNDLE_ID: &str = crate::branding::BUNDLE_ID;
+pub const CANONICAL_EXECUTABLE_PATH: &str = crate::branding::CANONICAL_EXECUTABLE_PATH;
 
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -33,7 +32,7 @@ struct ResourceSampleMetadata {
     run_id: String,
     workflow_id: String,
     queue_name: Option<String>,
-    corpus: String,
+    environment: String,
 }
 
 struct ResourceSamplerHandle {
@@ -133,7 +132,7 @@ impl WorkflowScheduler {
                 continue;
             }
             let queue_config =
-                parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
+                parse_queue_config(workflow.queue_config.as_deref(), &workflow.environment);
             match dependency_decision_for_db(&self.db, &workflow, &queue_config) {
                 DependencyDecision::Ready
                     if self.has_queue_capacity(&queue_config).unwrap_or(false) =>
@@ -188,7 +187,7 @@ impl WorkflowScheduler {
             }
 
             let queue_config =
-                parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
+                parse_queue_config(workflow.queue_config.as_deref(), &workflow.environment);
             let trigger_config = parse_trigger_config(workflow.trigger_config.as_deref());
             let has_explicit_triggers = !trigger_config.is_empty();
             let cron_triggers: Vec<String> = if has_explicit_triggers {
@@ -473,11 +472,7 @@ impl WorkflowScheduler {
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| format!("file:{}:{}", path, mode));
-        let Some((matched_path, fingerprint)) =
-            fingerprint_file_sensor(path, mode, chaos_labs_root)
-        else {
-            return None;
-        };
+        let (matched_path, fingerprint) = fingerprint_file_sensor(path, mode, chaos_labs_root)?;
         let prior = self
             .db
             .get_trigger_fingerprint(workflow_id, &trigger_id)
@@ -651,7 +646,7 @@ struct QueueConfig {
     #[serde(default)]
     priority: i64,
     #[serde(skip)]
-    corpus: String,
+    environment: String,
 }
 
 enum DependencyDecision {
@@ -660,8 +655,8 @@ enum DependencyDecision {
     CascadeSkip(String),
 }
 
-fn parse_queue_config(queue_config: Option<&str>, corpus: &str) -> QueueConfig {
-    let default_queue = format!("{}-default", corpus);
+fn parse_queue_config(queue_config: Option<&str>, environment: &str) -> QueueConfig {
+    let default_queue = format!("{}-default", environment);
     let mut parsed = queue_config
         .filter(|s| !s.trim().is_empty())
         .and_then(|raw| serde_json::from_str::<QueueConfig>(raw).ok())
@@ -672,12 +667,12 @@ fn parse_queue_config(queue_config: Option<&str>, corpus: &str) -> QueueConfig {
             tags: vec![],
             queue: default_queue.clone(),
             priority: 0,
-            corpus: corpus.to_string(),
+            environment: environment.to_string(),
         });
     if parsed.queue.trim().is_empty() {
         parsed.queue = default_queue;
     }
-    parsed.corpus = corpus.to_string();
+    parsed.environment = environment.to_string();
     parsed
 }
 
@@ -696,9 +691,9 @@ fn mutex_keys(workflow_id: &str, queue_config: &QueueConfig) -> Vec<String> {
 
 fn has_runtime_capacity(db: &Arc<Database>, queue_config: &QueueConfig) -> Result<bool, String> {
     let capacity = db
-        .queue_capacity(&queue_config.queue, &queue_config.corpus)
+        .queue_capacity(&queue_config.queue, &queue_config.environment)
         .map_err(|e| e.to_string())?;
-    let running = running_count_for_queue(db, &queue_config.queue, &queue_config.corpus)?;
+    let running = running_count_for_queue(db, &queue_config.queue, &queue_config.environment)?;
     if running >= capacity {
         return Ok(false);
     }
@@ -707,11 +702,12 @@ fn has_runtime_capacity(db: &Arc<Database>, queue_config: &QueueConfig) -> Resul
         return Ok(false);
     }
     if let Some(tag_cap) = db
-        .queue_tag_cap(&queue_config.queue, &queue_config.corpus)
+        .queue_tag_cap(&queue_config.queue, &queue_config.environment)
         .map_err(|e| e.to_string())?
     {
         for tag in &queue_config.tags {
-            if running_count_for_tag(db, &queue_config.queue, &queue_config.corpus, tag)? >= tag_cap
+            if running_count_for_tag(db, &queue_config.queue, &queue_config.environment, tag)?
+                >= tag_cap
             {
                 return Ok(false);
             }
@@ -723,7 +719,7 @@ fn has_runtime_capacity(db: &Arc<Database>, queue_config: &QueueConfig) -> Resul
 fn running_count_for_tag(
     db: &Arc<Database>,
     queue_name: &str,
-    corpus: &str,
+    environment: &str,
     tag: &str,
 ) -> Result<i64, String> {
     let running = db.get_running_runs().map_err(|e| e.to_string())?;
@@ -732,9 +728,9 @@ fn running_count_for_tag(
         let workflow = db
             .get_workflow(&run.workflow_id)
             .map_err(|e| e.to_string())?;
-        let config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
+        let config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.environment);
         if config.queue == queue_name
-            && config.corpus == corpus
+            && config.environment == environment
             && config.tags.iter().any(|candidate| candidate == tag)
         {
             count += 1;
@@ -746,7 +742,7 @@ fn running_count_for_tag(
 fn running_count_for_queue(
     db: &Arc<Database>,
     queue_name: &str,
-    corpus: &str,
+    environment: &str,
 ) -> Result<i64, String> {
     let running = db.get_running_runs().map_err(|e| e.to_string())?;
     let mut count = 0;
@@ -754,8 +750,8 @@ fn running_count_for_queue(
         let workflow = db
             .get_workflow(&run.workflow_id)
             .map_err(|e| e.to_string())?;
-        let config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
-        if config.queue == queue_name && config.corpus == corpus {
+        let config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.environment);
+        if config.queue == queue_name && config.environment == environment {
             count += 1;
         }
     }
@@ -882,7 +878,7 @@ pub fn dispatch_non_cron_workflow(
     let workflow = db
         .get_workflow(workflow_id)
         .map_err(|e| format!("Failed to get workflow: {}", e))?;
-    let queue_config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
+    let queue_config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.environment);
     let trigger_kind = Some(options.trigger_kind);
 
     if !workflow.enabled {
@@ -949,7 +945,7 @@ pub fn dispatch_non_cron_workflow(
             .map_err(|e| format!("Failed to queue workflow: {}", e))?;
         let _ = db.insert_queue_event(
             &queue_config.queue,
-            &queue_config.corpus,
+            &queue_config.environment,
             Some(&workflow.id),
             None,
             "deferred",
@@ -1188,6 +1184,226 @@ fn dispatch_child_workflow_requests(
     summary
 }
 
+/// Scheduler-owned environment exported to step-flow child processes. Steps do
+/// NOT emit FD-3 task events (the scheduler records their run_tasks/run_attempts
+/// from the returned results), but they still receive the run context.
+fn step_flow_base_env(
+    db: &Arc<Database>,
+    run_id: &str,
+    workflow: &Workflow,
+) -> Vec<(String, String)> {
+    vec![
+        ("CHAOS_SCHEDULER_RUN_ID".to_string(), run_id.to_string()),
+        (
+            "CHAOS_SCHEDULER_WORKFLOW_ID".to_string(),
+            workflow.id.clone(),
+        ),
+        (
+            "CHAOS_SCHEDULER_ENVIRONMENT".to_string(),
+            workflow.environment.clone(),
+        ),
+        ("CHAOS_SCHEDULER_DB_PATH".to_string(), db.path().to_string()),
+        // Legacy dual-emit for one transition minor version.
+        (
+            "CHAOS_LABS_SCHEDULER_RUN_ID".to_string(),
+            run_id.to_string(),
+        ),
+        (
+            "CHAOS_LABS_SCHEDULER_WORKFLOW_ID".to_string(),
+            workflow.id.clone(),
+        ),
+    ]
+}
+
+/// Persist per-step results into run_tasks/run_attempts. The scheduler is the
+/// sole writer here — step child processes never author these rows.
+fn record_step_results(db: &Arc<Database>, run_id: &str, results: &[crate::steps::StepResult]) {
+    for result in results {
+        let attempts = result.attempts.max(1);
+        let mut last_attempt_id: Option<String> = None;
+        for n in 0..attempts {
+            let is_last = n + 1 == attempts;
+            let status = if result.skipped {
+                "skipped"
+            } else if is_last {
+                if result.success {
+                    "success"
+                } else {
+                    "failed"
+                }
+            } else {
+                "retry"
+            };
+            if let Ok(attempt_id) =
+                db.insert_run_attempt(run_id, &result.step_id, n as i64, "running", None)
+            {
+                let (error_type, error_message) = if result.success || result.skipped {
+                    (None, None)
+                } else {
+                    (Some("StepError"), Some(result.message.as_str()))
+                };
+                let _ = db.finish_run_attempt(
+                    &attempt_id,
+                    status,
+                    result.exit_code,
+                    error_type,
+                    error_message,
+                );
+                last_attempt_id = Some(attempt_id);
+            }
+        }
+        let task_status = if result.skipped {
+            "skipped"
+        } else if result.success {
+            "success"
+        } else {
+            "failed"
+        };
+        let details = serde_json::json!({
+            "message": result.message,
+            "exit_code": result.exit_code,
+            "attempts": result.attempts,
+        });
+        if let Ok(task_row_id) = db.insert_run_task(
+            run_id,
+            last_attempt_id.as_deref(),
+            &result.step_id,
+            task_status,
+            attempts.saturating_sub(1) as i64,
+            Some(&details),
+        ) {
+            let (error_type, error_message) = if result.success || result.skipped {
+                (None, None)
+            } else {
+                (Some("StepError"), Some(result.message.as_str()))
+            };
+            let _ = db.finish_run_task(&task_row_id, task_status, error_type, error_message, None);
+        }
+    }
+}
+
+/// Execute a generic step-flow in-scheduler, recording per-step tasks/attempts.
+/// Returns `(exit_code, stdout, stderr)` for the run record.
+fn execute_generic_step_flow(
+    db: &Arc<Database>,
+    workspace_root: &str,
+    run_id: &str,
+    workflow: &Workflow,
+    generic: &crate::workflow_spec::GenericSpec,
+) -> (i32, String, String) {
+    let runner = crate::service::SystemProcessRunner;
+    let base_env = step_flow_base_env(db, run_id, workflow);
+    match crate::steps::execute_step_flow(generic, &runner, workspace_root, &base_env) {
+        Ok(outcome) => {
+            record_step_results(db, run_id, &outcome.results);
+            let mut lines = Vec::new();
+            let mut failures = Vec::new();
+            for r in &outcome.results {
+                let state = if r.skipped {
+                    "skipped"
+                } else if r.success {
+                    "ok"
+                } else {
+                    "failed"
+                };
+                lines.push(format!("[{}] {} ({})", state, r.step_id, r.message));
+                if !r.success && !r.skipped {
+                    failures.push(format!("{}: {}", r.step_id, r.message));
+                }
+            }
+            let exit_code = if outcome.success { 0 } else { 1 };
+            (exit_code, lines.join("\n"), failures.join("\n"))
+        }
+        Err(e) => {
+            let msg = format!("step-flow error: {e}");
+            (-1, String::new(), msg)
+        }
+    }
+}
+
+/// Resolves operator secrets (e.g. the Cursor service-account API key) from the
+/// scheduler config table, falling back to the process environment. Values are
+/// never logged.
+struct SchedulerSecretResolver {
+    db: Arc<Database>,
+}
+
+impl crate::operators::SecretResolver for SchedulerSecretResolver {
+    fn get(&self, key: &str) -> Option<String> {
+        self.db
+            .get_scheduler_config(key)
+            .ok()
+            .flatten()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| crate::operators::EnvSecretResolver.get(key))
+    }
+}
+
+/// Execute a typed operator via the operator registry, recording a task/attempt.
+fn execute_typed_operator(
+    db: &Arc<Database>,
+    workspace_root: &str,
+    run_id: &str,
+    _workflow: &Workflow,
+    typed: &crate::workflow_spec::TypedSpec,
+) -> (i32, String, String) {
+    let registry = crate::operators::OperatorRegistry::with_builtins();
+    let Some(operator) = registry.get(&typed.operator_type) else {
+        return (
+            -1,
+            String::new(),
+            format!("unknown operator_type: {}", typed.operator_type),
+        );
+    };
+    let attempt_id = db
+        .insert_run_attempt(run_id, &typed.operator_type, 0, "running", None)
+        .ok();
+    let runner = crate::service::SystemProcessRunner;
+    let http = crate::operators::ReqwestHttpClient::default();
+    let secrets = SchedulerSecretResolver { db: Arc::clone(db) };
+    let ctx = crate::operators::OperatorContext {
+        runner: &runner,
+        http: &http,
+        secrets: &secrets,
+        workspace_root,
+    };
+    let outcome = operator.execute(&ctx, &typed.config);
+    let status = if outcome.success { "success" } else { "failed" };
+    if let Some(attempt_id) = &attempt_id {
+        let _ = db.finish_run_attempt(
+            attempt_id,
+            status,
+            Some(if outcome.success { 0 } else { 1 }),
+            if outcome.success {
+                None
+            } else {
+                Some("OperatorError")
+            },
+            if outcome.success {
+                None
+            } else {
+                Some(outcome.summary.as_str())
+            },
+        );
+    }
+    let _ = db.insert_run_task(
+        run_id,
+        attempt_id.as_deref(),
+        &typed.operator_type,
+        status,
+        0,
+        Some(&outcome.details),
+    );
+    let exit_code = if outcome.success { 0 } else { 1 };
+    let stderr = if outcome.success {
+        String::new()
+    } else {
+        outcome.summary.clone()
+    };
+    (exit_code, outcome.summary, stderr)
+}
+
+#[allow(clippy::too_many_arguments)] // Threads full run context through the engine entry point.
 pub fn execute_workflow_with_context(
     db: &Arc<Database>,
     chaos_labs_root: &str,
@@ -1207,7 +1423,7 @@ pub fn execute_workflow_with_context(
     let workflow = db
         .get_workflow(workflow_id)
         .map_err(|e| format!("Failed to get workflow: {}", e))?;
-    let queue_config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
+    let queue_config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.environment);
     if !has_runtime_capacity(db, &queue_config)? {
         let _ = db.upsert_queued_run_with_context(
             &workflow.id,
@@ -1259,12 +1475,61 @@ pub fn execute_workflow_with_context(
     }
     mark_trigger_context_admitted(db, &workflow.id, trigger_kind, trigger_payload);
 
+    // Structured workflows (generic step-flow / typed operator) are executed
+    // in-scheduler with the scheduler as the sole author of run_tasks /
+    // run_attempts (task-ownership contract). Legacy single-script workflows
+    // (no spec_json) fall through to the child FD-3 event path below.
+    if let Some(spec) = workflow
+        .spec_json
+        .as_deref()
+        .and_then(|json| crate::workflow_spec::WorkflowSpec::from_json(json).ok())
+    {
+        let (exit_code, stdout, stderr) = match spec.kind {
+            crate::workflow_spec::WorkflowKind::Generic => match spec.generic.as_ref() {
+                Some(generic) => {
+                    execute_generic_step_flow(db, chaos_labs_root, &run.id, &workflow, generic)
+                }
+                None => (
+                    -1,
+                    String::new(),
+                    "generic workflow has no step body".to_string(),
+                ),
+            },
+            crate::workflow_spec::WorkflowKind::Typed => match spec.typed.as_ref() {
+                Some(typed) => {
+                    execute_typed_operator(db, chaos_labs_root, &run.id, &workflow, typed)
+                }
+                None => (
+                    -1,
+                    String::new(),
+                    "typed workflow has no operator body".to_string(),
+                ),
+            },
+        };
+        db.finish_run(&run.id, exit_code, &stdout, &stderr, None)
+            .map_err(|e| format!("Failed to update run: {}", e))?;
+        let success = exit_code == 0;
+        return Ok(RunResult {
+            run_id: run.id,
+            workflow_name: workflow.name,
+            script_path: workflow.script_path.clone(),
+            success,
+            completed: true,
+            should_notify: if success {
+                notify_on_success
+            } else {
+                notify_on_failure
+            },
+            email_on_failure: workflow.email_on_failure,
+        });
+    }
+
     let sample_metadata = ResourceSampleMetadata {
         db: Arc::clone(db),
         run_id: run.id.clone(),
         workflow_id: workflow.id.clone(),
         queue_name: Some(queue_config.queue.clone()),
-        corpus: queue_config.corpus.clone(),
+        environment: queue_config.environment.clone(),
     };
 
     let output = run_workflow_command(
@@ -1275,7 +1540,7 @@ pub fn execute_workflow_with_context(
             &run.id,
             &workflow.id,
             &queue_config.queue,
-            &queue_config.corpus,
+            &queue_config.environment,
             workflow.domain.as_deref(),
             db.path(),
             input_json,
@@ -1412,6 +1677,7 @@ pub fn execute_workflow_with_context(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Threads full run context through the completion hook.
 pub fn trigger_on_completion(
     db: &Arc<Database>,
     chaos_labs_root: &str,
@@ -1465,7 +1731,8 @@ pub fn trigger_on_completion(
             "status": status,
         })
         .to_string();
-        let queue_config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.corpus);
+        let queue_config =
+            parse_queue_config(workflow.queue_config.as_deref(), &workflow.environment);
         match dependency_decision_for_db(db, &workflow, &queue_config) {
             DependencyDecision::Ready => {}
             DependencyDecision::Waiting(reason) => {
@@ -1635,6 +1902,7 @@ fn latest_scheduled_multi(
 ///   executed via `sh -c` so env assignments, args, etc. all work.
 /// - Relative script path (e.g. `scripts/workflows/daily_digest.py`):
 ///   resolved against chaos_labs_root and executed with the detected python.
+#[allow(clippy::too_many_arguments)] // Builds a child command from full run context.
 fn build_workflow_command(
     script_path: &str,
     chaos_labs_root: &str,
@@ -1642,30 +1910,16 @@ fn build_workflow_command(
     run_id: &str,
     workflow_id: &str,
     queue_name: &str,
-    corpus: &str,
+    environment: &str,
     domain: Option<&str>,
     scheduler_db_path: &str,
     input_json: Option<&str>,
 ) -> Command {
     let is_shell_cmd = script_path.contains('=') || script_path.contains("/bin/python");
 
-    if is_shell_cmd {
+    let mut cmd = if is_shell_cmd {
         let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(script_path)
-            .current_dir(chaos_labs_root)
-            .env("CHAOS_LABS_ROOT", chaos_labs_root)
-            .env("CHAOS_LABS_SCHEDULER_RUN_ID", run_id)
-            .env("CHAOS_LABS_SCHEDULER_WORKFLOW_ID", workflow_id)
-            .env("CHAOS_LABS_SCHEDULER_QUEUE", queue_name)
-            .env("CHAOS_LABS_SCHEDULER_CORPUS", corpus)
-            .env("CHAOS_LABS_SCHEDULER_DB_PATH", scheduler_db_path);
-        if let Some(domain) = domain {
-            cmd.env("CHAOS_LABS_SCHEDULER_DOMAIN", domain);
-        }
-        if let Some(input) = input_json {
-            cmd.env("CHAOS_LABS_WORKFLOW_INPUT_JSON", input);
-        }
+        cmd.arg("-c").arg(script_path);
         cmd
     } else {
         let parts: Vec<&str> = script_path.split_whitespace().collect();
@@ -1679,20 +1933,59 @@ fn build_workflow_command(
         for arg in &parts[1..] {
             cmd.arg(arg);
         }
-        cmd.current_dir(chaos_labs_root)
-            .env("CHAOS_LABS_ROOT", chaos_labs_root)
-            .env("CHAOS_LABS_SCHEDULER_RUN_ID", run_id)
-            .env("CHAOS_LABS_SCHEDULER_WORKFLOW_ID", workflow_id)
-            .env("CHAOS_LABS_SCHEDULER_QUEUE", queue_name)
-            .env("CHAOS_LABS_SCHEDULER_CORPUS", corpus)
-            .env("CHAOS_LABS_SCHEDULER_DB_PATH", scheduler_db_path);
-        if let Some(domain) = domain {
-            cmd.env("CHAOS_LABS_SCHEDULER_DOMAIN", domain);
-        }
-        if let Some(input) = input_json {
-            cmd.env("CHAOS_LABS_WORKFLOW_INPUT_JSON", input);
-        }
         cmd
+    };
+    cmd.current_dir(chaos_labs_root);
+    apply_workflow_env(
+        &mut cmd,
+        chaos_labs_root,
+        run_id,
+        workflow_id,
+        queue_name,
+        environment,
+        domain,
+        scheduler_db_path,
+        input_json,
+    );
+    cmd
+}
+
+/// Export the scheduler's context to a child process. Emits the new
+/// `CHAOS_SCHEDULER_*` variables and, for one transition minor version, also
+/// the legacy `CHAOS_LABS_*` names so external scripts keep working.
+#[allow(clippy::too_many_arguments)]
+fn apply_workflow_env(
+    cmd: &mut Command,
+    workspace_root: &str,
+    run_id: &str,
+    workflow_id: &str,
+    queue_name: &str,
+    environment: &str,
+    domain: Option<&str>,
+    scheduler_db_path: &str,
+    input_json: Option<&str>,
+) {
+    // New canonical names.
+    cmd.env("CHAOS_SCHEDULER_WORKSPACE_ROOT", workspace_root)
+        .env("CHAOS_SCHEDULER_RUN_ID", run_id)
+        .env("CHAOS_SCHEDULER_WORKFLOW_ID", workflow_id)
+        .env("CHAOS_SCHEDULER_QUEUE", queue_name)
+        .env("CHAOS_SCHEDULER_ENVIRONMENT", environment)
+        .env("CHAOS_SCHEDULER_DB_PATH", scheduler_db_path);
+    // Legacy names (dual-emit for one minor version).
+    cmd.env("CHAOS_LABS_ROOT", workspace_root)
+        .env("CHAOS_LABS_SCHEDULER_RUN_ID", run_id)
+        .env("CHAOS_LABS_SCHEDULER_WORKFLOW_ID", workflow_id)
+        .env("CHAOS_LABS_SCHEDULER_QUEUE", queue_name)
+        .env("CHAOS_LABS_SCHEDULER_CORPUS", environment)
+        .env("CHAOS_LABS_SCHEDULER_DB_PATH", scheduler_db_path);
+    if let Some(domain) = domain {
+        cmd.env("CHAOS_SCHEDULER_DOMAIN", domain)
+            .env("CHAOS_LABS_SCHEDULER_DOMAIN", domain);
+    }
+    if let Some(input) = input_json {
+        cmd.env("CHAOS_SCHEDULER_WORKFLOW_INPUT_JSON", input)
+            .env("CHAOS_LABS_WORKFLOW_INPUT_JSON", input);
     }
 }
 
@@ -1711,6 +2004,7 @@ fn run_workflow_command(
 
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .env("CHAOS_SCHEDULER_TASK_CHANNEL_FD", "3")
         .env("CHAOS_LABS_TASK_CHANNEL_FD", "3");
     unsafe {
         cmd.pre_exec(move || {
@@ -1824,7 +2118,7 @@ fn collect_resource_sample(
         run_id: Some(metadata.run_id.clone()),
         workflow_id: metadata.workflow_id.clone(),
         queue_name: metadata.queue_name.clone(),
-        corpus: metadata.corpus.clone(),
+        environment: metadata.environment.clone(),
         pid: Some(root_pid as i64),
         sampled_at: Utc::now().to_rfc3339(),
         cpu_percent: Some(cpu_percent),
@@ -2229,6 +2523,7 @@ fn extract_log_start_offset(stdout: &str) -> Option<u64> {
 }
 
 /// Poll a background PID until it exits, then finalize the run record.
+#[allow(clippy::too_many_arguments)] // Threads full run context into the background monitor.
 fn monitor_background_pid(
     pid: u32,
     run_id: &str,
@@ -2328,13 +2623,15 @@ fn monitor_background_pid(
         },
         email_on_failure: true,
     };
-    if result.should_notify {
-        if let Some(app_handle) = app_handle.as_ref() {
-            send_notification(app_handle, &result);
+    if !dispatch_completion_actions(db, app_handle.as_ref(), &result) {
+        if result.should_notify {
+            if let Some(app_handle) = app_handle.as_ref() {
+                send_notification(app_handle, &result);
+            }
         }
-    }
-    if !success && email_enabled {
-        send_failure_email(db, chaos_labs_root, &result);
+        if !success && email_enabled {
+            send_failure_email(db, chaos_labs_root, &result);
+        }
     }
 
     trigger_on_completion(
@@ -2592,20 +2889,181 @@ pub fn start_scheduler_loop(
                 }
 
                 for result in &results {
-                    if result.should_notify {
-                        send_notification(&app_handle, result);
+                    // Spec workflows route completion through the action
+                    // dispatcher (on_success/on_failure incl. email/webhook/
+                    // desktop/chain); legacy workflows keep the ad-hoc path.
+                    if !dispatch_completion_actions(&db, Some(&app_handle), result) {
+                        if result.should_notify {
+                            send_notification(&app_handle, result);
+                        }
+                        if email_enabled && !result.success && result.email_on_failure {
+                            send_failure_email(&db, &chaos_labs_root, result);
+                        }
                     }
                 }
                 send_sla_notifications(&app_handle, &db);
-
-                if email_enabled {
-                    for result in results.iter().filter(|r| !r.success && r.email_on_failure) {
-                        send_failure_email(&db, &chaos_labs_root, result);
-                    }
-                }
             }
         });
     });
+}
+
+/// Bridges the action framework's [`Notifier`](crate::service::Notifier) to
+/// Tauri's notification plugin from within the scheduler threads.
+struct SchedulerNotifier {
+    app: Option<tauri::AppHandle>,
+}
+
+impl crate::service::Notifier for SchedulerNotifier {
+    fn notify(&self, title: &str, body: &str) {
+        if let Some(app) = &self.app {
+            use tauri_plugin_notification::NotificationExt;
+            if let Err(e) = app.notification().builder().title(title).body(body).show() {
+                log::warn!("Failed to send desktop notification: {e}");
+            }
+        }
+    }
+}
+
+/// Enqueue a chained workflow requested by an `on_success`/`on_failure`
+/// `run_workflow` action, so the normal scheduler loop admits it.
+fn enqueue_chained_workflow(db: &Arc<Database>, workflow_id: &str, upstream_run_id: &str) {
+    match db.get_workflow(workflow_id) {
+        Ok(target) => {
+            let qc = parse_queue_config(target.queue_config.as_deref(), &target.environment);
+            if let Err(e) = db.upsert_queued_run_with_context(
+                &target.id,
+                &qc.queue,
+                qc.priority,
+                Some("run_workflow_action"),
+                None,
+                Some(upstream_run_id),
+                None,
+                None,
+            ) {
+                log::warn!("run_workflow action failed to enqueue {workflow_id}: {e}");
+            }
+        }
+        Err(_) => log::warn!("run_workflow action references unknown workflow {workflow_id}"),
+    }
+}
+
+/// Compute the effective completion actions for a run: the spec's
+/// success/failure list, plus (on failure) a default `email` action when the
+/// legacy `email_on_failure` flag is set with no explicit email action and email
+/// is configured, plus a `desktop_notification` when global prefs request one.
+fn select_completion_actions(
+    on_success: &[crate::actions::ActionSpec],
+    on_failure: &[crate::actions::ActionSpec],
+    success: bool,
+    should_notify: bool,
+    email_on_failure: bool,
+    email_configured: bool,
+) -> Vec<crate::actions::ActionSpec> {
+    use crate::actions::ActionSpec;
+    let mut actions = if success {
+        on_success.to_vec()
+    } else {
+        on_failure.to_vec()
+    };
+    if !success
+        && email_on_failure
+        && email_configured
+        && !actions
+            .iter()
+            .any(|a| matches!(a, ActionSpec::Email { .. }))
+    {
+        actions.push(ActionSpec::Email { to: None });
+    }
+    if should_notify
+        && !actions
+            .iter()
+            .any(|a| matches!(a, ActionSpec::DesktopNotification { .. }))
+    {
+        actions.push(ActionSpec::DesktopNotification { title: None });
+    }
+    actions
+}
+
+/// Dispatch on-success / on-failure actions for a completed run.
+///
+/// Returns `true` if the run belongs to a workflow with a spec (actions were
+/// evaluated here — the caller must NOT also run the legacy notify/email path).
+/// Returns `false` for legacy single-script workflows so the caller keeps their
+/// existing notification/email behavior. Legacy `email_on_failure=true` is
+/// migrated to a default `on_failure:[email]` for spec workflows.
+fn dispatch_completion_actions(
+    db: &Arc<Database>,
+    app_handle: Option<&tauri::AppHandle>,
+    result: &RunResult,
+) -> bool {
+    let Ok(run) = db.get_run(&result.run_id) else {
+        return false;
+    };
+    let Ok(workflow) = db.get_workflow(&run.workflow_id) else {
+        return false;
+    };
+    let Some(spec) = workflow
+        .spec_json
+        .as_deref()
+        .and_then(|j| crate::workflow_spec::WorkflowSpec::from_json(j).ok())
+    else {
+        return false;
+    };
+
+    let email_configured = db
+        .get_email_config()
+        .map(|c| c.enabled && !c.alert_email.trim().is_empty())
+        .unwrap_or(false);
+    let actions = select_completion_actions(
+        &spec.on_success,
+        &spec.on_failure,
+        result.success,
+        result.should_notify,
+        workflow.email_on_failure,
+        email_configured,
+    );
+
+    if !actions.is_empty() {
+        let notifier: Arc<dyn crate::service::Notifier> = Arc::new(SchedulerNotifier {
+            app: app_handle.cloned(),
+        });
+        let payload = serde_json::json!({
+            "workflow_id": workflow.id,
+            "workflow_name": workflow.name,
+            "run_id": run.id,
+            "status": if result.success { "success" } else { "failed" },
+            "exit_code": run.exit_code,
+            "stdout": run.stdout,
+            "stderr": run.stderr,
+            "started_at": run.started_at,
+            "finished_at": run.finished_at,
+        });
+        let ctx = crate::actions::ActionContext {
+            db: Arc::clone(db),
+            notifier,
+            workflow_name: workflow.name.clone(),
+            run_id: run.id.clone(),
+            success: result.success,
+            result_payload: payload,
+        };
+        for outcome in crate::actions::dispatch_actions(&actions, &ctx) {
+            if !outcome.success {
+                log::warn!(
+                    "on-completion action '{}' failed for run {}: {}",
+                    outcome.kind,
+                    run.id,
+                    outcome.message
+                );
+            }
+        }
+
+        for action in &actions {
+            if let crate::actions::ActionSpec::RunWorkflow { workflow_id, .. } = action {
+                enqueue_chained_workflow(db, workflow_id, &run.id);
+            }
+        }
+    }
+    true
 }
 
 fn send_notification(app: &tauri::AppHandle, result: &RunResult) {
@@ -2667,7 +3125,7 @@ fn send_sla_notifications(app: &tauri::AppHandle, db: &Arc<Database>) {
     }
 }
 
-fn send_failure_email(db: &Database, chaos_labs_root: &str, result: &RunResult) {
+fn send_failure_email(db: &Database, _workspace_root: &str, result: &RunResult) {
     let config = match db.get_email_config() {
         Ok(c) if c.enabled && !c.alert_email.is_empty() => c,
         _ => return,
@@ -2692,7 +3150,7 @@ fn send_failure_email(db: &Database, chaos_labs_root: &str, result: &RunResult) 
         "run_id": run.id,
     });
 
-    match crate::commands::run_email_script(chaos_labs_root, &config, Some(&run_context), "alert") {
+    match crate::commands::send_email_alert(&config, Some(&run_context), "alert") {
         Ok(val) => {
             let success = val
                 .get("success")
@@ -2748,8 +3206,7 @@ pub fn install_launchd_plist(app_path: &str) -> Result<String, String> {
     <false/>
 </dict>
 </plist>"#,
-        SCHEDULER_BUNDLE_ID,
-        app_path
+        SCHEDULER_BUNDLE_ID, app_path
     );
 
     std::fs::create_dir_all(&plist_dir).map_err(|e| e.to_string())?;
@@ -2788,6 +3245,347 @@ pub fn uninstall_launchd_plist() -> Result<(), String> {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Timelike, Utc};
+
+    fn structured_test_db() -> (Arc<Database>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("chaos-sched-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (Arc::new(Database::new(&dir)), dir)
+    }
+
+    fn make_generic_workflow(db: &Arc<Database>, spec_json: &str) -> String {
+        let wf = db
+            .create_workflow(
+                "Structured",
+                None,
+                "unused-for-step-flow",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "instance",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        db.set_workflow_spec(&wf.id, "generic", Some(spec_json))
+            .unwrap();
+        wf.id
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn live_generic_step_flow_records_tasks_and_attempts() {
+        let (db, dir) = structured_test_db();
+        // Two steps: build (ok) -> test (ok), test depends on build.
+        let spec = r#"{
+            "kind":"generic",
+            "generic":{"steps":[
+                {"id":"build","command":"true","depends_on":[]},
+                {"id":"test","command":"true","depends_on":["build"]}
+            ]}
+        }"#;
+        let wf_id = make_generic_workflow(&db, spec);
+        let result = execute_workflow_with_context(
+            &db,
+            "/tmp",
+            "python3",
+            &wf_id,
+            false,
+            false,
+            false,
+            Some("manual"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(result.completed);
+        assert!(result.success, "all steps succeed => run succeeds");
+
+        let tasks = db.get_run_tasks(&result.run_id).unwrap();
+        let ids: std::collections::HashSet<String> =
+            tasks.iter().map(|t| t.task_id.clone()).collect();
+        assert!(ids.contains("build") && ids.contains("test"));
+        assert!(tasks.iter().all(|t| t.status == "success"));
+        assert!(!db.get_run_attempts(&result.run_id).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn live_generic_step_flow_fails_fast_and_skips_dependent() {
+        let (db, dir) = structured_test_db();
+        let spec = r#"{
+            "kind":"generic",
+            "generic":{"steps":[
+                {"id":"a","command":"false","depends_on":[]},
+                {"id":"b","command":"true","depends_on":["a"]}
+            ]}
+        }"#;
+        let wf_id = make_generic_workflow(&db, spec);
+        let result = execute_workflow_with_context(
+            &db,
+            "/tmp",
+            "python3",
+            &wf_id,
+            false,
+            false,
+            false,
+            Some("manual"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(result.completed);
+        assert!(!result.success, "failed step => run fails");
+        let tasks = db.get_run_tasks(&result.run_id).unwrap();
+        let b = tasks.iter().find(|t| t.task_id == "b").unwrap();
+        assert_eq!(b.status, "skipped");
+        let a = tasks.iter().find(|t| t.task_id == "a").unwrap();
+        assert_eq!(a.status, "failed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_email_on_failure_injects_default_email_action() {
+        use crate::actions::ActionSpec;
+        // Failure + email_on_failure + configured + no explicit email => inject.
+        let actions = select_completion_actions(&[], &[], false, false, true, true);
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, ActionSpec::Email { .. })));
+
+        // Not injected when email isn't configured.
+        let actions = select_completion_actions(&[], &[], false, false, true, false);
+        assert!(actions.is_empty());
+
+        // Not duplicated when an explicit email already exists.
+        let existing = vec![ActionSpec::Email {
+            to: Some("x@y.com".into()),
+        }];
+        let actions = select_completion_actions(&[], &existing, false, false, true, true);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|a| matches!(a, ActionSpec::Email { .. }))
+                .count(),
+            1
+        );
+
+        // Success path never injects a failure email.
+        let actions = select_completion_actions(&[], &[], true, false, true, true);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn should_notify_injects_desktop_notification() {
+        use crate::actions::ActionSpec;
+        let actions = select_completion_actions(&[], &[], true, true, false, false);
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, ActionSpec::DesktopNotification { .. })));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dispatch_completion_actions_returns_false_for_legacy_true_for_spec() {
+        let (db, dir) = structured_test_db();
+        // Legacy single-script workflow (no spec).
+        let legacy = db
+            .create_workflow(
+                "Legacy",
+                None,
+                "scripts/x.py",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "instance",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let run = db
+            .create_run_with_context(&legacy.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        db.finish_run(&run.id, 0, "", "", None).unwrap();
+        let result = RunResult {
+            run_id: run.id.clone(),
+            workflow_name: legacy.name.clone(),
+            script_path: legacy.script_path.clone(),
+            success: true,
+            completed: true,
+            should_notify: false,
+            email_on_failure: false,
+        };
+        assert!(!dispatch_completion_actions(&db, None, &result));
+
+        // Spec workflow => handled here (returns true).
+        let spec = r#"{"kind":"generic","generic":{"steps":[{"id":"s","command":"true"}]},"on_success":[{"type":"desktop_notification"}]}"#;
+        let wf_id = make_generic_workflow(&db, spec);
+        let run2 = db
+            .create_run_with_context(&wf_id, Some("manual"), None, None, None, None)
+            .unwrap();
+        db.finish_run(&run2.id, 0, "", "", None).unwrap();
+        let result2 = RunResult {
+            run_id: run2.id.clone(),
+            workflow_name: "Structured".into(),
+            script_path: "unused-for-step-flow".into(),
+            success: true,
+            completed: true,
+            should_notify: false,
+            email_on_failure: false,
+        };
+        assert!(dispatch_completion_actions(&db, None, &result2));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_workflow_action_enqueues_chain_target() {
+        let (db, dir) = structured_test_db();
+        let target = db
+            .create_workflow(
+                "Target",
+                None,
+                "scripts/t.py",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "instance",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let spec = format!(
+            r#"{{"kind":"generic","generic":{{"steps":[{{"id":"s","command":"true"}}]}},"on_success":[{{"type":"run_workflow","workflow_id":"{}"}}]}}"#,
+            target.id
+        );
+        let wf_id = make_generic_workflow(&db, &spec);
+        let run = db
+            .create_run_with_context(&wf_id, Some("manual"), None, None, None, None)
+            .unwrap();
+        db.finish_run(&run.id, 0, "", "", None).unwrap();
+        let result = RunResult {
+            run_id: run.id.clone(),
+            workflow_name: "Structured".into(),
+            script_path: "unused".into(),
+            success: true,
+            completed: true,
+            should_notify: false,
+            email_on_failure: false,
+        };
+        assert!(dispatch_completion_actions(&db, None, &result));
+        // The chain target should now be queued.
+        let queued = db.list_queued_runs(50).unwrap();
+        assert!(queued.iter().any(|q| q.workflow_id == target.id));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn live_typed_operator_unknown_type_fails_run() {
+        let (db, dir) = structured_test_db();
+        let wf = db
+            .create_workflow(
+                "Typed",
+                None,
+                "unused",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "instance",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let spec = r#"{"kind":"typed","typed":{"operator_type":"does_not_exist","config":{}}}"#;
+        db.set_workflow_spec(&wf.id, "typed", Some(spec)).unwrap();
+        let result = execute_workflow_with_context(
+            &db,
+            "/tmp",
+            "python3",
+            &wf.id,
+            false,
+            false,
+            false,
+            Some("manual"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(result.completed && !result.success);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn build_workflow_command_dual_emits_new_and_legacy_env() {
+        let cmd = build_workflow_command(
+            "scripts/workflows/noop.py",
+            "/tmp/workspace",
+            "python3",
+            "run-1",
+            "wf-1",
+            "instance-default",
+            "instance",
+            Some("owner"),
+            "/tmp/scheduler.db",
+            Some(r#"{"k":"v"}"#),
+        );
+        let envs: std::collections::HashMap<String, String> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().to_string(),
+                    v?.to_string_lossy().to_string(),
+                ))
+            })
+            .collect();
+        // New canonical names.
+        assert_eq!(
+            envs.get("CHAOS_SCHEDULER_RUN_ID").map(String::as_str),
+            Some("run-1")
+        );
+        assert_eq!(
+            envs.get("CHAOS_SCHEDULER_ENVIRONMENT").map(String::as_str),
+            Some("instance")
+        );
+        assert_eq!(
+            envs.get("CHAOS_SCHEDULER_WORKSPACE_ROOT")
+                .map(String::as_str),
+            Some("/tmp/workspace")
+        );
+        // Legacy names still dual-emitted.
+        assert_eq!(
+            envs.get("CHAOS_LABS_SCHEDULER_RUN_ID").map(String::as_str),
+            Some("run-1")
+        );
+        assert_eq!(
+            envs.get("CHAOS_LABS_SCHEDULER_CORPUS").map(String::as_str),
+            Some("instance")
+        );
+        assert_eq!(
+            envs.get("CHAOS_LABS_ROOT").map(String::as_str),
+            Some("/tmp/workspace")
+        );
+    }
 
     // --- normalize_cron ---
 

@@ -1,7 +1,20 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSchedulerStatus } from "../hooks/useSchedulerStatus";
-import { triggerWorkflow, quitApp, openDashboard, hidePopup, openRunDetail } from "../lib/commands";
+import {
+  triggerWorkflow,
+  quitApp,
+  openDashboard,
+  hidePopup,
+  openRunDetail,
+  environmentOf,
+} from "../lib/commands";
+import type { NextRun } from "../lib/commands";
+import { PRODUCT_SHORT_NAME } from "../lib/branding";
 import "./MenuBarPopup.css";
+
+function envLabel(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
 
 function formatTimeUntil(isoTime: string): string {
   const diff = new Date(isoTime).getTime() - Date.now();
@@ -21,15 +34,13 @@ function formatTime(isoTime: string): string {
   });
 }
 
-function corpusFor(nextRun: { corpus?: string }): "source" | "instance" {
-  return nextRun.corpus === "instance" ? "instance" : "source";
-}
-
 export default function MenuBarPopup() {
   const { status, error, refresh } = useSchedulerStatus(30000);
   const showTime = useRef(0);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [runningWorkflowId, setRunningWorkflowId] = useState<string | null>(null);
+  const [runningWorkflowId, setRunningWorkflowId] = useState<string | null>(
+    null,
+  );
 
   useEffect(() => {
     const onFocus = () => {
@@ -62,6 +73,19 @@ export default function MenuBarPopup() {
     }
   };
 
+  // Group upcoming runs by environment dynamically (no hardcoded corpus set).
+  const groupedNextRuns = useMemo(() => {
+    const groups = new Map<string, NextRun[]>();
+    for (const nr of status?.next_runs ?? []) {
+      const env = environmentOf(nr);
+      if (!groups.has(env)) groups.set(env, []);
+      groups.get(env)!.push(nr);
+    }
+    return Array.from(groups.entries()).sort((a, b) =>
+      a[0].localeCompare(b[0]),
+    );
+  }, [status?.next_runs]);
+
   if (!status) {
     return (
       <div className="popup">
@@ -72,15 +96,10 @@ export default function MenuBarPopup() {
     );
   }
 
-  const nextRunsByCorpus = {
-    source: status.next_runs.filter((nr) => corpusFor(nr) === "source"),
-    instance: status.next_runs.filter((nr) => corpusFor(nr) === "instance"),
-  };
-
   return (
     <div className="popup">
       <div className="popup-header">
-        <span className="popup-title">Chaos Labs</span>
+        <span className="popup-title">{PRODUCT_SHORT_NAME}</span>
         <span className="popup-meta">
           {status.active_workflows} active
           {status.running_count > 0 && (
@@ -91,7 +110,9 @@ export default function MenuBarPopup() {
           )}
         </span>
       </div>
-      {error && <div className="popup-inline-error">Status refresh failed: {error}</div>}
+      {error && (
+        <div className="popup-inline-error">Status refresh failed: {error}</div>
+      )}
       {actionError && <div className="popup-inline-error">{actionError}</div>}
 
       <div className="popup-scroll">
@@ -101,39 +122,37 @@ export default function MenuBarPopup() {
             <div className="popup-empty">No scheduled workflows</div>
           ) : (
             <>
-              {(["source", "instance"] as const).map((corpus) => (
-                <div key={corpus} className="popup-corpus-group">
+              {groupedNextRuns.map(([env, runs]) => (
+                <div key={env} className="popup-corpus-group">
                   <div className="popup-corpus-title">
-                    {corpus === "source" ? "Source Workflows" : "Instance Workflows"}
-                    <span>{nextRunsByCorpus[corpus].length}</span>
+                    {envLabel(env)} Workflows
+                    <span>{runs.length}</span>
                   </div>
-                  {nextRunsByCorpus[corpus].length === 0 ? (
-                    <div className="popup-empty popup-empty-inline">
-                      {corpus === "instance" ? "No instance workflows" : "None scheduled"}
-                    </div>
-                  ) : (
-                    <div className="popup-list">
-                      {nextRunsByCorpus[corpus].map((nr) => (
-                        <div key={nr.workflow_id} className="popup-item">
-                          <div className="popup-item-info">
-                            <span className="popup-item-name">{nr.workflow_name}</span>
-                            <span className="popup-item-time">
-                              in {formatTimeUntil(nr.next_time)}
-                            </span>
-                          </div>
-                          <button
-                            className="btn btn-ghost btn-sm"
-                            onClick={() => handleRun(nr.workflow_id)}
-                            disabled={runningWorkflowId === nr.workflow_id}
-                            title="Run now"
-                            aria-label={`Run ${nr.workflow_name} now`}
-                          >
-                            {runningWorkflowId === nr.workflow_id ? "..." : "▶"}
-                          </button>
+                  <div className="popup-list">
+                    {runs.map((nr) => (
+                      <div key={nr.workflow_id} className="popup-item">
+                        <div className="popup-item-info">
+                          <span className="popup-item-name">
+                            {nr.workflow_name}
+                          </span>
+                          <span className="popup-item-time">
+                            in {formatTimeUntil(nr.next_time)}
+                          </span>
                         </div>
-                      ))}
-                    </div>
-                  )}
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => handleRun(nr.workflow_id)}
+                          disabled={runningWorkflowId === nr.workflow_id}
+                          title="Run now"
+                          aria-label={`Run ${nr.workflow_name} now`}
+                        >
+                          {runningWorkflowId === nr.workflow_id
+                            ? "..."
+                            : "\u25B6"}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ))}
             </>
@@ -154,7 +173,9 @@ export default function MenuBarPopup() {
                 >
                   <div className="popup-item-info">
                     <span className={`popup-dot ${run.status}`} />
-                    <span className="popup-item-name">{run.workflow_name ?? run.workflow_id.slice(0, 8)}</span>
+                    <span className="popup-item-name">
+                      {run.workflow_name ?? run.workflow_id.slice(0, 8)}
+                    </span>
                     <span className="popup-item-time">
                       {formatTime(run.started_at)}
                     </span>
@@ -170,7 +191,10 @@ export default function MenuBarPopup() {
       </div>
 
       <div className="popup-footer">
-        <button className="btn btn-primary btn-sm" onClick={() => openDashboard()}>
+        <button
+          className="btn btn-primary btn-sm"
+          onClick={() => openDashboard()}
+        >
           Open Mission Control
         </button>
         <button className="btn btn-ghost btn-sm" onClick={() => quitApp()}>

@@ -1,0 +1,208 @@
+# Releasing Chaos Scheduler
+
+This is the release runbook. Releases are automated by
+[release-please](https://github.com/googleapis/release-please) plus a
+build/sign/publish [`release.yml`](../.github/workflows/release.yml) reusable
+workflow (macOS desktop signing + notarization, Tauri updater publishing, and npm
+publish for the SDK / MCP server).
+
+## Release flow (overview)
+
+```
+Conventional-commit PRs → merge to main
+        ↓
+release-please opens/updates a "Release PR" (bumps versions + CHANGELOGs)
+        ↓
+merge the Release PR  →  git tag(s) + GitHub Release(s) created
+        ↓
+release-please.yml calls release.yml (same run) gated on release-please outputs
+        ↓
+  ├─ desktop: tauri-action builds universal macOS → codesign + notarize + minisign,
+  │           uploads signed .dmg + .app.tar.gz + .sig + latest.json to the Release
+  └─ npm:     publish @chaos-scheduler/sdk and @chaos-scheduler/mcp-server (provenance)
+```
+
+## How versioning triggers a release
+
+1. Merge normal PRs to `main`. The [`release-please`](../.github/workflows/release-please.yml)
+   workflow keeps a **Release PR** up to date, computing the next version from the
+   Conventional Commits since the last release.
+2. When ready to ship, **merge the Release PR**. release-please then:
+   - updates `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`,
+     `packages/*/package.json`, and per-component `CHANGELOG.md`;
+   - creates the git tag(s) and the GitHub Release(s).
+
+## Gating the downstream release build (important)
+
+`release.yml` is a **reusable workflow** invoked by `release-please.yml` in the
+**same run** (`uses: ./.github/workflows/release.yml`), gated on release-please's
+outputs. This avoids the "a `GITHUB_TOKEN`-created release cannot trigger another
+workflow" limitation without needing a PAT/GitHub App token.
+
+### Output keys (verified against release-please-action v4)
+
+release-please-action prefixes outputs by **manifest path**, with one special
+case for the root:
+
+| Component           | Path                  | `release_created` output key                     |
+| ------------------- | --------------------- | ------------------------------------------------ |
+| Desktop app (root)  | `.`                   | `release_created` (root path is **un-prefixed**) |
+| Rust crate (linked) | `src-tauri`           | `src-tauri--release_created`                     |
+| TypeScript SDK      | `packages/sdk-ts`     | `packages/sdk-ts--release_created`               |
+| MCP server          | `packages/mcp-server` | `packages/mcp-server--release_created`           |
+
+> **Correction to the Phase 0 draft:** the earlier `chaos-scheduler--release_created`
+> keys (component-name-prefixed) were wrong — outputs are **path**-prefixed and the
+> root path `.` is **un-prefixed**. `release-please.yml` now exposes the correct
+> keys (`release_created` / `tag_name` / `version` for the desktop app, and
+> `packages/*--...` for the npm packages). Do **not** gate on the aggregate
+> `releases_created` (unreliable in v4).
+
+The desktop build gates on the root `release_created`; each npm publish gates on
+its `packages/*--release_created`. If nothing was released, `release.yml` is not
+called.
+
+## Desktop build, signing & notarization
+
+`release.yml` → `build-macos` job (runs in the `release` Environment):
+
+- Builds a **universal macOS** binary (`--target universal-apple-darwin`; both
+  `aarch64-apple-darwin` and `x86_64-apple-darwin` rust targets installed) via
+  `tauri-apps/tauri-action`.
+- **Codesigns + notarizes** with **hardened runtime** using the Apple secrets
+  below. (The hardened-runtime entitlements file + `bundle.macOS` config live in
+  `src-tauri/` and are owned by the desktop worker.)
+- Attaches artifacts to the Release release-please created (`releaseId` resolved
+  from the tag via `gh release view`).
+
+## Updater publishing (Tauri + minisign)
+
+Auto-update uses a **GitHub Releases `latest.json` endpoint**:
+`https://github.com/KleinPerkins/chaos-scheduler/releases/latest/download/latest.json`.
+
+- The **app side** (`src-tauri/tauri.conf.json`, owned by the desktop worker):
+  `bundle.createUpdaterArtifacts: true`, `plugins.updater.pubkey` = the minisign
+  **public** key, `plugins.updater.endpoints` = the `latest.json` URL above.
+- The **CI side** (`release.yml`): the minisign **private** key
+  (`TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) signs the
+  update artifacts; `tauri-action` (`includeUpdaterJson: true`) generates and
+  uploads `latest.json` (plus `.app.tar.gz` + `.sig`) to the Release. The public
+  key in the app must correspond to this private key or updates fail signature
+  verification.
+- Generate the keypair once with `npx tauri signer generate -w ~/.tauri/chaos-scheduler.key`.
+
+## npm publishing (SDK + MCP server)
+
+`release.yml` → `publish-sdk` / `publish-mcp` jobs (in the `release` Environment,
+`id-token: write` for **npm provenance**, `NODE_AUTH_TOKEN` = `NPM_TOKEN`):
+
+- Each package sets `publishConfig: { access: public, provenance: true }`, so
+  publishes are public with a provenance attestation.
+- **`file:../sdk-ts` rewrite:** `packages/mcp-server/package.json` depends on the
+  SDK via `file:../sdk-ts` for local dev. The `publish-mcp` job builds mcp-server
+  against the local SDK, then **rewrites that dependency to the published semver**
+  (`^<sdk version>`, read from `packages/sdk-ts/package.json`) immediately before
+  `npm publish`, so the tarball on npm depends on the real published package.
+  Building against the local SDK first avoids any npm-registry propagation race.
+
+> **Provenance + private repo caveat:** `npm publish --provenance` requires the
+> source repository to be **public** (the attestation is written to a public
+> transparency log). While `KleinPerkins/chaos-scheduler` is private, provenance
+> publishes will fail — either make the repo public before the first npm release,
+> or temporarily drop `--provenance` / `publishConfig.provenance`.
+
+## Secrets & prerequisites checklist
+
+These are **manual, one-time** steps a repo admin / release owner must complete
+outside this repo (the workflows cannot create them). Scope every secret below to
+the **`release` GitHub Environment** so it is only exposed to approved release runs.
+
+### GitHub `release` Environment
+
+- [ ] Create an Environment named **`release`** (Settings → Environments) with
+      **required reviewers**. All `release.yml` jobs (`build-macos`, `publish-sdk`,
+      `publish-mcp`) run in it and pause for approval.
+
+### Apple codesigning + notarization (desktop)
+
+- [ ] **Apple Developer Program** enrollment (needed for a Gatekeeper-trusted DMG).
+- [ ] `APPLE_CERTIFICATE` — base64 of the Developer ID Application `.p12`.
+- [ ] `APPLE_CERTIFICATE_PASSWORD` — password for that `.p12`.
+- [ ] `APPLE_SIGNING_IDENTITY` — e.g. `Developer ID Application: Name (TEAMID)`.
+- [ ] `APPLE_TEAM_ID` — your Apple Developer Team ID.
+- [ ] `APPLE_ID` — Apple ID email used for notarization.
+- [ ] `APPLE_PASSWORD` — an **app-specific password** for that Apple ID.
+      (tauri-action also supports an App Store Connect API key via
+      `APPLE_API_ISSUER` / `APPLE_API_KEY_ID` / `APPLE_API_KEY` as an alternative
+      to `APPLE_ID` + `APPLE_PASSWORD`.)
+
+### Tauri updater minisign key (auto-update)
+
+- [ ] Generate the keypair once: `npx tauri signer generate -w ~/.tauri/chaos-scheduler.key`.
+- [ ] `TAURI_SIGNING_PRIVATE_KEY` — the generated **private** key.
+- [ ] `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — its password.
+- [ ] Put the matching **public** key in `src-tauri/tauri.conf.json`
+      (`plugins.updater.pubkey`) — owned by the desktop worker; it must correspond
+      to the private key above or updates fail verification.
+- [ ] **Back up the private key in a secret manager.** Losing it permanently
+      breaks auto-update for every installed user. Never commit it (`.env` files
+      are not read by Tauri).
+
+### npm publishing (SDK + MCP server)
+
+- [ ] `NPM_TOKEN` — an npm **automation** token with publish rights to the
+      `@chaos-scheduler` scope (create the org/scope on npm first).
+- [ ] Provenance requires **`id-token: write`** (already set on the publish jobs)
+      **and a public source repo** — see the provenance caveat above.
+
+### Other ecosystem prerequisites
+
+- [ ] **GitHub admin / branch protection** on `main` (see below).
+- [ ] **Cursor service account** — a Cursor service-account API key (for the
+      Phase 8 `cursor_agent` operator / Cloud Agents). Stored in scheduler
+      settings, not in CI, but listed here for completeness.
+
+### Secrets summary
+
+| Secret                               | Used by           | Purpose                             |
+| ------------------------------------ | ----------------- | ----------------------------------- |
+| `APPLE_CERTIFICATE`                  | `build-macos`     | Developer ID cert (.p12, base64)    |
+| `APPLE_CERTIFICATE_PASSWORD`         | `build-macos`     | Cert password                       |
+| `APPLE_SIGNING_IDENTITY`             | `build-macos`     | Signing identity string             |
+| `APPLE_TEAM_ID`                      | `build-macos`     | Apple Team ID                       |
+| `APPLE_ID`                           | `build-macos`     | Notarization Apple ID               |
+| `APPLE_PASSWORD`                     | `build-macos`     | App-specific password               |
+| `TAURI_SIGNING_PRIVATE_KEY`          | `build-macos`     | Updater artifact signing (minisign) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | `build-macos`     | Updater key password                |
+| `NPM_TOKEN`                          | `publish-sdk/mcp` | npm publish auth                    |
+| `GITHUB_TOKEN` (built-in)            | all               | Upload assets / create Release PR   |
+
+## Branch protection (GitHub admin — must be set manually)
+
+Configure on `main` (Settings → Branches → Add rule / Rulesets):
+
+- [ ] Require a pull request before merging (**1** approval).
+- [ ] Require review from **Code Owners** (uses [`.github/CODEOWNERS`](../.github/CODEOWNERS)).
+- [ ] Require status checks to pass → select **`ci-required`** (the single
+      aggregation check) and require branches be up to date.
+- [ ] Require linear history; block force-pushes and deletions of `main`.
+- [ ] (Optional) Require signed commits.
+
+## Rollback
+
+- **Bad release:** create a `fix:` (or `revert:`) commit; merge → release-please
+  ships a new patch. Prefer roll-forward over deleting tags.
+- **Broken auto-update:** if a published `latest.json` points at a bad build,
+  publish a corrected higher version; the updater only moves forward. Do not
+  reuse a version number.
+- **DB migration regression:** migrations are forward-only and idempotent (see
+  [VERSIONING.md](VERSIONING.md)); a regression is fixed by a new release that
+  repairs state on next launch, not by downgrading.
+
+## First public release note
+
+The bundle identifier changes from `com.chaoslabs.scheduler` to the new Chaos
+Scheduler identifier (Phase 2). Pre-existing installs will **not** auto-update
+across the identifier change; the first release is a fresh install and the
+Phase 2 legacy-DB migration preserves user data. Finalize branding before the
+first public release.

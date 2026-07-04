@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local runtime database (not committed)
+scheduler.db
+*.db

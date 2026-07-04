@@ -1,0 +1,64 @@
+{
+  "name": "@chaos-scheduler/mcp-server",
+  "version": "0.1.0",
+  "description": "Chaos MCP server — exposes the Chaos Scheduler to Cursor and other MCP clients as tools, resources, and prompts, over stdio (local) and Streamable HTTP (remote/team).",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KleinPerkins/chaos-scheduler.git",
+    "directory": "packages/mcp-server"
+  },
+  "homepage": "https://github.com/KleinPerkins/chaos-scheduler/tree/main/packages/mcp-server#readme",
+  "bugs": {
+    "url": "https://github.com/KleinPerkins/chaos-scheduler/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "chaos-mcp-server": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "chaos-scheduler",
+    "mcp",
+    "model-context-protocol",
+    "cursor",
+    "scheduler"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "dependencies": {
+    "@chaos-scheduler/sdk": "file:../sdk-ts",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

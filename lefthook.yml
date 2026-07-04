@@ -1,0 +1,42 @@
+# Lefthook local git hooks — fast, developer-side enforcement.
+# These are bypassable (`git commit --no-verify`); GitHub CI (ci-required)
+# is the authoritative gate. See CONTRIBUTING.md.
+#
+# Installed automatically by the `prepare` npm script (`lefthook install`).
+
+commit-msg:
+  commands:
+    commitlint:
+      # Validate the commit message against Conventional Commits.
+      run: npx --no-install commitlint --edit {1}
+
+pre-commit:
+  parallel: true
+  commands:
+    prettier:
+      glob: "*.{ts,tsx,js,jsx,cjs,mjs,json,css,md,yml,yaml}"
+      run: npx --no-install prettier --write {staged_files}
+      stage_fixed: true
+    eslint:
+      glob: "*.{ts,tsx,js,jsx}"
+      run: npx --no-install eslint --fix {staged_files}
+      stage_fixed: true
+    cargo-fmt:
+      root: "src-tauri/"
+      glob: "*.rs"
+      run: cargo fmt --check
+    cargo-clippy:
+      root: "src-tauri/"
+      glob: "*.rs"
+      run: cargo clippy --all-targets --all-features -- -D warnings
+
+pre-push:
+  parallel: true
+  commands:
+    typecheck:
+      glob: "*.{ts,tsx}"
+      run: npm run typecheck
+    cargo-test:
+      root: "src-tauri/"
+      glob: "*.rs"
+      run: cargo test --quiet

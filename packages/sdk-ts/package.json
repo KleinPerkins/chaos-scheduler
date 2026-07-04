@@ -1,0 +1,58 @@
+{
+  "name": "@chaos-scheduler/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the Chaos Scheduler REST API (/api/v1) — register environments/workflows, run/enqueue on demand, poll runs, and verify webhook signatures.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KleinPerkins/chaos-scheduler.git",
+    "directory": "packages/sdk-ts"
+  },
+  "homepage": "https://github.com/KleinPerkins/chaos-scheduler/tree/main/packages/sdk-ts#readme",
+  "bugs": {
+    "url": "https://github.com/KleinPerkins/chaos-scheduler/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "chaos-scheduler",
+    "scheduler",
+    "sdk",
+    "rest",
+    "webhook",
+    "workflow"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

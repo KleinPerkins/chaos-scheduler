@@ -1,0 +1,215 @@
+name: release
+
+# Build + publish the artifacts for a release that release-please just created.
+#
+# This is a REUSABLE workflow (`workflow_call`) invoked from release-please.yml,
+# gated on the release-please path outputs (root `release_created` for the desktop
+# app; `packages/*--release_created` for the npm packages). It is NOT triggered by
+# GitHub `release`/`push` events, because a Release created by the workflow's
+# GITHUB_TOKEN cannot trigger further workflows. `workflow_dispatch` is also
+# provided for manual re-runs (e.g. re-attaching assets to an existing tag).
+#
+# All jobs run in the `release` GitHub Environment so signing/publish secrets are
+# gated behind required reviewers. See docs/RELEASING.md for the secrets checklist.
+
+on:
+  workflow_call:
+    inputs:
+      build_desktop:
+        description: Build + sign + notarize the macOS desktop app.
+        type: boolean
+        default: false
+      desktop_tag:
+        description: Release tag to attach desktop assets to (root component).
+        type: string
+        default: ""
+      publish_sdk:
+        description: Publish packages/sdk-ts to npm.
+        type: boolean
+        default: false
+      sdk_tag:
+        description: Release tag for the sdk-ts component.
+        type: string
+        default: ""
+      publish_mcp:
+        description: Publish packages/mcp-server to npm.
+        type: boolean
+        default: false
+      mcp_tag:
+        description: Release tag for the mcp-server component.
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      build_desktop:
+        description: Build + sign + notarize the macOS desktop app.
+        type: boolean
+        default: true
+      desktop_tag:
+        description: Existing release tag to attach desktop assets to (e.g. chaos-scheduler-v0.2.0).
+        type: string
+        required: true
+      publish_sdk:
+        description: Publish packages/sdk-ts to npm.
+        type: boolean
+        default: false
+      sdk_tag:
+        description: Release tag for the sdk-ts component (for checkout).
+        type: string
+        default: ""
+      publish_mcp:
+        description: Publish packages/mcp-server to npm.
+        type: boolean
+        default: false
+      mcp_tag:
+        description: Release tag for the mcp-server component (for checkout).
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Desktop app: signed + notarized, hardened-runtime, universal macOS binary.
+  # Uploads the .dmg (initial install) + .app.tar.gz + .sig + latest.json
+  # (updater) to the GitHub Release created by release-please.
+  # ---------------------------------------------------------------------------
+  build-macos:
+    name: macOS desktop (signed + notarized, universal)
+    if: ${{ inputs.build_desktop }}
+    runs-on: macos-14
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.desktop_tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install Rust toolchain (from rust-toolchain.toml) + macOS targets
+        run: |
+          rustup show
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Resolve GitHub Release id for tag
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          release_id=$(gh release view "${{ inputs.desktop_tag }}" \
+            --repo "${{ github.repository }}" \
+            --json databaseId --jq '.databaseId')
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
+      - name: Build, sign, notarize, and upload artifacts
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- Apple codesigning + notarization (hardened runtime) ---
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # --- Tauri updater signing (minisign) ---
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          # Attach to the Release that release-please already created.
+          releaseId: ${{ steps.rel.outputs.release_id }}
+          # Universal (aarch64 + x86_64) macOS build.
+          args: --target universal-apple-darwin
+          # Generate + upload the updater manifest (latest.json). The app-side
+          # pubkey/endpoints (GitHub Releases latest/download/latest.json) are set
+          # in src-tauri/tauri.conf.json by the desktop worker; the private half
+          # (TAURI_SIGNING_PRIVATE_KEY) signs the artifacts here so they verify.
+          includeUpdaterJson: true
+
+  # ---------------------------------------------------------------------------
+  # npm: publish the TypeScript SDK with provenance.
+  # ---------------------------------------------------------------------------
+  publish-sdk:
+    name: npm publish @chaos-scheduler/sdk
+    if: ${{ inputs.publish_sdk }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # required for npm provenance
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sdk_tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+      - name: Build
+        working-directory: packages/sdk-ts
+        run: |
+          npm ci
+          npm run build
+      - name: Publish (with provenance)
+        working-directory: packages/sdk-ts
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # npm: publish the MCP server with provenance.
+  # The committed dependency `@chaos-scheduler/sdk: file:../sdk-ts` (a local dev
+  # link) is rewritten to the published semver just before publishing so the
+  # tarball on npm depends on the real package. The build is done against the
+  # local sdk (built here) to avoid any npm-propagation race.
+  # ---------------------------------------------------------------------------
+  publish-mcp:
+    name: npm publish @chaos-scheduler/mcp-server
+    if: ${{ inputs.publish_mcp }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # required for npm provenance
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.mcp_tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+      - name: Build sdk (local dependency of mcp-server)
+        working-directory: packages/sdk-ts
+        run: |
+          npm ci
+          npm run build
+      - name: Build mcp-server (against local sdk)
+        working-directory: packages/mcp-server
+        run: |
+          npm ci
+          npm run build
+      - name: Pin @chaos-scheduler/sdk to the published semver
+        run: |
+          SDK_VERSION=$(node -p "require('./packages/sdk-ts/package.json').version")
+          export SDK_VERSION
+          node -e "const fs=require('fs');const p='packages/mcp-server/package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.dependencies['@chaos-scheduler/sdk']='^'+process.env.SDK_VERSION;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n');"
+          echo "Rewrote @chaos-scheduler/sdk dependency to ^$SDK_VERSION"
+      - name: Publish (with provenance)
+        working-directory: packages/mcp-server
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,0 +1,23 @@
+# Code owners for chaos-scheduler.
+# Requires review from the owner before merging (enforce via branch protection:
+# "Require review from Code Owners" on `main`).
+
+# Default owner for everything.
+*                       @KleinPerkins
+
+# Release engineering & governance (Phase 0).
+/.github/               @KleinPerkins
+/docs/                  @KleinPerkins
+/release-please-config.json      @KleinPerkins
+/.release-please-manifest.json   @KleinPerkins
+/lefthook.yml           @KleinPerkins
+/commitlint.config.cjs  @KleinPerkins
+/CONTRIBUTING.md        @KleinPerkins
+/SECURITY.md            @KleinPerkins
+/LICENSE                @KleinPerkins
+
+# Backend / desktop app.
+/src-tauri/             @KleinPerkins
+
+# Frontend.
+/src/                   @KleinPerkins

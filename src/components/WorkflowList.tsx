@@ -1,8 +1,15 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useWorkflows } from "../hooks/useWorkflows";
-import { triggerWorkflow, updateWorkflow, deleteWorkflow } from "../lib/commands";
+import { useEnvironments } from "../hooks/useEnvironments";
+import {
+  triggerWorkflow,
+  updateWorkflow,
+  deleteWorkflow,
+  environmentOf,
+} from "../lib/commands";
 import type { Workflow } from "../lib/commands";
 import { cronToHuman } from "./ScheduleBuilder";
+import EnvironmentBadge from "./EnvironmentBadge";
 import "./WorkflowList.css";
 
 interface Props {
@@ -12,19 +19,19 @@ interface Props {
 }
 
 type FrequencyGroup = "Hourly" | "Daily" | "Weekly" | "Monthly";
-type CorpusFilter = "all" | "source" | "instance";
+type EnvFilter = string; // "all" or an environment name
 
 const GROUP_ORDER: FrequencyGroup[] = ["Hourly", "Daily", "Weekly", "Monthly"];
-const CORPUS_FILTERS: CorpusFilter[] = ["all", "source", "instance"];
 
 function getFrequencyGroup(cronSchedule: string): FrequencyGroup {
-  if (cronSchedule.includes(';')) {
-    const groups = cronSchedule.split(';')
-      .map(c => c.trim())
+  if (cronSchedule.includes(";")) {
+    const groups = cronSchedule
+      .split(";")
+      .map((c) => c.trim())
       .filter(Boolean)
-      .map(c => getFrequencyGroup(c));
+      .map((c) => getFrequencyGroup(c));
     const priority: FrequencyGroup[] = ["Hourly", "Daily", "Weekly", "Monthly"];
-    return priority.find(p => groups.includes(p)) || "Daily";
+    return priority.find((p) => groups.includes(p)) || "Daily";
   }
 
   const parts = cronSchedule.trim().split(/\s+/);
@@ -48,30 +55,45 @@ function getFrequencyGroup(cronSchedule: string): FrequencyGroup {
 
 export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
   const { workflows, loading, refresh } = useWorkflows();
-  const [corpusFilter, setCorpusFilter] = useState<CorpusFilter>("all");
+  const { environments } = useEnvironments();
+  const [envFilter, setEnvFilter] = useState<EnvFilter>("all");
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [hoveredDescId, setHoveredDescId] = useState<string | null>(null);
-  const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
 
   useEffect(() => {
-    return () => { clearTimeout(deleteTimerRef.current); };
+    return () => {
+      clearTimeout(deleteTimerRef.current);
+    };
   }, []);
 
-  const corpusCounts = useMemo(() => {
-    return workflows.reduce(
-      (counts, workflow) => {
-        const corpus = workflow.corpus === "instance" ? "instance" : "source";
-        counts[corpus] += 1;
-        return counts;
-      },
-      { source: 0, instance: 0 },
-    );
+  // Environment options are sourced from the environments backend and unioned
+  // with any environments observed on the current workflows (so a workflow in
+  // an env that was since removed still surfaces a filter).
+  const envCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const workflow of workflows) {
+      const env = environmentOf(workflow);
+      counts.set(env, (counts.get(env) ?? 0) + 1);
+    }
+    return counts;
   }, [workflows]);
 
+  const envOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const env of environments) names.add(env.name);
+    for (const name of envCounts.keys()) names.add(name);
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [environments, envCounts]);
+
   const visibleWorkflows = useMemo(() => {
-    if (corpusFilter === "all") return workflows;
-    return workflows.filter((workflow) => (workflow.corpus ?? "source") === corpusFilter);
-  }, [workflows, corpusFilter]);
+    if (envFilter === "all") return workflows;
+    return workflows.filter(
+      (workflow) => environmentOf(workflow) === envFilter,
+    );
+  }, [workflows, envFilter]);
 
   const groupedWorkflows = useMemo(() => {
     const groups = new Map<FrequencyGroup, Workflow[]>();
@@ -80,9 +102,10 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
       if (!groups.has(group)) groups.set(group, []);
       groups.get(group)!.push(w);
     }
-    return GROUP_ORDER
-      .filter((g) => groups.has(g))
-      .map((g) => ({ group: g, workflows: groups.get(g)! }));
+    return GROUP_ORDER.filter((g) => groups.has(g)).map((g) => ({
+      group: g,
+      workflows: groups.get(g)!,
+    }));
   }, [visibleWorkflows]);
 
   const handleToggle = async (w: Workflow) => {
@@ -120,12 +143,15 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
     refresh();
   };
 
-  const handleDescEnter = useCallback((e: React.MouseEvent<HTMLDivElement>, wId: string) => {
-    const el = e.currentTarget.querySelector(".wf-card-desc") as HTMLElement;
-    if (el && el.scrollHeight > el.clientHeight + 1) {
-      setHoveredDescId(wId);
-    }
-  }, []);
+  const handleDescEnter = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>, wId: string) => {
+      const el = e.currentTarget.querySelector(".wf-card-desc") as HTMLElement;
+      if (el && el.scrollHeight > el.clientHeight + 1) {
+        setHoveredDescId(wId);
+      }
+    },
+    [],
+  );
 
   const handleDescLeave = useCallback(() => {
     setHoveredDescId(null);
@@ -140,17 +166,20 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
       <div className="wf-card-header">
         <div className="wf-card-title-row">
           <div className="wf-card-title">{w.name}</div>
-          <span className={`wf-corpus-badge ${w.corpus === "instance" ? "instance" : "source"}`}>
-            {w.corpus === "instance" ? "Instance" : "Source"}
-          </span>
+          <EnvironmentBadge
+            environment={environmentOf(w)}
+            managed={w.managed_externally}
+            size="sm"
+          />
         </div>
         <label className="wf-toggle">
           <input
             type="checkbox"
             checked={w.enabled}
             onChange={() => handleToggle(w)}
+            aria-label={`${w.enabled ? "Disable" : "Enable"} ${w.name}`}
           />
-          <span className="wf-toggle-track" />
+          <span className="wf-toggle-track" aria-hidden="true" />
         </label>
       </div>
       {w.description && (
@@ -159,7 +188,9 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
           onMouseEnter={(e) => handleDescEnter(e, w.id)}
           onMouseLeave={handleDescLeave}
         >
-          <div className={`wf-card-desc ${hoveredDescId === w.id ? "wf-card-desc-active" : ""}`}>
+          <div
+            className={`wf-card-desc ${hoveredDescId === w.id ? "wf-card-desc-active" : ""}`}
+          >
             {w.description}
           </div>
           {hoveredDescId === w.id && (
@@ -174,7 +205,11 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
         <span className="wf-card-script">{w.script_path}</span>
       </div>
       <div className="wf-card-actions">
-        <button className="btn btn-ghost btn-sm" onClick={() => handleRun(w)} title="Run now">
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={() => handleRun(w)}
+          title="Run now"
+        >
           &#9654; Run
         </button>
         <button className="btn btn-ghost btn-sm" onClick={() => onHistory(w)}>
@@ -199,7 +234,8 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
         <div>
           <h1 className="page-title">Workflows</h1>
           <p className="page-subtitle">
-            {workflows.length} workflow{workflows.length !== 1 ? "s" : ""} configured
+            {workflows.length} workflow{workflows.length !== 1 ? "s" : ""}{" "}
+            configured
           </p>
         </div>
         <button className="btn btn-primary" onClick={onNew}>
@@ -219,28 +255,37 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
         </div>
       ) : (
         <>
-          <div className="wf-corpus-filter" aria-label="Workflow corpus filter">
-            {CORPUS_FILTERS.map((filter) => (
+          <div
+            className="wf-corpus-filter"
+            role="group"
+            aria-label="Filter workflows by environment"
+          >
+            <button
+              className={`wf-corpus-pill ${envFilter === "all" ? "active" : ""}`}
+              onClick={() => setEnvFilter("all")}
+              aria-pressed={envFilter === "all"}
+            >
+              All
+              <span>{workflows.length}</span>
+            </button>
+            {envOptions.map((name) => (
               <button
-                key={filter}
-                className={`wf-corpus-pill ${corpusFilter === filter ? "active" : ""}`}
-                onClick={() => setCorpusFilter(filter)}
+                key={name}
+                className={`wf-corpus-pill ${envFilter === name ? "active" : ""}`}
+                onClick={() => setEnvFilter(name)}
+                aria-pressed={envFilter === name}
               >
-                {filter === "all" ? "All" : filter === "source" ? "Source" : "Instance"}
-                <span>
-                  {filter === "all" ? workflows.length : corpusCounts[filter]}
-                </span>
+                {name.charAt(0).toUpperCase() + name.slice(1)}
+                <span>{envCounts.get(name) ?? 0}</span>
               </button>
             ))}
           </div>
 
           {visibleWorkflows.length === 0 ? (
             <div className="wf-empty wf-empty-compact">
-              <p className="wf-empty-title">No {corpusFilter} workflows</p>
+              <p className="wf-empty-title">No workflows in {envFilter}</p>
               <p className="wf-empty-sub">
-                {corpusFilter === "instance"
-                  ? "Instance-specific workflow code has not been added yet."
-                  : "No workflows match this corpus filter."}
+                No workflows are assigned to this environment yet.
               </p>
             </div>
           ) : (
@@ -252,9 +297,7 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
                     <span className="wf-group-count">{groupWfs.length}</span>
                     <span className="wf-group-divider" />
                   </div>
-                  <div className="wf-grid">
-                    {groupWfs.map(renderCard)}
-                  </div>
+                  <div className="wf-grid">{groupWfs.map(renderCard)}</div>
                 </div>
               ))}
             </div>

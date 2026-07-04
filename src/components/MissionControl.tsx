@@ -1,7 +1,16 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   getMissionControlSnapshot,
   setMissionControlPreferences,
+  environmentOf,
   type MissionControlActivityItem,
   type MissionControlFreshnessItem,
   type MissionControlPreferences,
@@ -9,9 +18,11 @@ import {
   type MissionControlWorkflowTelemetry,
   type Run,
 } from "../lib/commands";
+import { useEnvironments } from "../hooks/useEnvironments";
 import "./MissionControl.css";
 
-export type MissionTab = "overview" | "activity" | "freshness" | "telemetry" | "matrix";
+export type MissionTab =
+  "overview" | "activity" | "freshness" | "telemetry" | "matrix";
 export interface MissionControlReturnState {
   tab: MissionTab;
   corpus: MissionControlPreferences["corpus_filter"];
@@ -22,9 +33,16 @@ interface MissionControlProps {
   initialTab?: MissionTab;
   initialCorpus?: MissionControlPreferences["corpus_filter"];
   initialDomain?: string;
-  onOpenRun: (runId: string, workflowId: string, returnState: MissionControlReturnState) => void;
+  onOpenRun: (
+    runId: string,
+    workflowId: string,
+    returnState: MissionControlReturnState,
+  ) => void;
   onOpenQueues: (returnState: MissionControlReturnState) => void;
-  onOpenHistory: (workflowId: string, returnState: MissionControlReturnState) => void;
+  onOpenHistory: (
+    workflowId: string,
+    returnState: MissionControlReturnState,
+  ) => void;
   onOpenDashboard: () => void;
 }
 
@@ -94,7 +112,7 @@ function HeaderStatus({ snapshot }: { snapshot: MissionControlSnapshot }) {
     <section className="mc-hero-panel">
       <div>
         <p className="mc-kicker">Mission Control</p>
-        <h1>Scheduler operations by corpus and owner</h1>
+        <h1>Scheduler operations by environment and owner</h1>
         <p className="mc-hero-copy">
           Durable scheduler.db state only. Filtered by {corpus} /{" "}
           {domain === "__unowned__" ? "Unowned" : domain}.
@@ -121,20 +139,32 @@ function SlaStrip({
 }) {
   const items = [
     { label: "SLA risks", value: snapshot.sla.violations_count.toString() },
-    { label: "24h success", value: formatPercent(snapshot.sla.success_rate_24h) },
+    {
+      label: "24h success",
+      value: formatPercent(snapshot.sla.success_rate_24h),
+    },
     {
       label: "Median queue wait",
-      value: snapshot.sla.median_wait_seconds == null
-        ? "n/a"
-        : `${snapshot.sla.median_wait_seconds}s`,
+      value:
+        snapshot.sla.median_wait_seconds == null
+          ? "n/a"
+          : `${snapshot.sla.median_wait_seconds}s`,
     },
-    { label: "Waiting", value: snapshot.sla.blocked_count.toString(), action: onOpenQueues },
+    {
+      label: "Waiting",
+      value: snapshot.sla.blocked_count.toString(),
+      action: onOpenQueues,
+    },
   ];
   return (
     <section className="mc-panel mc-sla-strip">
       {items.map((item) =>
         item.action ? (
-          <button className="mc-sla-card" key={item.label} onClick={item.action}>
+          <button
+            className="mc-sla-card"
+            key={item.label}
+            onClick={item.action}
+          >
             <span>{item.label}</span>
             <strong>{item.value}</strong>
           </button>
@@ -160,10 +190,14 @@ function NeedsAttention({
   onOpenQueues: () => void;
   onOpenHistory: (workflowId: string) => void;
 }) {
-  const attentionAction = (item: MissionControlSnapshot["needs_attention"][number]) => {
-    if (item.run_id && item.workflow_id) return () => onOpenRun(item.run_id!, item.workflow_id!);
+  const attentionAction = (
+    item: MissionControlSnapshot["needs_attention"][number],
+  ) => {
+    if (item.run_id && item.workflow_id)
+      return () => onOpenRun(item.run_id!, item.workflow_id!);
     if (item.target === "queues") return onOpenQueues;
-    if (item.target === "history" && item.workflow_id) return () => onOpenHistory(item.workflow_id!);
+    if (item.target === "history" && item.workflow_id)
+      return () => onOpenHistory(item.workflow_id!);
     return null;
   };
   return (
@@ -200,7 +234,10 @@ function NeedsAttention({
                 {content}
               </button>
             ) : (
-              <div className={`mc-attention-item ${item.severity}`} key={item.id}>
+              <div
+                className={`mc-attention-item ${item.severity}`}
+                key={item.id}
+              >
                 {content}
               </div>
             );
@@ -239,12 +276,16 @@ function ActivityList({
               <span className={`mc-dot ${statusClass(item.status)}`} />
               <span>
                 <strong>{item.workflow_name}</strong>
-                <small>{item.domain} / {item.corpus}</small>
+                <small>
+                  {item.domain} / {environmentOf(item)}
+                </small>
               </span>
               <span className={`status-badge ${statusClass(item.status)}`}>
                 {item.status}
               </span>
-              <time dateTime={item.started_at}>{formatTime(item.started_at)}</time>
+              <time dateTime={item.started_at}>
+                {formatTime(item.started_at)}
+              </time>
             </button>
           ))}
         </div>
@@ -268,10 +309,15 @@ function UpcomingRuns({ snapshot }: { snapshot: MissionControlSnapshot }) {
       ) : (
         <div className="mc-upcoming-grid">
           {snapshot.upcoming_runs.map((run) => (
-            <div className="mc-upcoming-card" key={`${run.workflow_id}-${run.trigger_label}`}>
+            <div
+              className="mc-upcoming-card"
+              key={`${run.workflow_id}-${run.trigger_label}`}
+            >
               <span>{formatTimeUntil(run.next_time)}</span>
               <strong>{run.workflow_name}</strong>
-              <small>{run.domain} / {run.trigger_label}</small>
+              <small>
+                {run.domain} / {run.trigger_label}
+              </small>
             </div>
           ))}
         </div>
@@ -311,7 +357,9 @@ function RecentRuns({
               <span className={`status-badge ${statusClass(run.status)}`}>
                 {run.status}
               </span>
-              <time dateTime={run.started_at}>{formatTime(run.started_at)}</time>
+              <time dateTime={run.started_at}>
+                {formatTime(run.started_at)}
+              </time>
             </button>
           ))}
         </div>
@@ -341,7 +389,9 @@ function FreshnessLedger({ items }: { items: MissionControlFreshnessItem[] }) {
               <span>{item.domain}</span>
               <small>{item.attribution}</small>
               {item.last_written_at ? (
-                <time dateTime={item.last_written_at}>{formatTime(item.last_written_at)}</time>
+                <time dateTime={item.last_written_at}>
+                  {formatTime(item.last_written_at)}
+                </time>
               ) : (
                 <span>not recorded</span>
               )}
@@ -353,7 +403,11 @@ function FreshnessLedger({ items }: { items: MissionControlFreshnessItem[] }) {
   );
 }
 
-function TelemetryCards({ items }: { items: MissionControlWorkflowTelemetry[] }) {
+function TelemetryCards({
+  items,
+}: {
+  items: MissionControlWorkflowTelemetry[];
+}) {
   return (
     <section className="mc-panel mc-panel-wide">
       <div className="mc-panel-header">
@@ -368,11 +422,17 @@ function TelemetryCards({ items }: { items: MissionControlWorkflowTelemetry[] })
             <div className="mc-telemetry-card" key={item.workflow_id}>
               <div>
                 <strong>{item.workflow_name}</strong>
-                <small>{item.domain} / {item.corpus}</small>
+                <small>
+                  {item.domain} / {environmentOf(item)}
+                </small>
               </div>
               <div className="mc-meter-row">
                 <span>CPU</span>
-                <b>{item.max_cpu_percent == null ? "no samples" : `${item.max_cpu_percent.toFixed(1)}%`}</b>
+                <b>
+                  {item.max_cpu_percent == null
+                    ? "no samples"
+                    : `${item.max_cpu_percent.toFixed(1)}%`}
+                </b>
               </div>
               <div className="mc-meter-row">
                 <span>Memory</span>
@@ -382,7 +442,10 @@ function TelemetryCards({ items }: { items: MissionControlWorkflowTelemetry[] })
                 <span>Tokens</span>
                 <b>{item.total_tokens.toLocaleString()}</b>
               </div>
-              <small>{item.sample_count} resource samples, {item.token_call_count} token calls</small>
+              <small>
+                {item.sample_count} resource samples, {item.token_call_count}{" "}
+                token calls
+              </small>
             </div>
           ))}
         </div>
@@ -400,9 +463,12 @@ export default function MissionControl({
   onOpenHistory,
   onOpenDashboard,
 }: MissionControlProps) {
+  const { environments } = useEnvironments();
   const [snapshot, setSnapshot] = useState<MissionControlSnapshot | null>(null);
   const [tab, setTab] = useState<MissionTab>(initialTab);
-  const [corpus, setCorpus] = useState<MissionControlPreferences["corpus_filter"]>(initialCorpus ?? "all");
+  const [corpus, setCorpus] = useState<
+    MissionControlPreferences["corpus_filter"]
+  >(initialCorpus ?? "all");
   const [domain, setDomain] = useState(initialDomain ?? "all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -478,12 +544,24 @@ export default function MissionControl({
     [tab, corpus, domain],
   );
 
+  // Environment filter options are sourced from the environments backend and
+  // unioned with the currently-selected value (so an out-of-list selection is
+  // still shown). Unknown values normalize to "all" server-side (graceful).
+  const envFilterOptions = useMemo(() => {
+    const names = new Set<string>(["all"]);
+    for (const env of environments) names.add(env.name);
+    if (corpus) names.add(corpus);
+    return Array.from(names);
+  }, [environments, corpus]);
+
   if (loading && !snapshot) {
     return <div className="mc-loading">Loading Mission Control...</div>;
   }
 
   if (error && !snapshot) {
-    return <div className="mc-error">Mission Control failed to load: {error}</div>;
+    return (
+      <div className="mc-error">Mission Control failed to load: {error}</div>
+    );
   }
 
   if (!snapshot) return null;
@@ -492,8 +570,20 @@ export default function MissionControl({
     <MissionControlFiltersContext.Provider value={filters}>
       <div className="mission-control">
         <div className="mc-toolbar">
-          <div className="mc-tabs" role="tablist" aria-label="Mission Control tabs">
-            {(["overview", "activity", "freshness", "telemetry", "matrix"] as const).map((item) => (
+          <div
+            className="mc-tabs"
+            role="tablist"
+            aria-label="Mission Control tabs"
+          >
+            {(
+              [
+                "overview",
+                "activity",
+                "freshness",
+                "telemetry",
+                "matrix",
+              ] as const
+            ).map((item) => (
               <button
                 key={item}
                 className={tab === item ? "active" : ""}
@@ -506,8 +596,12 @@ export default function MissionControl({
             ))}
           </div>
           <div className="mc-filters">
-            <div className="mc-segmented" aria-label="Corpus filter">
-              {(["all", "source", "instance"] as const).map((item) => (
+            <div
+              className="mc-segmented"
+              role="group"
+              aria-label="Environment filter"
+            >
+              {envFilterOptions.map((item) => (
                 <button
                   key={item}
                   className={corpus === item ? "active" : ""}
@@ -544,17 +638,26 @@ export default function MissionControl({
         {tab === "overview" && (
           <div className="mc-grid">
             <HeaderStatus snapshot={snapshot} />
-            <SlaStrip snapshot={snapshot} onOpenQueues={() => onOpenQueues(returnState)} />
+            <SlaStrip
+              snapshot={snapshot}
+              onOpenQueues={() => onOpenQueues(returnState)}
+            />
             <NeedsAttention
               snapshot={snapshot}
-              onOpenRun={(runId, workflowId) => onOpenRun(runId, workflowId, returnState)}
+              onOpenRun={(runId, workflowId) =>
+                onOpenRun(runId, workflowId, returnState)
+              }
               onOpenQueues={() => onOpenQueues(returnState)}
-              onOpenHistory={(workflowId) => onOpenHistory(workflowId, returnState)}
+              onOpenHistory={(workflowId) =>
+                onOpenHistory(workflowId, returnState)
+              }
             />
             <UpcomingRuns snapshot={snapshot} />
             <RecentRuns
               runs={snapshot.recent_runs}
-              onOpenRun={(runId, workflowId) => onOpenRun(runId, workflowId, returnState)}
+              onOpenRun={(runId, workflowId) =>
+                onOpenRun(runId, workflowId, returnState)
+              }
             />
           </div>
         )}
@@ -563,7 +666,9 @@ export default function MissionControl({
           <ActivityList
             title="Live Activity"
             items={snapshot.live_activity}
-            onOpenRun={(runId, workflowId) => onOpenRun(runId, workflowId, returnState)}
+            onOpenRun={(runId, workflowId) =>
+              onOpenRun(runId, workflowId, returnState)
+            }
           />
         )}
 

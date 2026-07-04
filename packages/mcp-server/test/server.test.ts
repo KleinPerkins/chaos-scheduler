@@ -1,0 +1,186 @@
+import { describe, expect, it } from "vitest";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { ChaosSchedulerClient, type FetchLike } from "@chaos-scheduler/sdk";
+import { configFromEnv } from "../src/config.js";
+import { buildServer } from "../src/server.js";
+
+/** Canned backend responses keyed by "METHOD path". */
+function routedFetch(routes: Record<string, unknown>): FetchLike {
+  return async (url, init) => {
+    const path = url.replace("http://127.0.0.1:9618", "");
+    const key = `${init?.method ?? "GET"} ${path}`;
+    const body = routes[key];
+    if (body === undefined) {
+      return {
+        ok: false,
+        status: 404,
+        text: async () => JSON.stringify({ error: `no route ${key}` }),
+      };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  };
+}
+
+const ROUTES: Record<string, unknown> = {
+  "GET /api/v1/version": {
+    product: "Chaos Scheduler",
+    version: "0.1.0",
+    schema_version: 4,
+    api: "v1",
+  },
+  "GET /api/v1/environments": {
+    environments: [{ id: "e1", name: "instance" }],
+  },
+  "GET /api/v1/workflows": {
+    workflows: [
+      { id: "w1", name: "A", environment: "instance", corpus: "instance" },
+    ],
+  },
+  "GET /api/v1/workflows/w1": {
+    workflow: {
+      id: "w1",
+      name: "A",
+      environment: "instance",
+      corpus: "instance",
+    },
+  },
+  "POST /api/v1/workflows/w1/run": {
+    workflow_id: "w1",
+    status: "admitted",
+    run_id: "r1",
+    queued_run_id: null,
+    queue_name: "instance-default",
+  },
+  "GET /api/v1/runs/r1": {
+    run: { id: "r1", workflow_id: "w1", status: "success", exit_code: 0 },
+  },
+};
+
+async function connectedPair(envOverrides: Record<string, string> = {}) {
+  const config = configFromEnv({
+    CHAOS_SCHEDULER_API_KEY: "id.secret",
+    ...envOverrides,
+  });
+  const sdk = new ChaosSchedulerClient({
+    baseUrl: config.baseUrl,
+    apiKey: config.apiKey,
+    fetch: routedFetch(ROUTES),
+  });
+  const server = buildServer({ client: sdk, config });
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test-client", version: "0.0.0" });
+  await Promise.all([
+    server.connect(serverTransport),
+    client.connect(clientTransport),
+  ]);
+  return { client, server };
+}
+
+function textOf(result: {
+  content: Array<{ type: string; text?: string }>;
+}): string {
+  return result.content
+    .filter((c) => c.type === "text")
+    .map((c) => c.text ?? "")
+    .join("\n");
+}
+
+describe("Chaos MCP server", () => {
+  it("registers the expected tools", async () => {
+    const { client } = await connectedPair();
+    const { tools } = await client.listTools();
+    const names = tools.map((t) => t.name).sort();
+    expect(names).toEqual(
+      [
+        "create_environment",
+        "delete_workflow",
+        "dispatch_workflow",
+        "enqueue_workflow",
+        "get_run",
+        "get_version",
+        "get_workflow",
+        "health_check",
+        "list_environments",
+        "list_workflow_runs",
+        "list_workflows",
+        "register_workflow",
+        "run_workflow_now",
+        "set_workflow_spec",
+      ].sort(),
+    );
+  });
+
+  it("registers resources and prompts", async () => {
+    const { client } = await connectedPair();
+    const { resources } = await client.listResources();
+    expect(resources.map((r) => r.uri)).toContain("chaos://environments");
+    expect(resources.map((r) => r.uri)).toContain("chaos://workflows");
+
+    const { prompts } = await client.listPrompts();
+    expect(prompts.map((p) => p.name).sort()).toEqual(
+      [
+        "register_workflow_for_repo",
+        "summarize_workflow_health",
+        "triage_failed_run",
+      ].sort(),
+    );
+  });
+
+  it("get_version tool proxies the backend", async () => {
+    const { client } = await connectedPair();
+    const result = (await client.callTool({
+      name: "get_version",
+      arguments: {},
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(textOf(result)).product).toBe("Chaos Scheduler");
+  });
+
+  it("run_workflow_now dispatches through the SDK", async () => {
+    const { client } = await connectedPair();
+    const result = (await client.callTool({
+      name: "run_workflow_now",
+      arguments: { id: "w1", idempotency_key: "k1" },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(textOf(result)).run_id).toBe("r1");
+  });
+
+  it("blocks writes to a protected environment (guardrail)", async () => {
+    // Make the workflow's environment (instance) protected.
+    const { client } = await connectedPair({
+      CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "instance",
+    });
+    const result = (await client.callTool({
+      name: "run_workflow_now",
+      arguments: { id: "w1" },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/protected/i);
+  });
+
+  it("reads the workflows resource", async () => {
+    const { client } = await connectedPair();
+    const res = await client.readResource({ uri: "chaos://workflows" });
+    const text = (res.contents[0] as { text: string }).text;
+    expect(JSON.parse(text)[0].id).toBe("w1");
+  });
+
+  it("reads a templated run resource", async () => {
+    const { client } = await connectedPair();
+    const res = await client.readResource({ uri: "chaos://runs/r1" });
+    const text = (res.contents[0] as { text: string }).text;
+    expect(JSON.parse(text).status).toBe("success");
+  });
+});

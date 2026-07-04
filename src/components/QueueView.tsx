@@ -11,7 +11,14 @@ import {
   recoverDeadLetter,
   updateQueue,
 } from "../lib/commands";
-import type { BackfillPlan, QueueInfo, QueuedRun, RetentionPreview, SchedulerDeadLetter } from "../lib/commands";
+import { environmentOf } from "../lib/commands";
+import type {
+  BackfillPlan,
+  QueueInfo,
+  QueuedRun,
+  RetentionPreview,
+  SchedulerDeadLetter,
+} from "../lib/commands";
 import "./QueueView.css";
 
 interface QueueDraft {
@@ -83,9 +90,12 @@ export default function QueueView({ onBack }: QueueViewProps) {
   const [backfillUntil, setBackfillUntil] = useState("");
   const [backfillMaxRuns, setBackfillMaxRuns] = useState("10");
   const [backfillPlan, setBackfillPlan] = useState<BackfillPlan | null>(null);
-  const [deadLetterReason, setDeadLetterReason] = useState<Record<string, string>>({});
+  const [deadLetterReason, setDeadLetterReason] = useState<
+    Record<string, string>
+  >({});
   const [retentionDays, setRetentionDays] = useState("90");
-  const [retentionPreview, setRetentionPreview] = useState<RetentionPreview | null>(null);
+  const [retentionPreview, setRetentionPreview] =
+    useState<RetentionPreview | null>(null);
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -173,7 +183,12 @@ export default function QueueView({ onBack }: QueueViewProps) {
   const previewBackfill = async () => {
     setError(null);
     try {
-      const plan = await planBackfill(backfillWorkflowId.trim(), backfillSince, backfillUntil, maxRunsValue());
+      const plan = await planBackfill(
+        backfillWorkflowId.trim(),
+        backfillSince,
+        backfillUntil,
+        maxRunsValue(),
+      );
       setBackfillPlan(plan);
     } catch (e) {
       setError(String(e));
@@ -280,7 +295,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
                 <div className="queue-card-header">
                   <div>
                     <div className="queue-name">{queue.name}</div>
-                    <div className="queue-corpus">{queue.corpus}</div>
+                    <div className="queue-corpus">{environmentOf(queue)}</div>
                   </div>
                   <div className="queue-counts">
                     <span>{queue.active_count} active</span>
@@ -343,7 +358,11 @@ export default function QueueView({ onBack }: QueueViewProps) {
                 </div>
 
                 <div className="queue-card-footer">
-                  <span className={validation ? "queue-validation error" : "queue-validation"}>
+                  <span
+                    className={
+                      validation ? "queue-validation error" : "queue-validation"
+                    }
+                  >
                     {validation ?? `Global cap ${queue.global_parallelism_cap}`}
                   </span>
                   <button
@@ -454,15 +473,24 @@ export default function QueueView({ onBack }: QueueViewProps) {
                     value={deadLetterReason[row.id] ?? ""}
                     placeholder="ack reason"
                     onChange={(e) =>
-                      setDeadLetterReason((current) => ({ ...current, [row.id]: e.target.value }))
+                      setDeadLetterReason((current) => ({
+                        ...current,
+                        [row.id]: e.target.value,
+                      }))
                     }
                   />
                 </span>
                 <span>
-                  <button className="btn btn-ghost btn-sm" onClick={() => acknowledge(row.id)}>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => acknowledge(row.id)}
+                  >
                     Ack
                   </button>
-                  <button className="btn btn-primary btn-sm" onClick={() => recover(row.id)}>
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={() => recover(row.id)}
+                  >
                     Recover
                   </button>
                 </span>
@@ -495,12 +523,17 @@ export default function QueueView({ onBack }: QueueViewProps) {
                 ? `${retentionPreview.candidate_runs} candidate run(s), ${retentionPreview.preserved_dead_letter_runs} dead-letter run(s) preserved`
                 : "Retention cleanup never deletes scheduler_dead_letters evidence."}
             </span>
-            <button className="btn btn-ghost btn-sm" onClick={() => runRetention(true)}>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => runRetention(true)}
+            >
               Dry Run
             </button>
             <button
               className="btn btn-danger btn-sm"
-              disabled={!retentionPreview || retentionPreview.candidate_runs === 0}
+              disabled={
+                !retentionPreview || retentionPreview.candidate_runs === 0
+              }
               onClick={() => runRetention(false)}
             >
               Apply Cleanup
@@ -531,10 +564,12 @@ export default function QueueView({ onBack }: QueueViewProps) {
               <div key={run.id} className="queue-run-row">
                 <span>
                   <strong>{run.workflow_name ?? run.workflow_id}</strong>
-                  <small>{run.corpus}</small>
+                  <small>{environmentOf(run)}</small>
                 </span>
                 <span>{run.queue_name}</span>
-                <span className={`queue-status ${run.status}`}>{run.status}</span>
+                <span className={`queue-status ${run.status}`}>
+                  {run.status}
+                </span>
                 <span>{run.priority}</span>
                 <span>{formatDate(run.queued_at)}</span>
                 <span>

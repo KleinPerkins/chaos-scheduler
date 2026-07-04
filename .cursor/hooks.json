@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeMCPExecution": [
+      {
+        "command": ".cursor/hooks/chaos-scheduler/guard-writes.sh",
+        "matcher": "chaos-scheduler",
+        "failClosed": false
+      }
+    ],
+    "afterMCPExecution": [
+      {
+        "command": ".cursor/hooks/chaos-scheduler/audit.sh",
+        "matcher": "chaos-scheduler",
+        "failClosed": false
+      }
+    ]
+  }
+}

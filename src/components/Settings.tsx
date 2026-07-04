@@ -8,19 +8,31 @@ import {
   getEmailConfig,
   setEmailConfig,
   testEmailConfig,
+  checkForUpdate,
+  applyUpdate,
+  isCommandUnavailable,
   type EmailConfig,
+  type UpdateStatus,
 } from "../lib/commands";
+import { PRODUCT_NAME, EMAIL_FROM_NAME, APP_VERSION } from "../lib/branding";
 import "./Settings.css";
 
 export default function Settings() {
-  const [chaosLabsRoot, setChaosLabsRoot] = useState("(detecting...)");
+  const [workspaceRoot, setWorkspaceRoot] = useState("(detecting...)");
   const [pythonPath, setPythonPath] = useState("(detecting...)");
   const [notifyOnFailure, setNotifyOnFailure] = useState(true);
   const [notifyOnSuccess, setNotifyOnSuccess] = useState(false);
   const [launchAtLogin, setLaunchAtLoginState] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
-  const [statusType, setStatusType] = useState<"info" | "error" | "success">("info");
+  const [statusType, setStatusType] = useState<"info" | "error" | "success">(
+    "info",
+  );
   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [updateInfo, setUpdateInfo] = useState<UpdateStatus | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateApplying, setUpdateApplying] = useState(false);
+  const [updaterUnavailable, setUpdaterUnavailable] = useState(false);
 
   const [emailConfig, setEmailConfigState] = useState<EmailConfig>({
     enabled: false,
@@ -30,7 +42,7 @@ export default function Settings() {
     smtp_user: "",
     smtp_password: "",
     from_address: "",
-    from_name: "Chaos Labs Scheduler",
+    from_name: EMAIL_FROM_NAME,
   });
   const [emailDirty, setEmailDirty] = useState(false);
   const [emailSaving, setEmailSaving] = useState(false);
@@ -39,7 +51,9 @@ export default function Settings() {
   useEffect(() => {
     getAppConfig()
       .then((config) => {
-        setChaosLabsRoot(config.chaos_labs_root);
+        setWorkspaceRoot(
+          config.workspace_root ?? config.chaos_labs_root ?? "(unknown)",
+        );
         setPythonPath(config.python_path);
       })
       .catch(() => {});
@@ -62,7 +76,11 @@ export default function Settings() {
     };
   }, []);
 
-  const showStatus = (msg: string, type: "info" | "error" | "success" = "info", duration = 3000) => {
+  const showStatus = (
+    msg: string,
+    type: "info" | "error" | "success" = "info",
+    duration = 3000,
+  ) => {
     if (statusTimerRef.current) {
       clearTimeout(statusTimerRef.current);
       statusTimerRef.current = null;
@@ -88,20 +106,64 @@ export default function Settings() {
     }
   };
 
+  const handleCheckForUpdate = async () => {
+    setUpdateChecking(true);
+    setUpdaterUnavailable(false);
+    try {
+      const info = await checkForUpdate();
+      setUpdateInfo(info);
+      showStatus(
+        info.available
+          ? `Update available: v${info.latest_version ?? "?"}`
+          : "You are on the latest version.",
+        info.available ? "info" : "success",
+      );
+    } catch (e) {
+      if (isCommandUnavailable(e)) {
+        setUpdaterUnavailable(true);
+        showStatus("Auto-update is not wired up in this build yet.", "info");
+      } else {
+        showStatus(`Update check failed: ${e}`, "error");
+      }
+    } finally {
+      setUpdateChecking(false);
+    }
+  };
+
+  const handleApplyUpdate = async () => {
+    setUpdateApplying(true);
+    try {
+      await applyUpdate();
+      showStatus("Update downloaded — the app will relaunch.", "success", 0);
+    } catch (e) {
+      if (isCommandUnavailable(e)) {
+        setUpdaterUnavailable(true);
+        showStatus("Auto-update is not wired up in this build yet.", "info");
+      } else {
+        showStatus(`Update failed: ${e}`, "error");
+      }
+    } finally {
+      setUpdateApplying(false);
+    }
+  };
+
   const handleLaunchToggle = async (enabled: boolean) => {
     setLaunchAtLoginState(enabled);
     try {
       await setLaunchAtLogin(enabled);
       showStatus(
         enabled ? "Launch at login enabled" : "Launch at login disabled",
-        "success"
+        "success",
       );
     } catch (e) {
       showStatus(`Error: ${e}`, "error");
     }
   };
 
-  const updateEmailField = <K extends keyof EmailConfig>(key: K, value: EmailConfig[K]) => {
+  const updateEmailField = <K extends keyof EmailConfig>(
+    key: K,
+    value: EmailConfig[K],
+  ) => {
     setEmailConfigState((prev) => ({ ...prev, [key]: value }));
     setEmailDirty(true);
   };
@@ -129,7 +191,11 @@ export default function Settings() {
     try {
       const result = await testEmailConfig();
       if (result.success) {
-        showStatus("Test email sent successfully — check your inbox", "success", 5000);
+        showStatus(
+          "Test email sent successfully — check your inbox",
+          "success",
+          5000,
+        );
       } else {
         showStatus(`Test failed: ${result.error}`, "error", 8000);
       }
@@ -165,10 +231,12 @@ export default function Settings() {
         <section className="settings-section">
           <h2 className="settings-section-title">Paths</h2>
           <div className="settings-field">
-            <label className="settings-label">Chaos Labs Root</label>
-            <input type="text" value={chaosLabsRoot} readOnly />
+            <label className="settings-label">Workspace Root</label>
+            <input type="text" value={workspaceRoot} readOnly />
             <span className="settings-hint">
-              Auto-detected. Restart the app to change.
+              Where relative script paths and per-environment working
+              directories resolve. Auto-detected; set
+              CHAOS_SCHEDULER_WORKSPACE_ROOT to override.
             </span>
           </div>
           <div className="settings-field">
@@ -268,7 +336,7 @@ export default function Settings() {
                   <button
                     className={`smtp-preset-btn ${
                       !Object.values(smtpPresets).some(
-                        (p) => p.host === emailConfig.smtp_host
+                        (p) => p.host === emailConfig.smtp_host,
                       )
                         ? "smtp-preset-btn--active"
                         : ""
@@ -301,7 +369,10 @@ export default function Settings() {
                     type="number"
                     value={emailConfig.smtp_port}
                     onChange={(e) =>
-                      updateEmailField("smtp_port", parseInt(e.target.value) || 587)
+                      updateEmailField(
+                        "smtp_port",
+                        parseInt(e.target.value) || 587,
+                      )
                     }
                   />
                 </div>
@@ -369,7 +440,7 @@ export default function Settings() {
                   onChange={(e) =>
                     updateEmailField("from_name", e.target.value)
                   }
-                  placeholder="Chaos Labs Scheduler"
+                  placeholder={EMAIL_FROM_NAME}
                 />
               </div>
 
@@ -398,12 +469,50 @@ export default function Settings() {
               <div className="email-subject-preview">
                 <span className="settings-label">Subject line preview</span>
                 <code className="subject-preview-text">
-                  [Chaos Labs] FAILED: Context Capture |{" "}
+                  [{PRODUCT_NAME}] FAILED: Context Capture |{" "}
                   {new Date().toLocaleDateString("en-CA")}
                 </code>
               </div>
             </div>
           )}
+        </section>
+
+        <section className="settings-section">
+          <h2 className="settings-section-title">Updates</h2>
+          <div className="settings-field">
+            <label className="settings-label">Current version</label>
+            <input type="text" value={`v${APP_VERSION}`} readOnly />
+          </div>
+          <div className="settings-row settings-update-row">
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={handleCheckForUpdate}
+              disabled={updateChecking || updateApplying}
+            >
+              {updateChecking ? "Checking..." : "Check for updates"}
+            </button>
+            {updateInfo?.available && (
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={handleApplyUpdate}
+                disabled={updateApplying}
+              >
+                {updateApplying
+                  ? "Installing..."
+                  : `Install v${updateInfo.latest_version ?? ""} & relaunch`}
+              </button>
+            )}
+          </div>
+          {updateInfo?.available && updateInfo.notes && (
+            <div className="settings-hint settings-release-notes">
+              {updateInfo.notes}
+            </div>
+          )}
+          <span className="settings-hint">
+            {updaterUnavailable
+              ? "Auto-update is not available in this build. Download the latest release manually from GitHub."
+              : "Updates are downloaded from GitHub Releases and signature-verified before install."}
+          </span>
         </section>
 
         <section className="settings-section">

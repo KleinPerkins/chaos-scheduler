@@ -1,0 +1,58 @@
+---
+description: How to drive the Chaos Scheduler from Cursor via the Chaos MCP server (register/inspect workflows, run/enqueue on demand, read run results, triage failures). Apply when the user asks to schedule, run, enqueue, register, or inspect a scheduler workflow/run/environment, or mentions the Chaos Scheduler.
+alwaysApply: false
+---
+
+# Chaos Scheduler (MCP) usage
+
+The **Chaos MCP server** (`chaos-scheduler`) exposes the local Chaos Scheduler's
+REST API as MCP tools, resources, and prompts. Use it instead of shelling out or
+hand-writing HTTP calls.
+
+## When to use
+
+- Registering, updating, or deleting scheduler workflows.
+- Running or enqueueing a workflow on demand (one-off or event-driven).
+- Reading run status, logs, results, and environment/queue state.
+- Triaging a failed run.
+
+## Tools (prefer these)
+
+- **Read:** `list_environments`, `list_workflows`, `get_workflow`,
+  `list_workflow_runs`, `get_run`, `get_version`, `health_check`.
+- **Write:** `create_environment`, `register_workflow`, `set_workflow_spec`,
+  `delete_workflow`, `run_workflow_now`, `enqueue_workflow`, `dispatch_workflow`.
+
+## Conventions
+
+- **Prefer `enqueue_workflow`** over `run_workflow_now` when the scheduler should
+  manage concurrency/admission; use `run_workflow_now` only for true one-offs.
+- **Always pass an `idempotency_key`** (a fresh UUID per logical action) to
+  `run_workflow_now` / `enqueue_workflow` / `dispatch_workflow`. A reused key
+  returns `{ "status": "duplicate", "run_id": ... }` — treat that as success, not
+  a new run.
+- **Registration is authoritative:** workflows created via `register_workflow`
+  are marked `managed_externally=true` (source-of-truth is external). Only change
+  them through the API/MCP, not the UI.
+- **Environments are partitions.** Put a workflow in an existing environment
+  (`instance` by default) unless the user asks for a new one.
+- **Protected environments** (default `prod`, `production`) reject writes unless
+  the server was started with `--allow-protected-writes`. If a write is blocked,
+  surface the guardrail message and ask the user to confirm rather than retrying.
+
+## Reading state via @-references
+
+Read-only state is available as resources for @-referencing:
+`chaos://environments`, `chaos://workflows`, `chaos://workflows/{id}`,
+`chaos://workflows/{id}/runs`, `chaos://runs/{id}`, `chaos://version`.
+
+## Prompts
+
+Reusable templates: `triage_failed_run(run_id)`,
+`summarize_workflow_health(environment)`, `register_workflow_for_repo(repo_path)`.
+
+## Failure triage loop
+
+When a run fails: read it with `get_run` (exit code + stderr tail), inspect the
+owning workflow with `get_workflow`, propose a concrete fix, and only re-run with
+a fresh `idempotency_key` if the failure looks transient.

@@ -10,11 +10,19 @@ fn default_source_corpus() -> String {
     "source".to_string()
 }
 
+fn default_kind() -> String {
+    "generic".to_string()
+}
+
+/// Normalize a mission-control environment filter. Environments are
+/// user-managed, so any non-empty value is accepted verbatim as the partition
+/// to filter on; empty or "all" means no environment filter.
 fn normalize_mission_corpus_filter(value: &str) -> String {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "source" => "source".to_string(),
-        "instance" => "instance".to_string(),
-        _ => "all".to_string(),
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
+        "all".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -49,6 +57,23 @@ pub struct Workflow {
     pub email_on_failure: bool,
     #[serde(default = "default_source_corpus")]
     pub corpus: String,
+    /// First-class environment (partition/queue-scope/filter). Additive over
+    /// `corpus`, which is retained as a shadow for one migration cycle; both
+    /// carry the same value today.
+    #[serde(default = "default_source_corpus")]
+    pub environment: String,
+    /// Governance flag: whether this workflow's definition is owned by an
+    /// external source of truth and therefore read-only in the UI/API.
+    /// Decoupled from `corpus`; backfilled from `corpus == 'source'`.
+    #[serde(default)]
+    pub managed_externally: bool,
+    /// Execution model: `generic` (step-flow) or `typed` (operator).
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// Serialized [`crate::workflow_spec::WorkflowSpec`] (null for legacy
+    /// single-script workflows).
+    #[serde(default)]
+    pub spec_json: Option<String>,
     pub domain: Option<String>,
     #[serde(default = "default_utc")]
     pub timezone: String,
@@ -94,7 +119,7 @@ pub struct SchedulerStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueInfo {
     pub name: String,
-    pub corpus: String,
+    pub environment: String,
     pub capacity: i64,
     pub tag_cap: Option<i64>,
     pub max_queued: Option<i64>,
@@ -111,7 +136,7 @@ pub struct QueuedRun {
     pub workflow_id: String,
     pub workflow_name: Option<String>,
     pub queue_name: String,
-    pub corpus: String,
+    pub environment: String,
     pub priority: i64,
     pub status: String,
     pub queued_at: String,
@@ -321,7 +346,7 @@ pub struct WorkflowResourceSample {
     pub run_id: Option<String>,
     pub workflow_id: String,
     pub queue_name: Option<String>,
-    pub corpus: String,
+    pub environment: String,
     pub pid: Option<i64>,
     pub sampled_at: String,
     pub cpu_percent: Option<f64>,
@@ -351,6 +376,8 @@ pub struct WorkflowTokenUsageRollup {
     pub time_bucket: Option<String>,
     pub workflow_id: Option<String>,
     pub corpus: Option<String>,
+    #[serde(default)]
+    pub environment: Option<String>,
     pub domain: Option<String>,
     pub queue_name: Option<String>,
     pub provider: Option<String>,
@@ -409,6 +436,8 @@ pub struct MissionControlActivityItem {
     pub workflow_id: String,
     pub workflow_name: String,
     pub corpus: String,
+    #[serde(default)]
+    pub environment: String,
     pub domain: String,
     pub status: String,
     pub started_at: String,
@@ -427,6 +456,8 @@ pub struct MissionControlFreshnessItem {
     pub workflow_id: Option<String>,
     pub workflow_name: Option<String>,
     pub corpus: Option<String>,
+    #[serde(default)]
+    pub environment: Option<String>,
     pub domain: String,
     pub attribution: String,
 }
@@ -436,6 +467,8 @@ pub struct MissionControlWorkflowTelemetry {
     pub workflow_id: String,
     pub workflow_name: String,
     pub corpus: String,
+    #[serde(default)]
+    pub environment: String,
     pub domain: String,
     pub max_cpu_percent: Option<f64>,
     pub max_memory_rss_bytes: Option<i64>,
@@ -449,6 +482,8 @@ pub struct MissionControlUpcomingRun {
     pub workflow_id: String,
     pub workflow_name: String,
     pub corpus: String,
+    #[serde(default)]
+    pub environment: String,
     pub domain: String,
     pub trigger_kind: String,
     pub trigger_label: String,
@@ -489,6 +524,8 @@ pub struct NextRun {
     pub workflow_id: String,
     pub workflow_name: String,
     pub corpus: String,
+    #[serde(default)]
+    pub environment: String,
     pub next_time: String,
 }
 
@@ -514,10 +551,46 @@ impl Default for EmailConfig {
             smtp_user: String::new(),
             smtp_password: String::new(),
             from_address: String::new(),
-            from_name: String::from("Chaos Labs Scheduler"),
+            from_name: String::from(crate::branding::EMAIL_FROM_NAME),
         }
     }
 }
+
+/// A user-managed execution environment: the first-class replacement for the
+/// overloaded `corpus`. Partitions queues/telemetry and can carry a default
+/// working directory and queue caps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Environment {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub working_dir: Option<String>,
+    pub default_queue_capacity: Option<i64>,
+    pub default_tag_cap: Option<i64>,
+    pub default_max_queued: Option<i64>,
+    #[serde(default)]
+    pub managed_externally: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// API key metadata surfaced to the UI (never includes the hash/salt/secret).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyInfo {
+    pub id: String,
+    pub name: Option<String>,
+    pub scopes: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub revoked: bool,
+}
+
+/// The schema version this binary understands. Bump this (and add a numbered
+/// migration in [`Database::run_migrations`]) whenever a schema change lands.
+/// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
+/// version than this constant is refused (downgrade guard) so an older binary
+/// never silently corrupts a newer file.
+pub const CURRENT_SCHEMA_VERSION: i64 = 5;
 
 pub struct Database {
     path: String,
@@ -539,12 +612,30 @@ impl Database {
 
     fn conn(&self) -> rusqlite::Result<Connection> {
         let conn = Connection::open(&self.path)?;
+        // WAL improves read/write concurrency (needed once the HTTP API writes
+        // concurrently with the polling engine); busy_timeout avoids spurious
+        // SQLITE_BUSY under contention. journal_mode is persistent per-db but
+        // re-asserting it on each connection is cheap and idempotent.
+        conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(conn)
     }
 
     fn init(&self) -> rusqlite::Result<()> {
         let conn = self.conn()?;
+
+        // Downgrade / open guard: refuse to touch a DB written by a newer schema.
+        let existing_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if existing_version > CURRENT_SCHEMA_VERSION {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                Some(format!(
+                    "scheduler.db schema version {existing_version} is newer than this build supports ({CURRENT_SCHEMA_VERSION}); update the application"
+                )),
+            ));
+        }
+
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS workflows (
                 id TEXT PRIMARY KEY,
@@ -667,7 +758,7 @@ impl Database {
                 smtp_user TEXT DEFAULT '',
                 smtp_password TEXT DEFAULT '',
                 from_address TEXT DEFAULT '',
-                from_name TEXT DEFAULT 'Chaos Labs Scheduler'
+                from_name TEXT DEFAULT 'Chaos Scheduler'
             );
             INSERT OR IGNORE INTO email_config (id) VALUES (1);",
         )?;
@@ -879,7 +970,6 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_idempotency_run_task ON scheduler_idempotency_keys(run_id, task_id);
             CREATE INDEX IF NOT EXISTS idx_checkpoints_run_task ON scheduler_checkpoints(run_id, task_id);
             CREATE INDEX IF NOT EXISTS idx_dead_letters_workflow ON scheduler_dead_letters(workflow_id, last_failure_at);
-            CREATE INDEX IF NOT EXISTS idx_queue_events_queue_time ON queue_events(queue_name, corpus, emitted_at);
             CREATE INDEX IF NOT EXISTS idx_queue_events_run ON queue_events(run_id);
             CREATE INDEX IF NOT EXISTS idx_resource_samples_workflow_time ON workflow_resource_samples(workflow_id, sampled_at);
             CREATE INDEX IF NOT EXISTS idx_resource_samples_run ON workflow_resource_samples(run_id);
@@ -895,70 +985,333 @@ impl Database {
         conn.execute_batch(
             "INSERT OR IGNORE INTO scheduler_config (key, value) VALUES ('global_parallelism_cap', '4');
              INSERT OR IGNORE INTO scheduler_config (key, value) VALUES ('notify_on_failure', 'true');
-             INSERT OR IGNORE INTO scheduler_config (key, value) VALUES ('notify_on_success', 'false');
-             INSERT OR IGNORE INTO queues (name, corpus, capacity) VALUES ('source-default', 'source', 4);
-             INSERT OR IGNORE INTO queues (name, corpus, capacity) VALUES ('instance-default', 'instance', 2);",
+             INSERT OR IGNORE INTO scheduler_config (key, value) VALUES ('notify_on_success', 'false');",
         )?;
+
+        // Apply versioned, transactional migrations (with a pre-migration backup)
+        // on top of the idempotent base schema established above.
+        self.run_migrations(&conn, existing_version)?;
+
+        // Seed default queues AFTER migrations so this always runs against the
+        // final `environment`-keyed queues shape (v5+), never the legacy corpus
+        // shape. Idempotent.
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO queues (name, environment, capacity) VALUES ('source-default', 'source', 4);
+             INSERT OR IGNORE INTO queues (name, environment, capacity) VALUES ('instance-default', 'instance', 2);",
+        )?;
+        Ok(())
+    }
+
+    /// Ordered list of schema migrations. Each entry is `(target_version, apply)`
+    /// where `apply` runs inside its own transaction and is only executed when the
+    /// DB's current `user_version` is below `target_version`. Never renumber or
+    /// mutate a shipped migration — only append. The base schema (v1) is created
+    /// idempotently in [`Database::init`], so this list starts at v2.
+    #[allow(clippy::type_complexity)]
+    fn migrations() -> Vec<(i64, fn(&Connection) -> rusqlite::Result<()>)> {
+        vec![
+            (2, Self::migrate_v2_environments),
+            (3, Self::migrate_v3_workflow_spec),
+            (4, Self::migrate_v4_api_keys),
+            (5, Self::migrate_v5_queue_environment),
+        ]
+    }
+
+    /// v5: promote `environment` to the authoritative partition key across the
+    /// queue/telemetry tables via a deliberate table rebuild (not a best-effort
+    /// ALTER). The `queues` composite primary key becomes `(name, environment)`;
+    /// `queue_events` and `workflow_resource_samples` replace their `corpus`
+    /// column with `environment`. Data is copied `corpus -> environment`.
+    fn migrate_v5_queue_environment(conn: &Connection) -> rusqlite::Result<()> {
+        // --- queues: rebuild PK (name, corpus) -> (name, environment) ---
+        conn.execute_batch(
+            "CREATE TABLE queues_v5 (
+                name TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                capacity INTEGER NOT NULL DEFAULT 1,
+                tag_cap INTEGER,
+                max_queued INTEGER,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (name, environment)
+            );
+            INSERT OR IGNORE INTO queues_v5 (name, environment, capacity, tag_cap, max_queued, created_at, updated_at)
+                SELECT name,
+                       COALESCE(NULLIF(environment, ''), corpus),
+                       capacity, tag_cap, max_queued,
+                       COALESCE(created_at, datetime('now')),
+                       COALESCE(updated_at, datetime('now'))
+                FROM queues;
+            DROP TABLE queues;
+            ALTER TABLE queues_v5 RENAME TO queues;",
+        )?;
+
+        // --- queue_events: corpus -> environment ---
+        conn.execute_batch(
+            "CREATE TABLE queue_events_v5 (
+                id TEXT PRIMARY KEY,
+                queue_name TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                workflow_id TEXT REFERENCES workflows(id) ON DELETE SET NULL,
+                run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+                event_type TEXT NOT NULL,
+                reason TEXT,
+                emitted_at TEXT NOT NULL,
+                details_json TEXT
+            );
+            INSERT INTO queue_events_v5 (id, queue_name, environment, workflow_id, run_id, event_type, reason, emitted_at, details_json)
+                SELECT id, queue_name, corpus, workflow_id, run_id, event_type, reason, emitted_at, details_json
+                FROM queue_events;
+            DROP TABLE queue_events;
+            ALTER TABLE queue_events_v5 RENAME TO queue_events;
+            CREATE INDEX IF NOT EXISTS idx_queue_events_queue_time ON queue_events(queue_name, environment, emitted_at);
+            CREATE INDEX IF NOT EXISTS idx_queue_events_run ON queue_events(run_id);",
+        )?;
+
+        // --- workflow_resource_samples: corpus -> environment ---
+        conn.execute_batch(
+            "CREATE TABLE workflow_resource_samples_v5 (
+                id TEXT PRIMARY KEY,
+                run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+                workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+                queue_name TEXT,
+                environment TEXT NOT NULL,
+                pid INTEGER,
+                sampled_at TEXT NOT NULL,
+                cpu_percent REAL,
+                memory_rss_bytes INTEGER,
+                memory_vms_bytes INTEGER,
+                swap_bytes INTEGER,
+                labels_json TEXT
+            );
+            INSERT INTO workflow_resource_samples_v5 (id, run_id, workflow_id, queue_name, environment, pid, sampled_at, cpu_percent, memory_rss_bytes, memory_vms_bytes, swap_bytes, labels_json)
+                SELECT id, run_id, workflow_id, queue_name, corpus, pid, sampled_at, cpu_percent, memory_rss_bytes, memory_vms_bytes, swap_bytes, labels_json
+                FROM workflow_resource_samples;
+            DROP TABLE workflow_resource_samples;
+            ALTER TABLE workflow_resource_samples_v5 RENAME TO workflow_resource_samples;
+            CREATE INDEX IF NOT EXISTS idx_resource_samples_workflow_time ON workflow_resource_samples(workflow_id, sampled_at);
+            CREATE INDEX IF NOT EXISTS idx_resource_samples_run ON workflow_resource_samples(run_id);",
+        )?;
+
+        Ok(())
+    }
+
+    /// v4: HTTP API key store (salted hashes only — never the plaintext) and an
+    /// audit log of authenticated API requests.
+    fn migrate_v4_api_keys(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS api_keys (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                key_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                scopes TEXT NOT NULL DEFAULT 'read',
+                created_at TEXT DEFAULT (datetime('now')),
+                last_used_at TEXT,
+                revoked INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS api_audit_log (
+                id TEXT PRIMARY KEY,
+                key_id TEXT,
+                method TEXT NOT NULL,
+                path TEXT NOT NULL,
+                status INTEGER NOT NULL,
+                remote TEXT,
+                at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_api_audit_time ON api_audit_log(at);",
+        )?;
+        Ok(())
+    }
+
+    /// v3: add the workflow execution model (`kind` + `spec_json`) and the
+    /// action dead-letter table for exhausted webhook deliveries.
+    fn migrate_v3_workflow_spec(conn: &Connection) -> rusqlite::Result<()> {
+        let _ = conn.execute_batch(
+            "ALTER TABLE workflows ADD COLUMN kind TEXT NOT NULL DEFAULT 'generic';",
+        );
+        let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN spec_json TEXT;");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS action_dead_letters (
+                id TEXT PRIMARY KEY,
+                run_id TEXT,
+                action_kind TEXT NOT NULL,
+                target TEXT,
+                last_error TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_action_dead_letters_run ON action_dead_letters(run_id);",
+        )?;
+        Ok(())
+    }
+
+    /// v2: introduce first-class **environments** and split the overloaded
+    /// `corpus` into a partition (`environment`) + a governance flag
+    /// (`managed_externally`). Additive: `corpus` is preserved as a shadow so
+    /// existing queue/telemetry code keeps working during the transition.
+    fn migrate_v2_environments(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS environments (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT,
+                working_dir TEXT,
+                default_queue_capacity INTEGER,
+                default_tag_cap INTEGER,
+                default_max_queued INTEGER,
+                managed_externally INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );",
+        )?;
+
+        // Additive columns on workflows (ignore if a prior partial run added them).
+        let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN environment TEXT;");
+        let _ = conn.execute_batch(
+            "ALTER TABLE workflows ADD COLUMN managed_externally INTEGER NOT NULL DEFAULT 0;",
+        );
+        // Additive shadow column on queues (composite-PK rebuild to key on
+        // environment is a deliberate, separate migration — see plan; this keeps
+        // corpus authoritative for now while surfacing environment).
+        let _ = conn.execute_batch("ALTER TABLE queues ADD COLUMN environment TEXT;");
+
+        // Backfill from the legacy corpus value.
+        conn.execute_batch(
+            "UPDATE workflows SET environment = corpus WHERE environment IS NULL OR environment = '';
+             UPDATE workflows SET managed_externally = CASE WHEN corpus = 'source' THEN 1 ELSE 0 END;
+             UPDATE queues SET environment = corpus WHERE environment IS NULL OR environment = '';",
+        )?;
+
+        // Seed the two continuity environments plus any distinct corpus values
+        // already present in the data. `source` is externally-managed by default.
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO environments (id, name, managed_externally)
+                VALUES ('source', 'source', 1), ('instance', 'instance', 0);
+             INSERT OR IGNORE INTO environments (id, name)
+                SELECT DISTINCT corpus, corpus FROM workflows
+                WHERE corpus IS NOT NULL AND corpus <> ''
+                  AND corpus NOT IN (SELECT name FROM environments);
+             INSERT OR IGNORE INTO environments (id, name)
+                SELECT DISTINCT corpus, corpus FROM queues
+                WHERE corpus IS NOT NULL AND corpus <> ''
+                  AND corpus NOT IN (SELECT name FROM environments);",
+        )?;
+        Ok(())
+    }
+
+    /// Copy the live DB (including WAL contents) to a timestamped sidecar file
+    /// before mutating migrations run, so a failed/partial upgrade is recoverable.
+    fn backup_before_migration(&self, from_version: i64) -> rusqlite::Result<()> {
+        let backup_path = format!(
+            "{}.pre-migrate-v{}-{}.bak",
+            self.path,
+            from_version,
+            chrono::Utc::now().format("%Y%m%dT%H%M%S")
+        );
+        // VACUUM INTO produces a consistent standalone copy that folds in WAL.
+        let conn = self.conn()?;
+        match conn.execute("VACUUM INTO ?1", params![backup_path]) {
+            Ok(_) => {
+                log::info!("Pre-migration backup written to {backup_path}");
+                Ok(())
+            }
+            Err(err) => {
+                log::error!("Pre-migration backup failed: {err}");
+                Err(err)
+            }
+        }
+    }
+
+    /// Run any pending migrations. Each migration is applied atomically and the
+    /// `user_version` is advanced only on success; a failure rolls back and
+    /// aborts so the DB is never left partially migrated.
+    fn run_migrations(&self, conn: &Connection, from_version: i64) -> rusqlite::Result<()> {
+        let migrations = Self::migrations();
+        let pending: Vec<_> = migrations
+            .into_iter()
+            .filter(|(target, _)| *target > from_version && *target <= CURRENT_SCHEMA_VERSION)
+            .collect();
+
+        if pending.is_empty() {
+            // Baseline / already-current: just record the version stamp (legacy
+            // DBs report user_version=0 even though their schema is current).
+            if from_version < CURRENT_SCHEMA_VERSION {
+                conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+            }
+            return Ok(());
+        }
+
+        // A real data-affecting upgrade is about to run — back up first.
+        self.backup_before_migration(from_version)?;
+
+        for (target, apply) in pending {
+            conn.execute_batch("BEGIN")?;
+            match apply(conn) {
+                Ok(()) => {
+                    conn.pragma_update(None, "user_version", target)?;
+                    conn.execute_batch("COMMIT")?;
+                    log::info!("Applied schema migration to v{target}");
+                }
+                Err(err) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    log::error!("Schema migration to v{target} failed, rolled back: {err}");
+                    return Err(err);
+                }
+            }
+        }
+        conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         Ok(())
     }
 
     pub fn list_workflows(&self) -> rusqlite::Result<Vec<Workflow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config FROM workflows ORDER BY corpus, name"
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), corpus), COALESCE(managed_externally, CASE WHEN corpus = 'source' THEN 1 ELSE 0 END), COALESCE(kind, 'generic'), spec_json FROM workflows ORDER BY corpus, name"
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(Workflow {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                script_path: row.get(3)?,
-                cron_schedule: row.get(4)?,
-                enabled: row.get::<_, i32>(5)? != 0,
-                async_mode: row.get::<_, i32>(6).unwrap_or(0) != 0,
-                last_run_at: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-                email_on_failure: row.get::<_, i32>(10).unwrap_or(1) != 0,
-                timezone: row
-                    .get::<_, String>(11)
-                    .unwrap_or_else(|_| "UTC".to_string()),
-                corpus: row
-                    .get::<_, String>(12)
-                    .unwrap_or_else(|_| "source".to_string()),
-                domain: row.get(13).unwrap_or(None),
-                trigger_config: row.get(14).unwrap_or(None),
-                queue_config: row.get(15).unwrap_or(None),
-            })
-        })?;
+        let rows = stmt.query_map([], Self::row_to_workflow)?;
         rows.collect()
+    }
+
+    /// Shared projection decoder for the standard workflow column list used by
+    /// `list_workflows`, `get_workflow`, and `list_workflows_filtered`.
+    fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
+        let corpus = row
+            .get::<_, String>(12)
+            .unwrap_or_else(|_| "source".to_string());
+        Ok(Workflow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            script_path: row.get(3)?,
+            cron_schedule: row.get(4)?,
+            enabled: row.get::<_, i32>(5)? != 0,
+            async_mode: row.get::<_, i32>(6).unwrap_or(0) != 0,
+            last_run_at: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+            email_on_failure: row.get::<_, i32>(10).unwrap_or(1) != 0,
+            timezone: row
+                .get::<_, String>(11)
+                .unwrap_or_else(|_| "UTC".to_string()),
+            environment: row.get::<_, String>(16).unwrap_or_else(|_| corpus.clone()),
+            managed_externally: row.get::<_, i32>(17).unwrap_or(0) != 0,
+            kind: row
+                .get::<_, String>(18)
+                .unwrap_or_else(|_| "generic".to_string()),
+            spec_json: row.get(19).unwrap_or(None),
+            corpus,
+            domain: row.get(13).unwrap_or(None),
+            trigger_config: row.get(14).unwrap_or(None),
+            queue_config: row.get(15).unwrap_or(None),
+        })
     }
 
     pub fn get_workflow(&self, id: &str) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config FROM workflows WHERE id = ?1",
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), corpus), COALESCE(managed_externally, CASE WHEN corpus = 'source' THEN 1 ELSE 0 END), COALESCE(kind, 'generic'), spec_json FROM workflows WHERE id = ?1",
             params![id],
-            |row| {
-                Ok(Workflow {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    description: row.get(2)?,
-                    script_path: row.get(3)?,
-                    cron_schedule: row.get(4)?,
-                    enabled: row.get::<_, i32>(5)? != 0,
-                    async_mode: row.get::<_, i32>(6).unwrap_or(0) != 0,
-                    last_run_at: row.get(7)?,
-                    created_at: row.get(8)?,
-                    updated_at: row.get(9)?,
-                    email_on_failure: row.get::<_, i32>(10).unwrap_or(1) != 0,
-                    timezone: row.get::<_, String>(11).unwrap_or_else(|_| "UTC".to_string()),
-                    corpus: row.get::<_, String>(12).unwrap_or_else(|_| "source".to_string()),
-                    domain: row.get(13).unwrap_or(None),
-                    trigger_config: row.get(14).unwrap_or(None),
-                    queue_config: row.get(15).unwrap_or(None),
-                })
-            },
+            Self::row_to_workflow,
         )
     }
 
@@ -971,6 +1324,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // Column-per-arg persistence writer.
     pub fn create_workflow(
         &self,
         name: &str,
@@ -987,13 +1341,15 @@ impl Database {
     ) -> rusqlite::Result<Workflow> {
         let id = uuid::Uuid::new_v4().to_string();
         let conn = self.conn()?;
+        let managed = if corpus == "source" { 1 } else { 0 };
         conn.execute(
-            "INSERT INTO workflows (id, name, description, script_path, cron_schedule, async_mode, email_on_failure, timezone, corpus, domain, trigger_config, queue_config) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![id, name, description, script_path, cron_schedule, async_mode as i32, email_on_failure as i32, timezone, corpus, domain, trigger_config, queue_config],
+            "INSERT INTO workflows (id, name, description, script_path, cron_schedule, async_mode, email_on_failure, timezone, corpus, environment, managed_externally, domain, trigger_config, queue_config) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![id, name, description, script_path, cron_schedule, async_mode as i32, email_on_failure as i32, timezone, corpus, corpus, managed, domain, trigger_config, queue_config],
         )?;
         self.get_workflow(&id)
     }
 
+    #[allow(clippy::too_many_arguments)] // Column-per-arg persistence writer.
     pub fn update_workflow(
         &self,
         id: &str,
@@ -1012,10 +1368,266 @@ impl Database {
     ) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
         conn.execute(
-            "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, corpus = ?10, domain = ?11, trigger_config = ?12, queue_config = ?13, updated_at = datetime('now') WHERE id = ?1",
+            "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, corpus = ?10, environment = ?10, domain = ?11, trigger_config = ?12, queue_config = ?13, updated_at = datetime('now') WHERE id = ?1",
             params![id, name, description, script_path, cron_schedule, enabled as i32, async_mode as i32, email_on_failure as i32, timezone, corpus, domain, trigger_config, queue_config],
         )?;
         self.get_workflow(id)
+    }
+
+    /// Set a workflow's authoritative `environment` (partition). Used when a
+    /// UI/API caller targets an environment distinct from the legacy corpus.
+    pub fn set_workflow_environment(&self, id: &str, environment: &str) -> rusqlite::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE workflows SET environment = ?2, updated_at = datetime('now') WHERE id = ?1",
+            params![id, environment],
+        )?;
+        Ok(())
+    }
+
+    /// Explicitly set the governance flag, decoupled from `corpus`. Used by the
+    /// API registration path to mark a workflow externally-managed regardless of
+    /// its environment.
+    pub fn set_workflow_managed_externally(&self, id: &str, managed: bool) -> rusqlite::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE workflows SET managed_externally = ?2, updated_at = datetime('now') WHERE id = ?1",
+            params![id, managed as i32],
+        )?;
+        Ok(())
+    }
+
+    /// Persist a workflow's execution model + validated spec blob.
+    pub fn set_workflow_spec(
+        &self,
+        id: &str,
+        kind: &str,
+        spec_json: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE workflows SET kind = ?2, spec_json = ?3, updated_at = datetime('now') WHERE id = ?1",
+            params![id, kind, spec_json],
+        )?;
+        Ok(())
+    }
+
+    /// Record an exhausted action delivery (e.g. a webhook that failed all
+    /// retries) for later inspection/triage.
+    pub fn record_action_dead_letter(
+        &self,
+        run_id: &str,
+        action_kind: &str,
+        target: &str,
+        last_error: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn()?;
+        let id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO action_dead_letters (id, run_id, action_kind, target, last_error) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, run_id, action_kind, target, last_error],
+        )?;
+        Ok(())
+    }
+
+    /// List API key metadata (never the hash/salt/secret).
+    pub fn list_api_keys(&self) -> rusqlite::Result<Vec<ApiKeyInfo>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, scopes, created_at, last_used_at, revoked FROM api_keys ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ApiKeyInfo {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                scopes: row.get(2)?,
+                created_at: row.get(3)?,
+                last_used_at: row.get(4)?,
+                revoked: row.get::<_, i32>(5)? != 0,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Revoke an API key (soft-delete). Returns rows affected.
+    pub fn revoke_api_key(&self, id: &str) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        conn.execute("UPDATE api_keys SET revoked = 1 WHERE id = ?1", params![id])
+    }
+
+    /// Insert a pre-hashed API key record. Returns the generated key id.
+    pub fn insert_api_key(
+        &self,
+        name: Option<&str>,
+        key_hash: &str,
+        salt: &str,
+        scopes: &str,
+    ) -> rusqlite::Result<String> {
+        let id = format!("key_{}", uuid::Uuid::new_v4().simple());
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO api_keys (id, name, key_hash, salt, scopes) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, name, key_hash, salt, scopes],
+        )?;
+        Ok(id)
+    }
+
+    /// Fetch the salt/hash/scopes for a key id (only if not revoked).
+    pub fn get_api_key(&self, id: &str) -> rusqlite::Result<Option<(String, String, String)>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT key_hash, salt, scopes FROM api_keys WHERE id = ?1 AND revoked = 0",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+    }
+
+    pub fn touch_api_key(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE api_keys SET last_used_at = datetime('now') WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_api_audit(
+        &self,
+        key_id: Option<&str>,
+        method: &str,
+        path: &str,
+        status: u16,
+        remote: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn()?;
+        let id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO api_audit_log (id, key_id, method, path, status, remote) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, key_id, method, path, status as i64, remote],
+        )?;
+        Ok(())
+    }
+
+    /// Look up the run id previously recorded for an idempotency key, if any.
+    pub fn get_idempotency_run_id(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT run_id FROM scheduler_idempotency_keys WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(|opt| opt.flatten())
+    }
+
+    fn row_to_environment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Environment> {
+        Ok(Environment {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            working_dir: row.get(3)?,
+            default_queue_capacity: row.get(4)?,
+            default_tag_cap: row.get(5)?,
+            default_max_queued: row.get(6)?,
+            managed_externally: row.get::<_, i32>(7).unwrap_or(0) != 0,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+        })
+    }
+
+    const ENVIRONMENT_COLUMNS: &'static str =
+        "id, name, description, working_dir, default_queue_capacity, default_tag_cap, default_max_queued, managed_externally, created_at, updated_at";
+
+    pub fn list_environments(&self) -> rusqlite::Result<Vec<Environment>> {
+        let conn = self.conn()?;
+        let sql = format!(
+            "SELECT {} FROM environments ORDER BY name",
+            Self::ENVIRONMENT_COLUMNS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], Self::row_to_environment)?;
+        rows.collect()
+    }
+
+    pub fn get_environment(&self, id: &str) -> rusqlite::Result<Environment> {
+        let conn = self.conn()?;
+        let sql = format!(
+            "SELECT {} FROM environments WHERE id = ?1",
+            Self::ENVIRONMENT_COLUMNS
+        );
+        conn.query_row(&sql, params![id], Self::row_to_environment)
+    }
+
+    pub fn get_environment_by_name(&self, name: &str) -> rusqlite::Result<Option<Environment>> {
+        let conn = self.conn()?;
+        let sql = format!(
+            "SELECT {} FROM environments WHERE name = ?1",
+            Self::ENVIRONMENT_COLUMNS
+        );
+        conn.query_row(&sql, params![name], Self::row_to_environment)
+            .optional()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_environment(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        working_dir: Option<&str>,
+        default_queue_capacity: Option<i64>,
+        default_tag_cap: Option<i64>,
+        default_max_queued: Option<i64>,
+        managed_externally: bool,
+    ) -> rusqlite::Result<Environment> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO environments (id, name, description, working_dir, default_queue_capacity, default_tag_cap, default_max_queued, managed_externally) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, name, description, working_dir, default_queue_capacity, default_tag_cap, default_max_queued, managed_externally as i32],
+        )?;
+        self.get_environment(&id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_environment(
+        &self,
+        id: &str,
+        name: &str,
+        description: Option<&str>,
+        working_dir: Option<&str>,
+        default_queue_capacity: Option<i64>,
+        default_tag_cap: Option<i64>,
+        default_max_queued: Option<i64>,
+    ) -> rusqlite::Result<Environment> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE environments SET name = ?2, description = ?3, working_dir = ?4, default_queue_capacity = ?5, default_tag_cap = ?6, default_max_queued = ?7, updated_at = datetime('now') WHERE id = ?1",
+            params![id, name, description, working_dir, default_queue_capacity, default_tag_cap, default_max_queued],
+        )?;
+        self.get_environment(id)
+    }
+
+    /// Number of workflows currently assigned to an environment (by name).
+    pub fn count_workflows_in_environment(&self, name: &str) -> rusqlite::Result<i64> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM workflows WHERE COALESCE(NULLIF(environment, ''), corpus) = ?1",
+            params![name],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn delete_environment(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM environments WHERE id = ?1", params![id])?;
+        Ok(())
     }
 
     pub fn delete_workflow(&self, id: &str) -> rusqlite::Result<()> {
@@ -1058,6 +1670,7 @@ impl Database {
         self.get_run(&id)
     }
 
+    #[allow(clippy::too_many_arguments)] // Column-per-arg persistence writer.
     pub fn create_terminal_run_with_context(
         &self,
         workflow_id: &str,
@@ -1338,6 +1951,7 @@ impl Database {
         Ok(asset_id)
     }
 
+    #[allow(clippy::too_many_arguments)] // Column-per-arg persistence writer.
     pub fn insert_run_asset(
         &self,
         run_id: &str,
@@ -1362,6 +1976,7 @@ impl Database {
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // Column-per-arg persistence writer.
     pub fn insert_run_asset_with_freshness(
         &self,
         run_id: &str,
@@ -1688,7 +2303,7 @@ impl Database {
              LEFT JOIN runs r ON r.id = d.run_id
              WHERE d.id = ?1",
             params![id],
-            |row| Self::scheduler_dead_letter_from_row(row),
+            Self::scheduler_dead_letter_from_row,
         )
     }
 
@@ -1732,10 +2347,11 @@ impl Database {
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // Column-per-arg persistence writer.
     pub fn insert_queue_event(
         &self,
         queue_name: &str,
-        corpus: &str,
+        environment: &str,
         workflow_id: Option<&str>,
         run_id: Option<&str>,
         event_type: &str,
@@ -1747,9 +2363,9 @@ impl Database {
         let details_json = json_to_string(details)?;
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO queue_events (id, queue_name, corpus, workflow_id, run_id, event_type, reason, emitted_at, details_json)
+            "INSERT INTO queue_events (id, queue_name, environment, workflow_id, run_id, event_type, reason, emitted_at, details_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![id, queue_name, corpus, workflow_id, run_id, event_type, reason, emitted_at, details_json],
+            params![id, queue_name, environment, workflow_id, run_id, event_type, reason, emitted_at, details_json],
         )?;
         Ok(id)
     }
@@ -1767,14 +2383,14 @@ impl Database {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO workflow_resource_samples (
-                id, run_id, workflow_id, queue_name, corpus, pid, sampled_at, cpu_percent, memory_rss_bytes, memory_vms_bytes, swap_bytes, labels_json
+                id, run_id, workflow_id, queue_name, environment, pid, sampled_at, cpu_percent, memory_rss_bytes, memory_vms_bytes, swap_bytes, labels_json
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 id,
                 sample.run_id.as_deref(),
                 &sample.workflow_id,
                 sample.queue_name.as_deref(),
-                &sample.corpus,
+                &sample.environment,
                 sample.pid,
                 &sample.sampled_at,
                 sample.cpu_percent,
@@ -1869,7 +2485,7 @@ impl Database {
              LEFT JOIN workflows w ON r.workflow_id = w.id
              WHERE (?1 = 'all' OR r.status = ?1)
                AND (?2 = 'all' OR COALESCE(r.trigger_kind, 'cron') = ?2)
-               AND (?3 = 'all' OR w.corpus = ?3)
+               AND (?3 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?3)
                AND (?4 = 'all'
                  OR (?4 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?4)
@@ -1966,38 +2582,15 @@ impl Database {
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), corpus), COALESCE(managed_externally, CASE WHEN corpus = 'source' THEN 1 ELSE 0 END), COALESCE(kind, 'generic'), spec_json
              FROM workflows w
-             WHERE (?1 = 'all' OR w.corpus = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)
              ORDER BY w.corpus, COALESCE(NULLIF(TRIM(w.domain), ''), 'Unowned'), w.name",
         )?;
-        let rows = stmt.query_map(params![corpus_filter, domain_filter], |row| {
-            Ok(Workflow {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                script_path: row.get(3)?,
-                cron_schedule: row.get(4)?,
-                enabled: row.get::<_, i32>(5)? != 0,
-                async_mode: row.get::<_, i32>(6).unwrap_or(0) != 0,
-                last_run_at: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-                email_on_failure: row.get::<_, i32>(10).unwrap_or(1) != 0,
-                timezone: row
-                    .get::<_, String>(11)
-                    .unwrap_or_else(|_| "UTC".to_string()),
-                corpus: row
-                    .get::<_, String>(12)
-                    .unwrap_or_else(|_| "source".to_string()),
-                domain: row.get(13).unwrap_or(None),
-                trigger_config: row.get(14).unwrap_or(None),
-                queue_config: row.get(15).unwrap_or(None),
-            })
-        })?;
+        let rows = stmt.query_map(params![corpus_filter, domain_filter], Self::row_to_workflow)?;
         rows.collect()
     }
 
@@ -2010,7 +2603,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT COALESCE(NULLIF(TRIM(domain), ''), 'Unowned') AS owner, COUNT(*)
              FROM workflows
-             WHERE (?1 = 'all' OR corpus = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(environment, ''), corpus) = ?1)
              GROUP BY owner
              ORDER BY CASE owner WHEN 'Unowned' THEN 1 ELSE 0 END, owner",
         )?;
@@ -2050,7 +2643,7 @@ impl Database {
                 (SELECT COUNT(*)
                    FROM queued_runs q JOIN workflows qw ON qw.id = q.workflow_id
                   WHERE q.status IN ('queued', 'admitted')
-                    AND (?1 = 'all' OR qw.corpus = ?1)
+                    AND (?1 = 'all' OR COALESCE(NULLIF(qw.environment, ''), qw.corpus) = ?1)
                     AND (?2 = 'all'
                       OR (?2 = '__unowned__' AND (qw.domain IS NULL OR TRIM(qw.domain) = ''))
                       OR TRIM(qw.domain) = ?2)) AS queued_count,
@@ -2059,7 +2652,7 @@ impl Database {
                          THEN 1 ELSE 0 END) AS recent_failures
              FROM workflows w
              LEFT JOIN runs r ON r.workflow_id = w.id
-             WHERE (?1 = 'all' OR w.corpus = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
@@ -2091,7 +2684,7 @@ impl Database {
              JOIN workflows w ON w.id = r.workflow_id
              WHERE datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', '-1 day')
                AND r.status IN ('success', 'succeeded', 'failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
-               AND (?1 = 'all' OR w.corpus = ?1)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
@@ -2105,7 +2698,7 @@ impl Database {
                  JOIN workflows w ON w.id = q.workflow_id
                  WHERE q.admitted_at IS NOT NULL
                    AND datetime(q.queued_at) >= datetime('now', '-1 day')
-                   AND (?1 = 'all' OR w.corpus = ?1)
+                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
                    AND (?2 = 'all'
                      OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                      OR TRIM(w.domain) = ?2)
@@ -2116,7 +2709,7 @@ impl Database {
                    JOIN workflows mw ON mw.id = mq.workflow_id
                    WHERE mq.admitted_at IS NOT NULL
                      AND datetime(mq.queued_at) >= datetime('now', '-1 day')
-                     AND (?1 = 'all' OR mw.corpus = ?1)
+                     AND (?1 = 'all' OR COALESCE(NULLIF(mw.environment, ''), mw.corpus) = ?1)
                      AND (?2 = 'all'
                        OR (?2 = '__unowned__' AND (mw.domain IS NULL OR TRIM(mw.domain) = ''))
                        OR TRIM(mw.domain) = ?2)
@@ -2129,7 +2722,7 @@ impl Database {
             "SELECT COUNT(*)
              FROM queued_runs q JOIN workflows w ON w.id = q.workflow_id
              WHERE q.status = 'queued'
-               AND (?1 = 'all' OR w.corpus = ?1)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
@@ -2162,7 +2755,7 @@ impl Database {
             "SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis, r.trigger_kind, r.trigger_payload, r.upstream_run_id, r.input_json, r.rerun_of_run_id
              FROM runs r
              JOIN workflows w ON w.id = r.workflow_id
-             WHERE (?1 = 'all' OR w.corpus = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)
@@ -2201,7 +2794,7 @@ impl Database {
              FROM latest_terminal r
              JOIN workflows w ON w.id = r.workflow_id
              WHERE r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
-               AND (?1 = 'all' OR w.corpus = ?1)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)
@@ -2239,7 +2832,7 @@ impl Database {
              FROM latest_terminal r
              JOIN workflows w ON w.id = r.workflow_id
              WHERE r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
-               AND (?1 = 'all' OR w.corpus = ?1)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
@@ -2261,7 +2854,7 @@ impl Database {
             "SELECT r.id, r.workflow_id, w.name, w.corpus, w.domain, r.status, r.started_at, r.finished_at
              FROM runs r
              JOIN workflows w ON w.id = r.workflow_id
-             WHERE (?1 = 'all' OR w.corpus = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)
@@ -2270,11 +2863,13 @@ impl Database {
         )?;
         let rows = stmt.query_map(params![corpus_filter, domain_filter, limit], |row| {
             let run_id: String = row.get(0)?;
+            let corpus: String = row.get(3)?;
             Ok(MissionControlActivityItem {
                 id: run_id.clone(),
                 workflow_id: row.get(1)?,
                 workflow_name: row.get(2)?,
-                corpus: row.get(3)?,
+                environment: corpus.clone(),
+                corpus,
                 domain: owner_label(row.get(4)?),
                 status: row.get(5)?,
                 started_at: row.get(6)?,
@@ -2305,7 +2900,7 @@ impl Database {
              WHERE (a.last_written_at IS NULL OR datetime(a.last_written_at) <= datetime('now', ?3))
                AND (
                  (w.id IS NOT NULL
-                   AND (?1 = 'all' OR w.corpus = ?1)
+                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
                    AND (?2 = 'all'
                      OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                      OR TRIM(w.domain) = ?2))
@@ -2327,6 +2922,7 @@ impl Database {
                     last_written_at: row.get(5)?,
                     workflow_id: workflow_id.clone(),
                     workflow_name: row.get(7)?,
+                    environment: row.get(8)?,
                     corpus: row.get(8)?,
                     domain: owner_label(row.get(9)?),
                     attribution: if workflow_id.is_some() {
@@ -2355,7 +2951,7 @@ impl Database {
                 SELECT w.id, w.name, w.corpus, w.domain
                 FROM workflows w
                 WHERE w.enabled = 1
-                  AND (?1 = 'all' OR w.corpus = ?1)
+                  AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
                   AND (?2 = 'all'
                     OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                     OR TRIM(w.domain) = ?2)
@@ -2395,10 +2991,12 @@ impl Database {
         let rows = stmt.query_map(
             params![corpus_filter, domain_filter, window_modifier, limit],
             |row| {
+                let corpus: String = row.get(2)?;
                 Ok(MissionControlWorkflowTelemetry {
                     workflow_id: row.get(0)?,
                     workflow_name: row.get(1)?,
-                    corpus: row.get(2)?,
+                    environment: corpus.clone(),
+                    corpus,
                     domain: owner_label(row.get(3)?),
                     max_cpu_percent: row.get(4)?,
                     max_memory_rss_bytes: row.get(5)?,
@@ -2448,7 +3046,7 @@ impl Database {
     ) -> rusqlite::Result<Vec<WorkflowResourceSample>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, workflow_id, queue_name, corpus, pid, sampled_at, cpu_percent, memory_rss_bytes, memory_vms_bytes, swap_bytes, labels_json
+            "SELECT id, run_id, workflow_id, queue_name, environment, pid, sampled_at, cpu_percent, memory_rss_bytes, memory_vms_bytes, swap_bytes, labels_json
              FROM workflow_resource_samples
              WHERE workflow_id = ?1 AND datetime(sampled_at) >= datetime('now', ?2)
              ORDER BY sampled_at ASC",
@@ -2532,6 +3130,7 @@ impl Database {
             Ok(WorkflowTokenUsageRollup {
                 time_bucket: row.get(0)?,
                 workflow_id: row.get(1)?,
+                environment: row.get(2)?,
                 corpus: row.get(2)?,
                 domain: row.get(3)?,
                 queue_name: row.get(4)?,
@@ -2780,11 +3379,11 @@ impl Database {
         }
     }
 
-    pub fn queue_capacity(&self, queue_name: &str, corpus: &str) -> rusqlite::Result<i64> {
+    pub fn queue_capacity(&self, queue_name: &str, environment: &str) -> rusqlite::Result<i64> {
         let conn = self.conn()?;
         let mut stmt =
-            conn.prepare("SELECT capacity FROM queues WHERE name = ?1 AND corpus = ?2")?;
-        let mut rows = stmt.query(params![queue_name, corpus])?;
+            conn.prepare("SELECT capacity FROM queues WHERE name = ?1 AND environment = ?2")?;
+        let mut rows = stmt.query(params![queue_name, environment])?;
         if let Some(row) = rows.next()? {
             let capacity: i64 = row.get(0)?;
             Ok(capacity.max(1))
@@ -2793,11 +3392,15 @@ impl Database {
         }
     }
 
-    pub fn queue_tag_cap(&self, queue_name: &str, corpus: &str) -> rusqlite::Result<Option<i64>> {
+    pub fn queue_tag_cap(
+        &self,
+        queue_name: &str,
+        environment: &str,
+    ) -> rusqlite::Result<Option<i64>> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT tag_cap FROM queues WHERE name = ?1 AND corpus = ?2",
-            params![queue_name, corpus],
+            "SELECT tag_cap FROM queues WHERE name = ?1 AND environment = ?2",
+            params![queue_name, environment],
             |row| row.get(0),
         )
         .optional()
@@ -2856,6 +3459,12 @@ impl Database {
             |row| row.get(0),
         )
         .optional()
+    }
+
+    /// Public accessor for a scheduler_config string value (used by the HTTP API
+    /// to read, e.g., the inbound webhook secret).
+    pub fn get_scheduler_config(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        self.get_string_config(key)
     }
 
     pub fn get_notification_prefs(&self) -> rusqlite::Result<(bool, bool)> {
@@ -2937,8 +3546,9 @@ impl Database {
         if global_cap < 1 {
             errors.push("global_parallelism_cap must be >= 1".to_string());
         }
-        let mut stmt = conn
-            .prepare("SELECT name, corpus, capacity, tag_cap FROM queues ORDER BY corpus, name")?;
+        let mut stmt = conn.prepare(
+            "SELECT name, environment, capacity, tag_cap FROM queues ORDER BY environment, name",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -2948,8 +3558,8 @@ impl Database {
             ))
         })?;
         for row in rows {
-            let (name, corpus, capacity, tag_cap) = row?;
-            let label = format!("{}/{}", corpus, name);
+            let (name, environment, capacity, tag_cap) = row?;
+            let label = format!("{}/{}", environment, name);
             if capacity < 1 {
                 errors.push(format!("queue {} capacity must be >= 1", label));
             }
@@ -2978,16 +3588,16 @@ impl Database {
         let conn = self.conn()?;
         let global_cap = self.global_parallelism_cap()?;
         let mut stmt = conn.prepare(
-            "SELECT name, corpus, capacity, tag_cap, max_queued, updated_at FROM queues ORDER BY corpus, name",
+            "SELECT name, environment, capacity, tag_cap, max_queued, updated_at FROM queues ORDER BY environment, name",
         )?;
         let rows = stmt.query_map([], |row| {
             let name: String = row.get(0)?;
-            let corpus: String = row.get(1)?;
+            let environment: String = row.get(1)?;
             Ok(QueueInfo {
-                active_count: self.running_count_for_queue(&name, &corpus)?,
-                queued_count: self.queued_count_for_queue(&name, &corpus)?,
+                active_count: self.running_count_for_queue(&name, &environment)?,
+                queued_count: self.queued_count_for_queue(&name, &environment)?,
                 name,
-                corpus,
+                environment,
                 capacity: row.get(2)?,
                 tag_cap: row.get(3)?,
                 max_queued: row.get(4)?,
@@ -3001,14 +3611,14 @@ impl Database {
     pub fn upsert_queue(
         &self,
         name: &str,
-        corpus: &str,
+        environment: &str,
         capacity: i64,
         tag_cap: Option<i64>,
         max_queued: Option<i64>,
     ) -> rusqlite::Result<QueueInfo> {
         validate_queue_values(
             name,
-            corpus,
+            environment,
             capacity,
             tag_cap,
             max_queued,
@@ -3016,33 +3626,33 @@ impl Database {
         )?;
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO queues (name, corpus, capacity, tag_cap, max_queued, updated_at)
+            "INSERT INTO queues (name, environment, capacity, tag_cap, max_queued, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
-             ON CONFLICT(name, corpus) DO UPDATE SET
+             ON CONFLICT(name, environment) DO UPDATE SET
                capacity = excluded.capacity,
                tag_cap = excluded.tag_cap,
                max_queued = excluded.max_queued,
                updated_at = datetime('now')",
-            params![name, corpus, capacity, tag_cap, max_queued],
+            params![name, environment, capacity, tag_cap, max_queued],
         )?;
-        self.get_queue(name, corpus)
+        self.get_queue(name, environment)
     }
 
-    pub fn get_queue(&self, name: &str, corpus: &str) -> rusqlite::Result<QueueInfo> {
+    pub fn get_queue(&self, name: &str, environment: &str) -> rusqlite::Result<QueueInfo> {
         let global_cap = self.global_parallelism_cap()?;
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT name, corpus, capacity, tag_cap, max_queued, updated_at FROM queues WHERE name = ?1 AND corpus = ?2",
-            params![name, corpus],
+            "SELECT name, environment, capacity, tag_cap, max_queued, updated_at FROM queues WHERE name = ?1 AND environment = ?2",
+            params![name, environment],
             |row| {
                 Ok(QueueInfo {
                     name: row.get(0)?,
-                    corpus: row.get(1)?,
+                    environment: row.get(1)?,
                     capacity: row.get(2)?,
                     tag_cap: row.get(3)?,
                     max_queued: row.get(4)?,
-                    active_count: self.running_count_for_queue(name, corpus)?,
-                    queued_count: self.queued_count_for_queue(name, corpus)?,
+                    active_count: self.running_count_for_queue(name, environment)?,
+                    queued_count: self.queued_count_for_queue(name, environment)?,
                     global_parallelism_cap: global_cap,
                     updated_at: row.get(5)?,
                 })
@@ -3053,7 +3663,7 @@ impl Database {
     pub fn list_queued_runs(&self, limit: i64) -> rusqlite::Result<Vec<QueuedRun>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, w.corpus, q.priority, q.status, q.queued_at, q.admitted_at, q.finished_at,
+            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, COALESCE(NULLIF(w.environment, ''), w.corpus), q.priority, q.status, q.queued_at, q.admitted_at, q.finished_at,
                     q.trigger_kind, q.trigger_payload, q.upstream_run_id, q.input_json, q.rerun_of_run_id
              FROM queued_runs q
              LEFT JOIN workflows w ON q.workflow_id = w.id
@@ -3070,7 +3680,7 @@ impl Database {
                 workflow_id: row.get(2)?,
                 workflow_name: row.get(3)?,
                 queue_name: row.get(4)?,
-                corpus: row
+                environment: row
                     .get::<_, Option<String>>(5)?
                     .unwrap_or_else(|| "source".to_string()),
                 priority: row.get(6)?,
@@ -3132,7 +3742,7 @@ impl Database {
     ) -> rusqlite::Result<Option<QueuedRun>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, w.corpus, q.priority,
+            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, COALESCE(NULLIF(w.environment, ''), w.corpus), q.priority,
                     q.status, q.queued_at, q.admitted_at, q.finished_at, q.trigger_kind,
                     q.trigger_payload, q.upstream_run_id, q.input_json, q.rerun_of_run_id
              FROM queued_runs q
@@ -3160,7 +3770,7 @@ impl Database {
                     workflow_id: row.get(2)?,
                     workflow_name: row.get(3)?,
                     queue_name: row.get(4)?,
-                    corpus: row
+                    environment: row
                         .get::<_, Option<String>>(5)?
                         .unwrap_or_else(|| "source".to_string()),
                     priority: row.get(6)?,
@@ -3253,13 +3863,13 @@ impl Database {
         let workflow = self.get_workflow(workflow_id)?;
         let max_queued: Option<i64> = conn
             .query_row(
-                "SELECT max_queued FROM queues WHERE name = ?1 AND corpus = ?2",
-                params![queue_name, workflow.corpus],
+                "SELECT max_queued FROM queues WHERE name = ?1 AND environment = ?2",
+                params![queue_name, workflow.environment],
                 |row| row.get(0),
             )
             .unwrap_or(None);
         if let Some(max_queued) = max_queued {
-            if self.queued_count_for_queue(queue_name, &workflow.corpus)? >= max_queued {
+            if self.queued_count_for_queue(queue_name, &workflow.environment)? >= max_queued {
                 return Err(rusqlite::Error::InvalidParameterName(format!(
                     "queue {} max queued threshold {} reached",
                     queue_name, max_queued
@@ -3344,27 +3954,31 @@ impl Database {
         )
     }
 
-    fn running_count_for_queue(&self, queue_name: &str, corpus: &str) -> rusqlite::Result<i64> {
+    fn running_count_for_queue(
+        &self,
+        queue_name: &str,
+        environment: &str,
+    ) -> rusqlite::Result<i64> {
         let mut count = 0;
         for run in self.get_running_runs()? {
             let workflow = self.get_workflow(&run.workflow_id)?;
-            let (run_queue, run_corpus) =
-                queue_identity_from_config(workflow.queue_config.as_deref(), &workflow.corpus);
-            if run_queue == queue_name && run_corpus == corpus {
+            let (run_queue, run_environment) =
+                queue_identity_from_config(workflow.queue_config.as_deref(), &workflow.environment);
+            if run_queue == queue_name && run_environment == environment {
                 count += 1;
             }
         }
         Ok(count)
     }
 
-    fn queued_count_for_queue(&self, queue_name: &str, corpus: &str) -> rusqlite::Result<i64> {
+    fn queued_count_for_queue(&self, queue_name: &str, environment: &str) -> rusqlite::Result<i64> {
         let conn = self.conn()?;
         conn.query_row(
             "SELECT COUNT(*)
              FROM queued_runs q
              LEFT JOIN workflows w ON q.workflow_id = w.id
-             WHERE q.queue_name = ?1 AND COALESCE(w.corpus, 'source') = ?2 AND q.status = 'queued'",
-            params![queue_name, corpus],
+             WHERE q.queue_name = ?1 AND COALESCE(NULLIF(w.environment, ''), w.corpus, 'source') = ?2 AND q.status = 'queued'",
+            params![queue_name, environment],
             |row| row.get(0),
         )
     }
@@ -3479,7 +4093,7 @@ fn workflow_resource_sample_from_row(row: &rusqlite::Row) -> WorkflowResourceSam
         run_id: row.get(1).unwrap_or(None),
         workflow_id: row.get(2).unwrap_or_default(),
         queue_name: row.get(3).unwrap_or(None),
-        corpus: row.get(4).unwrap_or_default(),
+        environment: row.get(4).unwrap_or_default(),
         pid: row.get(5).unwrap_or(None),
         sampled_at: row.get(6).unwrap_or_default(),
         cpu_percent: row.get(7).unwrap_or(None),
@@ -3638,7 +4252,7 @@ pub fn extract_summary(stdout: &str) -> Option<serde_json::Value> {
 
 fn validate_queue_values(
     name: &str,
-    corpus: &str,
+    environment: &str,
     capacity: i64,
     tag_cap: Option<i64>,
     max_queued: Option<i64>,
@@ -3649,9 +4263,10 @@ fn validate_queue_values(
             "queue name must not be empty".to_string(),
         ));
     }
-    if !matches!(corpus, "source" | "instance") {
+    // Environments are user-managed; any non-empty environment name is valid.
+    if environment.trim().is_empty() {
         return Err(rusqlite::Error::InvalidParameterName(
-            "queue corpus must be source or instance".to_string(),
+            "queue environment must not be empty".to_string(),
         ));
     }
     if capacity < 1 {
@@ -3688,8 +4303,8 @@ fn validate_queue_values(
     Ok(())
 }
 
-fn queue_identity_from_config(queue_config: Option<&str>, corpus: &str) -> (String, String) {
-    let default_queue = format!("{}-default", corpus);
+fn queue_identity_from_config(queue_config: Option<&str>, environment: &str) -> (String, String) {
+    let default_queue = format!("{}-default", environment);
     let queue = queue_config
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .and_then(|value| {
@@ -3700,12 +4315,273 @@ fn queue_identity_from_config(queue_config: Option<&str>, corpus: &str) -> (Stri
         })
         .filter(|queue| !queue.trim().is_empty())
         .unwrap_or(default_queue);
-    (queue, corpus.to_string())
+    (queue, environment.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_db_stamps_current_schema_version_and_enables_wal() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let conn = db.conn().unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_db_with_user_version_zero_is_stamped_to_current() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE workflows (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
+                    script_path TEXT NOT NULL, cron_schedule TEXT NOT NULL,
+                    enabled INTEGER DEFAULT 1, corpus TEXT NOT NULL DEFAULT 'source',
+                    created_at TEXT, updated_at TEXT
+                );
+                INSERT INTO workflows (id, name, script_path, cron_schedule)
+                VALUES ('wf-legacy', 'Legacy', 'scripts/noop.py', '0 0 * * *');",
+            )
+            .unwrap();
+            let v: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, 0, "legacy DB starts with user_version 0");
+        }
+        let db = Database::new(&dir);
+        let conn = db.conn().unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        // Existing data preserved.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workflows WHERE id = 'wf-legacy'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migration_v2_backfills_environment_and_governance() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE workflows (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
+                    script_path TEXT NOT NULL, cron_schedule TEXT NOT NULL,
+                    enabled INTEGER DEFAULT 1, corpus TEXT NOT NULL DEFAULT 'source',
+                    created_at TEXT, updated_at TEXT
+                );
+                CREATE TABLE queues (
+                    name TEXT NOT NULL, corpus TEXT NOT NULL, capacity INTEGER NOT NULL DEFAULT 1,
+                    tag_cap INTEGER, max_queued INTEGER,
+                    created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+                    PRIMARY KEY (name, corpus)
+                );
+                INSERT INTO workflows (id, name, script_path, cron_schedule, corpus, created_at, updated_at)
+                    VALUES ('wf-src', 'Src', 's.py', '0 0 * * *', 'source', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO workflows (id, name, script_path, cron_schedule, corpus, created_at, updated_at)
+                    VALUES ('wf-inst', 'Inst', 'i.py', '0 0 * * *', 'instance', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO queues (name, corpus, capacity) VALUES ('source-default', 'source', 4);",
+            )
+            .unwrap();
+        }
+        let db = Database::new(&dir);
+        let conn = db.conn().unwrap();
+
+        // Schema advanced to the current version (v2 backfill runs en route).
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+
+        // environment backfilled from corpus; managed_externally derived.
+        let src = db.get_workflow("wf-src").unwrap();
+        assert_eq!(src.environment, "source");
+        assert!(src.managed_externally);
+        let inst = db.get_workflow("wf-inst").unwrap();
+        assert_eq!(inst.environment, "instance");
+        assert!(!inst.managed_externally);
+
+        // environments table seeded with continuity environments.
+        let envs = db.list_environments().unwrap();
+        let names: std::collections::HashSet<String> =
+            envs.iter().map(|e| e.name.clone()).collect();
+        assert!(names.contains("source"));
+        assert!(names.contains("instance"));
+        let source_env = envs.iter().find(|e| e.name == "source").unwrap();
+        assert!(source_env.managed_externally);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migration_v5_rebuilds_queues_keyed_on_environment() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE workflows (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
+                    script_path TEXT NOT NULL, cron_schedule TEXT NOT NULL,
+                    enabled INTEGER DEFAULT 1, corpus TEXT NOT NULL DEFAULT 'source',
+                    created_at TEXT, updated_at TEXT
+                );
+                CREATE TABLE queues (
+                    name TEXT NOT NULL, corpus TEXT NOT NULL, capacity INTEGER NOT NULL DEFAULT 1,
+                    tag_cap INTEGER, max_queued INTEGER,
+                    created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+                    PRIMARY KEY (name, corpus)
+                );
+                CREATE TABLE queue_events (
+                    id TEXT PRIMARY KEY, queue_name TEXT NOT NULL, corpus TEXT NOT NULL,
+                    workflow_id TEXT, run_id TEXT, event_type TEXT NOT NULL, reason TEXT,
+                    emitted_at TEXT NOT NULL, details_json TEXT
+                );
+                CREATE TABLE workflow_resource_samples (
+                    id TEXT PRIMARY KEY, run_id TEXT, workflow_id TEXT NOT NULL, queue_name TEXT,
+                    corpus TEXT NOT NULL, pid INTEGER, sampled_at TEXT NOT NULL, cpu_percent REAL,
+                    memory_rss_bytes INTEGER, memory_vms_bytes INTEGER, swap_bytes INTEGER, labels_json TEXT
+                );
+                INSERT INTO queues (name, corpus, capacity, tag_cap) VALUES ('prod-q', 'prod', 7, 3);
+                INSERT INTO queue_events (id, queue_name, corpus, event_type, emitted_at)
+                    VALUES ('qe-1', 'prod-q', 'prod', 'admitted', '2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        }
+        let db = Database::new(&dir);
+        let conn = db.conn().unwrap();
+
+        // queues now keyed on `environment` (no `corpus` column).
+        let queue_cols: std::collections::HashSet<String> = conn
+            .prepare("PRAGMA table_info(queues)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(queue_cols.contains("environment"));
+        assert!(!queue_cols.contains("corpus"), "corpus dropped from queues");
+
+        // PK is (name, environment).
+        let pk_cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('queues') WHERE pk > 0 ORDER BY pk")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(pk_cols, vec!["name".to_string(), "environment".to_string()]);
+
+        // Data copied corpus -> environment, and capacity reads by environment.
+        assert_eq!(db.queue_capacity("prod-q", "prod").unwrap(), 7);
+        assert_eq!(db.queue_tag_cap("prod-q", "prod").unwrap(), Some(3));
+
+        // queue_events + resource_samples rebuilt onto `environment`.
+        for table in ["queue_events", "workflow_resource_samples"] {
+            let cols: std::collections::HashSet<String> = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert!(cols.contains("environment"), "{table} has environment");
+            assert!(!cols.contains("corpus"), "{table} dropped corpus");
+        }
+        let ev_env: String = conn
+            .query_row(
+                "SELECT environment FROM queue_events WHERE id = 'qe-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ev_env, "prod");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn environment_crud_and_delete_guard() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        let env = db
+            .create_environment(
+                "staging",
+                Some("Staging env"),
+                Some("/tmp/staging"),
+                Some(2),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(env.name, "staging");
+        assert_eq!(db.count_workflows_in_environment("staging").unwrap(), 0);
+
+        // A workflow assigned to the environment should be counted.
+        db.create_workflow(
+            "wf",
+            None,
+            "s.py",
+            "0 0 * * *",
+            false,
+            true,
+            "UTC",
+            "staging",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(db.count_workflows_in_environment("staging").unwrap(), 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn downgrade_guard_refuses_newer_schema_version() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION + 5)
+                .unwrap();
+        }
+        let db = Database {
+            path: db_path.to_string_lossy().to_string(),
+        };
+        let result = db.init();
+        assert!(result.is_err(), "opening a newer-schema DB must fail");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn extract_summary_returns_latest_valid_summary() {
@@ -3747,7 +4623,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         )
         .unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO queues (name, corpus, capacity, tag_cap) VALUES ('too-big', 'source', 5, 6)",
+            "INSERT OR REPLACE INTO queues (name, environment, capacity, tag_cap) VALUES ('too-big', 'source', 5, 6)",
             [],
         )
         .unwrap();
@@ -3897,7 +4773,9 @@ SUMMARY_JSON:{\"title\":\"current\"}
 
         let prefs = db.get_mission_control_preferences().unwrap();
         assert_eq!(prefs.default_landing, "mission_control");
-        assert_eq!(prefs.corpus_filter, "all");
+        // Environments are user-managed: an arbitrary environment filter value
+        // is now preserved verbatim (no longer collapsed to "all").
+        assert_eq!(prefs.corpus_filter, "both");
         assert_eq!(prefs.domain_filter, "all");
 
         let prefs = db
@@ -4230,7 +5108,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
             run_id: None,
             workflow_id: source.id.clone(),
             queue_name: Some("source-default".to_string()),
-            corpus: "source".to_string(),
+            environment: "source".to_string(),
             pid: None,
             sampled_at: now.clone(),
             cpu_percent: Some(42.0),
@@ -4245,7 +5123,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
             run_id: None,
             workflow_id: instance.id.clone(),
             queue_name: Some("instance-default".to_string()),
-            corpus: "instance".to_string(),
+            environment: "instance".to_string(),
             pid: None,
             sampled_at: now.clone(),
             cpu_percent: Some(99.0),
@@ -4999,7 +5877,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
             run_id: Some(run.id.clone()),
             workflow_id: workflow.id.clone(),
             queue_name: Some("source-default".to_string()),
-            corpus: "source".to_string(),
+            environment: "source".to_string(),
             pid: Some(123),
             sampled_at: chrono::Utc::now().to_rfc3339(),
             cpu_percent: Some(1.25),
@@ -5124,7 +6002,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 run_id: Some(run.id.clone()),
                 workflow_id: workflow_id.clone(),
                 queue_name: Some("source-default".to_string()),
-                corpus: "source".to_string(),
+                environment: "source".to_string(),
                 pid: Some(123),
                 sampled_at,
                 cpu_percent: Some(1.0),
@@ -5325,7 +6203,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
             run_id: Some(run.id.clone()),
             workflow_id: workflow.id.clone(),
             queue_name: Some("source-default".to_string()),
-            corpus: "source".to_string(),
+            environment: "source".to_string(),
             pid: Some(123),
             sampled_at: chrono::Utc::now().to_rfc3339(),
             cpu_percent: Some(1.0),

@@ -1,10 +1,40 @@
+mod actions;
+mod api;
+mod branding;
 mod commands;
 mod db;
+mod email;
+mod operators;
 mod scheduler;
+mod service;
+mod steps;
+mod workflow_spec;
 
 use commands::AppState;
 use db::Database;
 use scheduler::{start_scheduler_loop, WorkflowScheduler};
+use service::{Notifier, SchedulerService};
+
+/// Bridges the GUI-agnostic [`Notifier`] trait to Tauri's notification plugin.
+pub struct DesktopNotifier {
+    app: tauri::AppHandle,
+}
+
+impl Notifier for DesktopNotifier {
+    fn notify(&self, title: &str, body: &str) {
+        use tauri_plugin_notification::NotificationExt;
+        if let Err(e) = self
+            .app
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+        {
+            log::warn!("Failed to send desktop notification: {e}");
+        }
+    }
+}
 use std::{
     io::{Read, Write},
     net::TcpListener,
@@ -26,8 +56,7 @@ pub struct SingleInstanceState {
     pub _listener: TcpListener,
 }
 
-const TRAY_ID: &str = "chaos-labs-scheduler-tray";
-const SINGLE_INSTANCE_ADDR: &str = "127.0.0.1:9616";
+use branding::{SINGLE_INSTANCE_ADDR, TRAY_ID};
 
 fn acquire_single_instance_lock() -> std::io::Result<TcpListener> {
     acquire_single_instance_lock_at(SINGLE_INSTANCE_ADDR)
@@ -37,21 +66,12 @@ fn acquire_single_instance_lock_at(addr: &str) -> std::io::Result<TcpListener> {
     TcpListener::bind(addr)
 }
 
-fn detect_chaos_labs_root() -> String {
-    // The data root is configuration, not a hardcode: honor CHAOS_LABS_ROOT
-    // (set by the launchd plist) when present, then fall back to the canonical
-    // repo location where the data, Python scripts, and venv actually live.
-    if let Ok(root) = std::env::var("CHAOS_LABS_ROOT") {
-        let root = root.trim();
-        if !root.is_empty() {
-            return root.to_string();
-        }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return format!("{}/dev/personal/chaos-labs", home);
-    }
-    eprintln!("WARNING: HOME not set; defaulting to /tmp/chaos-labs");
-    String::from("/tmp/chaos-labs")
+/// Resolve the workspace root the scheduler runs workflows against. Honors
+/// `CHAOS_SCHEDULER_WORKSPACE_ROOT` (and legacy `CHAOS_LABS_ROOT`) and otherwise
+/// defaults to the app data dir — the standalone default, no longer coupled to
+/// the chaos-labs repo.
+fn detect_workspace_root(app_data_dir: &Path) -> String {
+    branding::detect_workspace_root(&app_data_dir.to_string_lossy())
 }
 
 fn detect_python_path(chaos_labs_root: &str) -> String {
@@ -70,8 +90,14 @@ fn migrate_legacy_scheduler_db(app_data_dir: &Path) {
     let legacy_db = PathBuf::from(home)
         .join("Library")
         .join("Application Support")
-        .join("com.chaoslabs.scheduler")
+        .join(branding::LEGACY_BUNDLE_ID)
         .join("scheduler.db");
+
+    // Never relocate a legacy DB into itself (guards the case where the bundle
+    // id has not actually changed yet in a dev build).
+    if new_db == legacy_db {
+        return;
+    }
 
     if legacy_db.exists() {
         let should_migrate = if new_db.exists() {
@@ -96,21 +122,45 @@ fn migrate_legacy_scheduler_db(app_data_dir: &Path) {
         if new_db.exists() {
             let _ = std::fs::remove_file(&new_db);
         }
+        // Also clear any stale WAL/-shm sidecars so the imported copy is used.
+        let _ = std::fs::remove_file(new_db.with_extension("db-wal"));
+        let _ = std::fs::remove_file(new_db.with_extension("db-shm"));
 
-        match std::fs::copy(&legacy_db, &new_db) {
-            Ok(_) => log::info!("Migrated legacy scheduler database into new app data dir"),
-            Err(err) => log::warn!("Failed to migrate legacy scheduler database: {err}"),
+        // Use a consistent SQLite snapshot (VACUUM INTO) so any committed-but-
+        // uncheckpointed WAL contents in the legacy DB are preserved, rather
+        // than a raw file copy that could miss WAL data.
+        let migrated = rusqlite::Connection::open(&legacy_db)
+            .and_then(|conn| {
+                conn.execute(
+                    "VACUUM INTO ?1",
+                    rusqlite::params![new_db.to_string_lossy().to_string()],
+                )
+            })
+            .is_ok();
+
+        if migrated {
+            log::info!("Migrated legacy scheduler database into new app data dir");
+        } else if std::fs::copy(&legacy_db, &new_db).is_ok() {
+            log::info!("Migrated legacy scheduler database (raw copy fallback)");
+        } else {
+            log::warn!("Failed to migrate legacy scheduler database");
         }
     }
 }
 
 fn start_metrics_endpoint(db: Arc<Database>) {
     std::thread::spawn(move || {
-        let Ok(listener) = TcpListener::bind("127.0.0.1:9617") else {
-            log::warn!("Failed to bind Scheduler metrics endpoint on 127.0.0.1:9617");
+        let Ok(listener) = TcpListener::bind(branding::METRICS_ADDR) else {
+            log::warn!(
+                "Failed to bind Scheduler metrics endpoint on {}",
+                branding::METRICS_ADDR
+            );
             return;
         };
-        log::info!("Scheduler metrics endpoint listening on 127.0.0.1:9617");
+        log::info!(
+            "Scheduler metrics endpoint listening on {}",
+            branding::METRICS_ADDR
+        );
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else {
                 continue;
@@ -146,6 +196,7 @@ pub fn run() {
         .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
@@ -157,7 +208,7 @@ pub fn run() {
                 Ok(listener) => listener,
                 Err(err) => {
                     log::warn!(
-                        "Another Chaos Labs Scheduler instance is already active; exiting before startup ({err})"
+                        "Another Chaos Scheduler instance is already active; exiting before startup ({err})"
                     );
                     std::process::exit(0);
                 }
@@ -173,17 +224,51 @@ pub fn run() {
             std::fs::create_dir_all(&app_data_dir).ok();
             migrate_legacy_scheduler_db(&app_data_dir);
 
-            let chaos_labs_root = detect_chaos_labs_root();
+            let chaos_labs_root = detect_workspace_root(&app_data_dir);
             let python_path = detect_python_path(&chaos_labs_root);
 
             let db = Arc::new(Database::new(&app_data_dir));
             let scheduler = Arc::new(Mutex::new(WorkflowScheduler::new(db.clone())));
             start_metrics_endpoint(db.clone());
 
+            let notifier: Arc<dyn Notifier> = Arc::new(DesktopNotifier {
+                app: app.handle().clone(),
+            });
+            let service = SchedulerService::new(db.clone(), notifier);
+
+            // Embedded HTTP API (loopback by default; configurable bind).
+            let api_addr = std::env::var("CHAOS_SCHEDULER_API_ADDR")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| branding::DEFAULT_API_ADDR.to_string());
+            let api_state = api::ApiState {
+                service: service.clone(),
+                db: db.clone(),
+                workspace_root: chaos_labs_root.clone(),
+                python_path: python_path.clone(),
+                rate: Arc::new(Mutex::new(api::RateLimiter::new(
+                    120,
+                    std::time::Duration::from_secs(60),
+                ))),
+                cors_allowlist: db
+                    .get_scheduler_config("api_cors_allowlist")
+                    .ok()
+                    .flatten()
+                    .map(|s| {
+                        s.split(',')
+                            .map(|o| o.trim().to_string())
+                            .filter(|o| !o.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            };
+            api::start_api_server(api_state, api_addr);
+
             app.manage(AppState {
                 db: db.clone(),
                 scheduler: scheduler.clone(),
-                chaos_labs_root: chaos_labs_root.clone(),
+                service,
+                workspace_root: chaos_labs_root.clone(),
                 python_path: python_path.clone(),
             });
 
@@ -201,7 +286,7 @@ pub fn run() {
                 "popup",
                 WebviewUrl::App("index.html?view=popup".into()),
             )
-            .title("Chaos Labs")
+            .title(branding::POPUP_TITLE)
             .inner_size(340.0, 440.0)
             .resizable(false)
             .visible(false)
@@ -213,7 +298,7 @@ pub fn run() {
             let tray = TrayIconBuilder::with_id(TRAY_ID)
                 .icon(app.default_window_icon().cloned().expect("No icon"))
                 .icon_as_template(true)
-                .tooltip("Chaos Labs Scheduler")
+                .tooltip(branding::TRAY_TOOLTIP)
                 .on_tray_icon_event(|tray, event| {
                     if let tauri::tray::TrayIconEvent::Click {
                         button_state: tauri::tray::MouseButtonState::Up,
@@ -254,7 +339,7 @@ pub fn run() {
 
             app.manage(TrayState { _icon: tray });
 
-            log::info!("Chaos Labs Scheduler started, tray icon created");
+            log::info!("Chaos Scheduler started, tray icon created");
 
             Ok(())
         })
@@ -273,6 +358,16 @@ pub fn run() {
             commands::create_workflow,
             commands::update_workflow,
             commands::delete_workflow,
+            commands::list_environments,
+            commands::create_environment,
+            commands::update_environment,
+            commands::delete_environment,
+            commands::set_workflow_spec,
+            commands::create_api_key,
+            commands::list_api_keys,
+            commands::revoke_api_key,
+            commands::check_for_update,
+            commands::apply_update,
             commands::trigger_workflow,
             commands::rerun_workflow,
             commands::plan_backfill,
@@ -327,7 +422,7 @@ pub fn run() {
                     let _ = tray.set_visible(false);
                     let _ = tray.set_visible(true);
                     let _ = tray.set_icon_as_template(true);
-                    let _ = tray.set_tooltip(Some("Chaos Labs Scheduler"));
+                    let _ = tray.set_tooltip(Some(branding::TRAY_TOOLTIP));
                 }
             }
 

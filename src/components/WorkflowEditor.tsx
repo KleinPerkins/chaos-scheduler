@@ -1,7 +1,33 @@
 import { useState, useEffect } from "react";
-import { createWorkflow, updateWorkflow, listAvailableScripts, generateWorkflowDescription } from "../lib/commands";
-import type { Workflow, AvailableScript } from "../lib/commands";
+import {
+  createWorkflow,
+  updateWorkflow,
+  setWorkflowSpec,
+  listAvailableScripts,
+  listWorkflows,
+  generateWorkflowDescription,
+  environmentOf,
+  isCommandUnavailable,
+} from "../lib/commands";
+import type {
+  Workflow,
+  AvailableScript,
+  WorkflowKind,
+  WorkflowSpec,
+  StepSpec,
+  TypedSpec,
+  ActionSpec,
+} from "../lib/commands";
+import { useEnvironments } from "../hooks/useEnvironments";
 import ScheduleBuilder, { cronToHuman } from "./ScheduleBuilder";
+import StepFlowBuilder from "./workflow/StepFlowBuilder";
+import OperatorConfigForm from "./workflow/OperatorConfigForm";
+import ActionsEditor from "./workflow/ActionsEditor";
+import {
+  emptyStep,
+  defaultTypedSpec,
+  defaultAction,
+} from "./workflow/specHelpers";
 import "./WorkflowEditor.css";
 
 interface Props {
@@ -12,30 +38,74 @@ interface Props {
 
 const LOCAL_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
+function parseSpec(workflow?: Workflow): Partial<WorkflowSpec> {
+  if (!workflow?.spec_json) return {};
+  try {
+    return JSON.parse(workflow.spec_json) as WorkflowSpec;
+  } catch {
+    return {};
+  }
+}
+
 export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
   const isEdit = !!workflow;
-  const isSourceControlled = isEdit && (workflow?.corpus ?? "source") === "source";
+  // Governance is keyed off `managed_externally`, decoupled from the legacy
+  // corpus string: externally-registered definitions are read-only in the app.
+  const isManaged = isEdit && (workflow?.managed_externally ?? false);
+  const existingSpec = parseSpec(workflow);
+
+  const { environments } = useEnvironments();
+
   const [name, setName] = useState(workflow?.name ?? "");
   const [description, setDescription] = useState(workflow?.description ?? "");
   const [scriptPath, setScriptPath] = useState(workflow?.script_path ?? "");
-  const [cronSchedule, setCronSchedule] = useState(workflow?.cron_schedule ?? "0 0 9 * * Mon *");
+  const [environment, setEnvironment] = useState(
+    workflow ? environmentOf(workflow) : "instance",
+  );
+  const [cronSchedule, setCronSchedule] = useState(
+    workflow?.cron_schedule ?? "0 0 9 * * Mon *",
+  );
   const [enabled, setEnabled] = useState(workflow?.enabled ?? true);
   const [asyncMode, setAsyncMode] = useState(workflow?.async_mode ?? false);
-  const [emailOnFailure, setEmailOnFailure] = useState(workflow?.email_on_failure ?? true);
-  const [triggerConfig, setTriggerConfig] = useState(workflow?.trigger_config ?? "");
+  const [emailOnFailure, setEmailOnFailure] = useState(
+    workflow?.email_on_failure ?? true,
+  );
+  const [triggerConfig, setTriggerConfig] = useState(
+    workflow?.trigger_config ?? "",
+  );
   const [queueConfig, setQueueConfig] = useState(workflow?.queue_config ?? "");
+
+  const [kind, setKind] = useState<WorkflowKind>(workflow?.kind ?? "generic");
+  const [steps, setSteps] = useState<StepSpec[]>(
+    existingSpec.generic?.steps ?? [emptyStep(0)],
+  );
+  const [typedSpec, setTypedSpec] = useState<TypedSpec>(
+    existingSpec.typed ?? defaultTypedSpec(),
+  );
+  const [onSuccess, setOnSuccess] = useState<ActionSpec[]>(
+    existingSpec.on_success ?? [],
+  );
+  const [onFailure, setOnFailure] = useState<ActionSpec[]>(
+    existingSpec.on_failure ?? (workflow ? [] : [defaultAction("email")]),
+  );
+
   const [isCustomScript, setIsCustomScript] = useState(false);
   const [scripts, setScripts] = useState<AvailableScript[]>([]);
   const [scriptsLoading, setScriptsLoading] = useState(true);
+  const [allWorkflows, setAllWorkflows] = useState<Workflow[]>([]);
   const [saving, setSaving] = useState(false);
   const [generatingDesc, setGeneratingDesc] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     listAvailableScripts()
       .then((s) => {
         setScripts(s);
-        if (workflow?.script_path && !s.some((sc) => sc.path === workflow.script_path)) {
+        if (
+          workflow?.script_path &&
+          !s.some((sc) => sc.path === workflow.script_path)
+        ) {
           setIsCustomScript(true);
         }
         if (!workflow && s.length > 0 && !scriptPath) {
@@ -44,6 +114,9 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
       })
       .catch(() => setIsCustomScript(true))
       .finally(() => setScriptsLoading(false));
+    listWorkflows()
+      .then((w) => setAllWorkflows(w))
+      .catch(() => setAllWorkflows([]));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectedScript = scripts.find((s) => s.path === scriptPath);
@@ -55,13 +128,18 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
     } else {
       setIsCustomScript(false);
       setScriptPath(value);
+      // Fill step 1's script path so the discovered script drives execution.
+      setSteps((current) =>
+        current.length > 0
+          ? current.map((s, i) =>
+              i === 0 ? { ...s, script: value, command: null } : s,
+            )
+          : current,
+      );
       const matched = scripts.find((s) => s.path === value);
-      if (matched && !name) {
-        setName(matched.name);
-      }
-      if (matched?.description && !description) {
+      if (matched && !name) setName(matched.name);
+      if (matched?.description && !description)
         setDescription(matched.description);
-      }
     }
   };
 
@@ -79,53 +157,114 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
     }
   };
 
+  // The base workflow record still requires a script_path. Derive it from the
+  // spec for multi-step / operator workflows so both surfaces stay consistent.
+  const derivedScriptPath = (): string => {
+    if (kind === "typed") return `operator:${typedSpec.operator_type}`;
+    const first = steps[0];
+    return (
+      first?.script?.trim() || first?.command?.trim() || scriptPath || "generic"
+    );
+  };
+
+  const buildSpec = (): WorkflowSpec => ({
+    kind,
+    environment,
+    generic: kind === "generic" ? { steps } : null,
+    typed: kind === "typed" ? typedSpec : null,
+    on_success: onSuccess,
+    on_failure: onFailure,
+  });
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setNotice(null);
     setSaving(true);
     try {
       for (const value of [triggerConfig, queueConfig]) {
-        if (value.trim()) {
-          JSON.parse(value);
-        }
+        if (value.trim()) JSON.parse(value);
       }
+      const effectiveScript = derivedScriptPath();
+      let saved: Workflow;
       if (isEdit && workflow) {
-        await updateWorkflow({
+        saved = await updateWorkflow({
           id: workflow.id,
-          name: isSourceControlled ? workflow.name : name,
-          description: isSourceControlled ? workflow.description || undefined : description || undefined,
-          scriptPath: isSourceControlled ? workflow.script_path : scriptPath,
-          cronSchedule: isSourceControlled ? workflow.cron_schedule : cronSchedule,
+          name: isManaged ? workflow.name : name,
+          description: isManaged
+            ? workflow.description || undefined
+            : description || undefined,
+          scriptPath: isManaged ? workflow.script_path : effectiveScript,
+          cronSchedule: isManaged ? workflow.cron_schedule : cronSchedule,
           enabled,
-          asyncMode: isSourceControlled ? workflow.async_mode : asyncMode,
+          asyncMode: isManaged ? workflow.async_mode : asyncMode,
           emailOnFailure,
           timezone: LOCAL_TZ,
-          corpus: workflow.corpus ?? "source",
+          corpus: workflow.corpus ?? "instance",
           domain: workflow.domain,
-          triggerConfig: isSourceControlled ? workflow.trigger_config || undefined : triggerConfig || undefined,
-          queueConfig: isSourceControlled ? workflow.queue_config || undefined : queueConfig || undefined,
+          triggerConfig: isManaged
+            ? workflow.trigger_config || undefined
+            : triggerConfig || undefined,
+          queueConfig: isManaged
+            ? workflow.queue_config || undefined
+            : queueConfig || undefined,
         });
       } else {
-        await createWorkflow({
+        saved = await createWorkflow({
           name,
           description: description || undefined,
-          scriptPath,
+          scriptPath: effectiveScript,
           cronSchedule,
           asyncMode,
           emailOnFailure,
           timezone: LOCAL_TZ,
+          // New UI workflows always land in the instance partition; a custom
+          // environment name is preserved in the spec below.
           corpus: "instance",
           triggerConfig: triggerConfig || undefined,
           queueConfig: queueConfig || undefined,
         });
       }
+
+      // Persist the execution spec (kind + steps/operator + actions +
+      // environment). Guarded: if the backend command is not yet registered,
+      // the base workflow still saved — surface a non-blocking notice.
+      if (!isManaged) {
+        try {
+          await setWorkflowSpec(saved.id, buildSpec());
+        } catch (specErr) {
+          if (isCommandUnavailable(specErr)) {
+            setNotice(
+              "Workflow saved. Step-flow / operator / action details will persist once the backend spec command is available.",
+            );
+            onSaved();
+            return;
+          }
+          throw specErr;
+        }
+      }
       onSaved();
     } catch (e) {
-      setError(e instanceof SyntaxError ? "Trigger and queue metadata must be valid JSON." : String(e));
+      setError(
+        e instanceof SyntaxError
+          ? "Trigger and queue metadata must be valid JSON."
+          : String(e),
+      );
     } finally {
       setSaving(false);
     }
   };
+
+  const envOptions = (() => {
+    const names = new Set<string>();
+    for (const env of environments) names.add(env.name);
+    names.add(environment);
+    if (names.size === 0) {
+      names.add("instance");
+      names.add("source");
+    }
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  })();
 
   return (
     <div>
@@ -141,96 +280,61 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
       </div>
 
       <form className="editor-form" onSubmit={handleSubmit}>
-        {error && <div className="editor-error">{error}</div>}
-        {isSourceControlled && (
-          <div className="editor-hint">
-            Source workflow definitions are managed in git. Runtime preferences
-            such as enabled state, email alerts, and display timezone can be
-            saved here; definition fields are read-only.
+        {error && (
+          <div className="editor-error" role="alert">
+            {error}
+          </div>
+        )}
+        {notice && (
+          <div className="editor-hint editor-notice" role="status">
+            {notice}
+          </div>
+        )}
+        {isManaged && (
+          <div className="editor-hint editor-managed-banner">
+            <strong>&#128274; Managed externally.</strong> This workflow&rsquo;s
+            definition is owned by an external source of truth (
+            {environmentOf(workflow!)} environment) and is read-only here.
+            Runtime preferences (enabled state, email alerts, timezone) can
+            still be saved.
           </div>
         )}
 
         <div className="editor-field">
-          <label className="editor-label">Script</label>
-          {scriptsLoading ? (
-            <div className="editor-hint">Scanning for scripts...</div>
-          ) : scripts.length === 0 && !isCustomScript ? (
-            <>
-              <div className="editor-hint">
-                No scripts found in scripts/workflows/. Enter a path manually.
-              </div>
-              <input
-                type="text"
-                value={scriptPath}
-                onChange={(e) => setScriptPath(e.target.value)}
-                placeholder="scripts/workflows/my_script.py"
-                required
-              />
-            </>
-          ) : (
-            <>
-              <select
-                value={isCustomScript ? "__custom__" : scriptPath}
-                onChange={(e) => handleScriptChange(e.target.value)}
-                disabled={isSourceControlled}
-              >
-                {scripts.map((s) => (
-                  <option key={s.path} value={s.path}>
-                    {s.name}
-                  </option>
-                ))}
-                <option value="__custom__">Custom path...</option>
-              </select>
-              {isCustomScript ? (
-                <input
-                  type="text"
-                  value={scriptPath}
-                  onChange={(e) => setScriptPath(e.target.value)}
-                  placeholder="scripts/workflows/my_script.py"
-                  required
-                  disabled={isSourceControlled}
-                  style={{ marginTop: 8 }}
-                />
-              ) : selectedScript?.description ? (
-                <span className="editor-script-desc">{selectedScript.description}</span>
-              ) : null}
-              <span className="editor-hint">
-                {isCustomScript
-                  ? "Path relative to chaos-labs root"
-                  : `${scriptPath}`}
-              </span>
-            </>
-          )}
-        </div>
-
-        <div className="editor-field">
-          <label className="editor-label">Name</label>
+          <label className="editor-label" htmlFor="wf-name">
+            Name
+          </label>
           <input
+            id="wf-name"
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="e.g. Weekly Pod Status"
             required
-            disabled={isSourceControlled}
+            disabled={isManaged}
           />
         </div>
 
         <div className="editor-field">
           <div className="editor-label-row">
-            <label className="editor-label">Description</label>
-            {scriptPath && (
+            <label className="editor-label" htmlFor="wf-desc">
+              Description
+            </label>
+            {kind === "generic" && scriptPath && (
               <button
                 type="button"
                 className="btn-ai"
                 onClick={handleGenerateDescription}
-                disabled={generatingDesc || isSourceControlled}
+                disabled={generatingDesc || isManaged}
                 title="Use AI to generate a description based on the workflow script"
               >
                 {generatingDesc ? (
                   <span className="btn-ai-loading">Generating...</span>
                 ) : (
                   <>
-                    <span className="btn-ai-icon">&#10022;</span>
+                    <span className="btn-ai-icon" aria-hidden="true">
+                      &#10022;
+                    </span>
                     AI Describe
                   </>
                 )}
@@ -238,24 +342,101 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
             )}
           </div>
           <textarea
+            id="wf-desc"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="What does this workflow do?"
             rows={2}
-            disabled={isSourceControlled}
+            disabled={isManaged}
           />
         </div>
 
         <div className="editor-field">
-          {isSourceControlled ? (
+          <label className="editor-label" htmlFor="wf-env">
+            Environment
+          </label>
+          <select
+            id="wf-env"
+            value={environment}
+            onChange={(e) => setEnvironment(e.target.value)}
+            disabled={isManaged}
+          >
+            {envOptions.map((env) => (
+              <option key={env} value={env}>
+                {env.charAt(0).toUpperCase() + env.slice(1)}
+              </option>
+            ))}
+          </select>
+          <span className="editor-hint">
+            The partition this workflow runs in. Manage environments from the
+            Environments screen.
+          </span>
+        </div>
+
+        <fieldset className="editor-field editor-kind" disabled={isManaged}>
+          <legend className="editor-label">Workflow type</legend>
+          <label className="editor-radio">
+            <input
+              type="radio"
+              name="wf-kind"
+              checked={kind === "generic"}
+              onChange={() => setKind("generic")}
+            />
+            Generic — a multi-step flow of commands / scripts
+          </label>
+          <label className="editor-radio">
+            <input
+              type="radio"
+              name="wf-kind"
+              checked={kind === "typed"}
+              onChange={() => setKind("typed")}
+            />
+            Typed — a single built-in operator (git pull, Cursor agent, …)
+          </label>
+        </fieldset>
+
+        {kind === "generic" ? (
+          <div className="editor-field">
+            <label className="editor-label">Steps</label>
+            <span className="editor-hint">
+              Each step runs a command or script. Use “Depends on” to sequence
+              steps into a DAG; independent steps run in parallel. Cycles are
+              rejected on save.
+            </span>
+            <StepFlowBuilder
+              steps={steps}
+              onChange={setSteps}
+              disabled={isManaged}
+            />
+          </div>
+        ) : (
+          <div className="editor-field">
+            <label className="editor-label">Operator</label>
+            <OperatorConfigForm
+              spec={typedSpec}
+              onChange={setTypedSpec}
+              disabled={isManaged}
+            />
+          </div>
+        )}
+
+        <div className="editor-field">
+          {isManaged ? (
             <>
               <label className="editor-label">Schedule</label>
               <div className="editor-hint">
-                {cronToHuman(workflow?.cron_schedule ?? cronSchedule, workflow?.timezone)}
+                {cronToHuman(
+                  workflow?.cron_schedule ?? cronSchedule,
+                  workflow?.timezone,
+                )}
               </div>
             </>
           ) : (
-            <ScheduleBuilder value={cronSchedule} onChange={setCronSchedule} timezone={workflow?.timezone} />
+            <ScheduleBuilder
+              value={cronSchedule}
+              onChange={setCronSchedule}
+              timezone={workflow?.timezone}
+            />
           )}
         </div>
 
@@ -279,13 +460,14 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
               type="checkbox"
               checked={asyncMode}
               onChange={(e) => setAsyncMode(e.target.checked)}
-                disabled={isSourceControlled}
+              disabled={isManaged}
               style={{ marginRight: 8 }}
             />
             Async mode
           </label>
           <span className="editor-hint">
-            Script spawns a background process (e.g. context capture launcher). The scheduler monitors the PID until completion.
+            The step spawns a background process; the scheduler monitors the PID
+            until completion.
           </span>
         </div>
 
@@ -297,46 +479,104 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
               onChange={(e) => setEmailOnFailure(e.target.checked)}
               style={{ marginRight: 8 }}
             />
-            Email on failure
+            Email on failure (legacy shortcut)
           </label>
           <span className="editor-hint">
-            Send an email alert when this workflow fails. Requires email alerts to be configured in Settings.
+            Convenience flag preserved for compatibility. For finer control, add
+            an Email action below. Requires email alerts configured in Settings.
           </span>
         </div>
 
-        <div className="editor-field">
-          <label className="editor-label">Trigger metadata JSON</label>
-          <textarea
-            value={triggerConfig}
-            onChange={(e) => setTriggerConfig(e.target.value)}
-            placeholder='{"triggers":[{"kind":"cron","cron":"0 9 * * *"}]}'
-            rows={4}
-            disabled={isSourceControlled}
+        <div className="editor-field editor-actions-section">
+          <ActionsEditor
+            title="On success"
+            hint="Actions run when a run completes successfully."
+            actions={onSuccess}
+            onChange={setOnSuccess}
+            workflows={allWorkflows}
+            disabled={isManaged}
           />
-          <span className="editor-hint">
-            Use SDK-compatible trigger metadata. Source workflow triggers are read-only and come from git.
-          </span>
+          <ActionsEditor
+            title="On failure"
+            hint="Actions run when a run fails. Email is the required, always-available capability."
+            actions={onFailure}
+            onChange={setOnFailure}
+            workflows={allWorkflows}
+            emailRequired
+            disabled={isManaged}
+          />
         </div>
 
-        <div className="editor-field">
-          <label className="editor-label">Queue, dependency, and SLA JSON</label>
-          <textarea
-            value={queueConfig}
-            onChange={(e) => setQueueConfig(e.target.value)}
-            placeholder='{"queue":"instance-default","priority":0,"depends_on":[],"waits_for":[],"tags":[]}'
-            rows={4}
-            disabled={isSourceControlled}
-          />
-          <span className="editor-hint">
-            Instance workflows can declare queue, priority, dependency, mutex/tag, and SLA metadata here.
-          </span>
-        </div>
+        <details className="editor-advanced">
+          <summary>Advanced trigger &amp; queue metadata (JSON)</summary>
+          <div className="editor-field">
+            <label className="editor-label" htmlFor="wf-trigger">
+              Trigger metadata JSON
+            </label>
+            <textarea
+              id="wf-trigger"
+              value={triggerConfig}
+              onChange={(e) => setTriggerConfig(e.target.value)}
+              placeholder='{"triggers":[{"kind":"cron","cron":"0 9 * * *"}]}'
+              rows={4}
+              disabled={isManaged}
+            />
+          </div>
+          <div className="editor-field">
+            <label className="editor-label" htmlFor="wf-queue">
+              Queue, dependency, and SLA JSON
+            </label>
+            <textarea
+              id="wf-queue"
+              value={queueConfig}
+              onChange={(e) => setQueueConfig(e.target.value)}
+              placeholder='{"queue":"instance-default","priority":0,"depends_on":[],"waits_for":[],"tags":[]}'
+              rows={4}
+              disabled={isManaged}
+            />
+          </div>
+        </details>
+
+        {kind === "generic" && !isManaged && scripts.length > 0 && (
+          <details className="editor-advanced">
+            <summary>Pick a step command from discovered scripts</summary>
+            <div className="editor-field">
+              {scriptsLoading ? (
+                <div className="editor-hint">Scanning for scripts...</div>
+              ) : (
+                <>
+                  <select
+                    value={isCustomScript ? "__custom__" : scriptPath}
+                    onChange={(e) => handleScriptChange(e.target.value)}
+                    aria-label="Discovered scripts"
+                  >
+                    {scripts.map((s) => (
+                      <option key={s.path} value={s.path}>
+                        {s.name}
+                      </option>
+                    ))}
+                    <option value="__custom__">Custom path...</option>
+                  </select>
+                  {selectedScript?.description && (
+                    <span className="editor-script-desc">
+                      {selectedScript.description}
+                    </span>
+                  )}
+                  <span className="editor-hint">
+                    Selecting a script fills step 1&rsquo;s path (relative to
+                    the workspace root).
+                  </span>
+                </>
+              )}
+            </div>
+          </details>
+        )}
 
         <div className="editor-actions">
           <button
             type="submit"
             className="btn btn-primary"
-            disabled={saving || !name || !scriptPath || !cronSchedule}
+            disabled={saving || (!isManaged && !name) || !cronSchedule}
           >
             {saving ? "Saving..." : isEdit ? "Save Changes" : "Create Workflow"}
           </button>

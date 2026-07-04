@@ -1,6 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/**
+ * Legacy partition value. Superseded by the first-class `environment` string
+ * (which can be any user-defined name) plus the `managed_externally` governance
+ * flag. Retained because the backend read model still emits `corpus` on run /
+ * queue / status rows during the environments migration.
+ */
 export type WorkflowCorpus = "source" | "instance";
+
+/** Which execution model a workflow uses (mirrors `workflow_spec::WorkflowKind`). */
+export type WorkflowKind = "generic" | "typed";
 
 export interface Workflow {
   id: string;
@@ -11,7 +20,18 @@ export interface Workflow {
   enabled: boolean;
   async_mode: boolean;
   email_on_failure: boolean;
+  /** Legacy partition; prefer `environment`. */
   corpus: WorkflowCorpus;
+  /** First-class environment name (dynamic; seeded `source`/`instance`). */
+  environment: string;
+  /** True when the definition is owned by an external source of truth (git /
+   * API-registered) and is therefore read-only in the app. */
+  managed_externally: boolean;
+  /** Execution model: multi-step `generic` DAG or single-operator `typed`. */
+  kind: WorkflowKind;
+  /** Serialized `WorkflowSpec` (steps / operator config / actions), or null for
+   * legacy single-script workflows. */
+  spec_json: string | null;
   domain?: string | null;
   timezone: string;
   trigger_config?: string | null;
@@ -19,6 +39,112 @@ export interface Workflow {
   last_run_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Read the effective environment of a workflow / run / queue row, tolerating
+ * the migration window where only `corpus` is populated. */
+export function environmentOf(row: {
+  environment?: string | null;
+  corpus?: string | null;
+}): string {
+  return (row.environment ?? row.corpus ?? "default").toString();
+}
+
+// --- Environments (Phase 3) ---
+
+export interface Environment {
+  id: string;
+  name: string;
+  description?: string | null;
+  working_dir?: string | null;
+  default_queue_capacity?: number | null;
+  default_tag_cap?: number | null;
+  default_max_queued?: number | null;
+  managed_externally?: boolean;
+  workflow_count?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+// --- Workflow spec model (Phases 4 & 5) ---
+
+export interface RetryPolicy {
+  max_retries: number;
+  backoff_seconds: number;
+}
+
+export interface StepSpec {
+  id: string;
+  command?: string | null;
+  script?: string | null;
+  args: string[];
+  working_dir?: string | null;
+  depends_on: string[];
+  retry?: RetryPolicy | null;
+  timeout_seconds?: number | null;
+  continue_on_error: boolean;
+}
+
+export interface GenericSpec {
+  steps: StepSpec[];
+}
+
+export interface TypedSpec {
+  operator_type: string;
+  config: Record<string, unknown>;
+}
+
+/** Discriminated union matching the serde `#[serde(tag = "type")]` encoding of
+ * `actions::ActionSpec`. */
+export type ActionSpec =
+  | { type: "email"; to?: string | null }
+  | {
+      type: "webhook";
+      url: string;
+      secret?: string | null;
+      max_retries?: number;
+    }
+  | { type: "run_workflow"; workflow_id: string; wait?: boolean }
+  | { type: "desktop_notification"; title?: string | null };
+
+export type ActionKind = ActionSpec["type"];
+
+export interface WorkflowSpec {
+  kind: WorkflowKind;
+  environment?: string | null;
+  generic?: GenericSpec | null;
+  typed?: TypedSpec | null;
+  on_success: ActionSpec[];
+  on_failure: ActionSpec[];
+}
+
+// --- API keys & integrations (Phases 6 & 8) ---
+
+export type ApiKeyScope = "read" | "write" | "admin";
+
+/** Returned once by `create_api_key`; `token` is shown a single time. */
+export interface NewApiKey {
+  id: string;
+  token: string;
+  scopes: string;
+}
+
+/** Listing shape (never includes the secret). */
+export interface ApiKey {
+  id: string;
+  name?: string | null;
+  scopes: string;
+  created_at?: string | null;
+  last_used_at?: string | null;
+}
+
+// --- Updater (Phase 11) ---
+
+export interface UpdateStatus {
+  available: boolean;
+  current_version: string;
+  latest_version?: string | null;
+  notes?: string | null;
 }
 
 export interface Run {
@@ -97,7 +223,6 @@ export interface SlaViolation {
   severity: string;
 }
 
-
 export interface WorkflowResourceSample {
   id: string;
   run_id?: string | null;
@@ -151,6 +276,7 @@ export interface NextRun {
   workflow_id: string;
   workflow_name: string;
   corpus: WorkflowCorpus;
+  environment?: string | null;
   next_time: string;
 }
 
@@ -169,7 +295,9 @@ export interface DomainOption {
 
 export interface MissionControlPreferences {
   default_landing: "mission_control" | "dashboard";
-  corpus_filter: "all" | WorkflowCorpus;
+  /** "all" or an environment name. Named `corpus_filter` for backend
+   * wire-compat during the environments migration. */
+  corpus_filter: string;
   domain_filter: string;
 }
 
@@ -204,6 +332,7 @@ export interface MissionControlActivityItem {
   workflow_id: string;
   workflow_name: string;
   corpus: WorkflowCorpus;
+  environment?: string | null;
   domain: string;
   status: string;
   started_at: string;
@@ -215,6 +344,7 @@ export interface MissionControlUpcomingRun {
   workflow_id: string;
   workflow_name: string;
   corpus: WorkflowCorpus;
+  environment?: string | null;
   domain: string;
   trigger_kind: string;
   trigger_label: string;
@@ -239,6 +369,7 @@ export interface MissionControlWorkflowTelemetry {
   workflow_id: string;
   workflow_name: string;
   corpus: WorkflowCorpus;
+  environment?: string | null;
   domain: string;
   max_cpu_percent?: number | null;
   max_memory_rss_bytes?: number | null;
@@ -277,6 +408,7 @@ export interface MissionControlSnapshot {
 export interface QueueInfo {
   name: string;
   corpus: WorkflowCorpus;
+  environment?: string | null;
   capacity: number;
   tag_cap?: number | null;
   max_queued?: number | null;
@@ -293,6 +425,7 @@ export interface QueuedRun {
   workflow_name?: string | null;
   queue_name: string;
   corpus: WorkflowCorpus;
+  environment?: string | null;
   priority: number;
   status: string;
   queued_at: string;
@@ -418,7 +551,55 @@ export interface WorkflowUpdatePayload extends WorkflowPayload {
   enabled: boolean;
 }
 
-export function getAppConfig(): Promise<{ chaos_labs_root: string; python_path: string }> {
+/**
+ * Error raised when a Tauri command is not (yet) registered by the backend.
+ * The frontend guards forward-looking features (spec persistence, API-key
+ * listing/revocation, environment updates, the updater) against this so a UI
+ * shipped ahead of a backend command degrades gracefully instead of throwing an
+ * opaque error.
+ */
+export class CommandUnavailableError extends Error {
+  readonly command: string;
+  constructor(command: string) {
+    super(`Backend command "${command}" is not available yet.`);
+    this.name = "CommandUnavailableError";
+    this.command = command;
+  }
+}
+
+/** Heuristic: Tauri surfaces an unknown command as a string mentioning it. */
+export function isCommandUnavailable(err: unknown): boolean {
+  if (err instanceof CommandUnavailableError) return true;
+  const msg =
+    typeof err === "string"
+      ? err
+      : err instanceof Error
+        ? err.message
+        : String(err);
+  return /not\s+(?:found|allowed|registered)|unknown command|command .* not/i.test(
+    msg,
+  );
+}
+
+/** Invoke a command that may not exist yet; normalizes the "missing" case into
+ * a {@link CommandUnavailableError} so callers can branch cleanly. */
+async function invokeOptional<T>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  try {
+    return await invoke<T>(command, args);
+  } catch (err) {
+    if (isCommandUnavailable(err)) throw new CommandUnavailableError(command);
+    throw err;
+  }
+}
+
+export function getAppConfig(): Promise<{
+  chaos_labs_root?: string;
+  workspace_root?: string;
+  python_path: string;
+}> {
   return invoke("get_app_config");
 }
 
@@ -434,7 +615,9 @@ export function createWorkflow(payload: WorkflowPayload): Promise<Workflow> {
   return invoke("create_workflow", { ...payload });
 }
 
-export function updateWorkflow(payload: WorkflowUpdatePayload): Promise<Workflow> {
+export function updateWorkflow(
+  payload: WorkflowUpdatePayload,
+): Promise<Workflow> {
   return invoke("update_workflow", { ...payload });
 }
 
@@ -451,7 +634,11 @@ export function rerunWorkflow(
   sourceRunId?: string,
   inputOverrideJson?: string,
 ): Promise<string> {
-  return invoke("rerun_workflow", { workflowId, sourceRunId, inputOverrideJson });
+  return invoke("rerun_workflow", {
+    workflowId,
+    sourceRunId,
+    inputOverrideJson,
+  });
 }
 
 export function planBackfill(
@@ -470,7 +657,13 @@ export function dispatchBackfill(
   maxRuns?: number | null,
   dryRun = false,
 ): Promise<BackfillDispatchResult> {
-  return invoke("dispatch_backfill", { workflowId, since, until, maxRuns, dryRun });
+  return invoke("dispatch_backfill", {
+    workflowId,
+    since,
+    until,
+    maxRuns,
+    dryRun,
+  });
 }
 
 export function listDeadLetters(
@@ -490,7 +683,12 @@ export function acknowledgeDeadLetter(
   operator?: string,
   reenableWorkflow = false,
 ): Promise<SchedulerDeadLetter> {
-  return invoke("acknowledge_dead_letter", { id, reason, operator, reenableWorkflow });
+  return invoke("acknowledge_dead_letter", {
+    id,
+    reason,
+    operator,
+    reenableWorkflow,
+  });
 }
 
 export function recoverDeadLetter(
@@ -500,7 +698,10 @@ export function recoverDeadLetter(
   return invoke("recover_dead_letter", { id, reenableWorkflow });
 }
 
-export function getRunHistory(workflowId: string, limit?: number): Promise<Run[]> {
+export function getRunHistory(
+  workflowId: string,
+  limit?: number,
+): Promise<Run[]> {
   return invoke("get_run_history", { workflowId, limit });
 }
 
@@ -558,7 +759,6 @@ export function getSlaViolations(): Promise<SlaViolation[]> {
   return invoke("get_sla_violations");
 }
 
-
 export function queryResourceSamples(
   workflowId: string,
   timeWindow = "24h",
@@ -571,7 +771,11 @@ export function queryTokenUsageRollup(
   timeWindow = "24h",
   timeBucket: "minute" | "hour" | "day" = "hour",
 ): Promise<WorkflowTokenUsageRollup[]> {
-  return invoke("query_token_usage_rollup", { groupBy, timeWindow, timeBucket });
+  return invoke("query_token_usage_rollup", {
+    groupBy,
+    timeWindow,
+    timeBucket,
+  });
 }
 
 export function getSchedulerStatus(): Promise<SchedulerStatus> {
@@ -601,7 +805,10 @@ export function getMissionControlSnapshot(
   return invoke("get_mission_control_snapshot", { corpusFilter, domainFilter });
 }
 
-export function queryStaleAssets(maxAgeSeconds = 24 * 60 * 60, assetKind?: string): Promise<SchedulerAsset[]> {
+export function queryStaleAssets(
+  maxAgeSeconds = 24 * 60 * 60,
+  assetKind?: string,
+): Promise<SchedulerAsset[]> {
   return invoke("query_stale_assets", { maxAgeSeconds, assetKind });
 }
 
@@ -635,7 +842,10 @@ export function openDashboard(): Promise<void> {
   return invoke("open_dashboard");
 }
 
-export function openRunDetail(runId: string, workflowId: string): Promise<void> {
+export function openRunDetail(
+  runId: string,
+  workflowId: string,
+): Promise<void> {
   return invoke("open_run_detail", { runId, workflowId });
 }
 
@@ -677,7 +887,9 @@ export function analyzeRunError(runId: string): Promise<ErrorAnalysis> {
   return invoke("analyze_run_error", { runId });
 }
 
-export function generateWorkflowDescription(scriptPath: string): Promise<string> {
+export function generateWorkflowDescription(
+  scriptPath: string,
+): Promise<string> {
   return invoke("generate_workflow_description", { scriptPath });
 }
 
@@ -689,6 +901,89 @@ export function setEmailConfig(config: EmailConfig): Promise<void> {
   return invoke("set_email_config", { config });
 }
 
-export function testEmailConfig(): Promise<{ success?: boolean; error?: string }> {
+export function testEmailConfig(): Promise<{
+  success?: boolean;
+  error?: string;
+}> {
   return invoke("test_email_config");
+}
+
+// --- Environments (Phase 3) ---
+
+export function listEnvironments(): Promise<Environment[]> {
+  return invoke("list_environments");
+}
+
+export interface EnvironmentPayload {
+  name: string;
+  description?: string | null;
+  workingDir?: string | null;
+  defaultQueueCapacity?: number | null;
+  defaultTagCap?: number | null;
+  defaultMaxQueued?: number | null;
+}
+
+export function createEnvironment(
+  payload: EnvironmentPayload,
+): Promise<Environment> {
+  return invoke("create_environment", { ...payload });
+}
+
+export function deleteEnvironment(id: string): Promise<void> {
+  return invoke("delete_environment", { id });
+}
+
+/** Registered on the backend; still guarded via {@link invokeOptional} for older builds. */
+export function updateEnvironment(
+  id: string,
+  payload: EnvironmentPayload,
+): Promise<Environment> {
+  return invokeOptional("update_environment", { id, ...payload });
+}
+
+// --- API keys & integrations (Phases 6 & 8) ---
+
+export function createApiKey(
+  name?: string,
+  scopes?: ApiKeyScope[],
+): Promise<NewApiKey> {
+  return invoke("create_api_key", { name, scopes });
+}
+
+/** Registered on the backend; guarded via {@link invokeOptional} for older builds. */
+export function listApiKeys(): Promise<ApiKey[]> {
+  return invokeOptional("list_api_keys");
+}
+
+/** Registered on the backend; guarded via {@link invokeOptional} for older builds. */
+export function revokeApiKey(id: string): Promise<void> {
+  return invokeOptional("revoke_api_key", { id });
+}
+
+// --- Workflow spec (Phases 4 & 5) ---
+
+/**
+ * Persist a workflow's execution spec (kind + steps/operator + actions).
+ * Registered on the backend; guarded via {@link invokeOptional} so the editor
+ * can still save base fields against older builds.
+ */
+export function setWorkflowSpec(
+  id: string,
+  spec: WorkflowSpec,
+): Promise<Workflow> {
+  return invokeOptional("set_workflow_spec", { id, spec });
+}
+
+// --- Updater (Phase 11) ---
+
+/** Checks for an available update. Registered on the backend; guarded via
+ * {@link invokeOptional} so the Settings affordance renders on older builds. */
+export function checkForUpdate(): Promise<UpdateStatus> {
+  return invokeOptional("check_for_update");
+}
+
+/** Download + install the pending update and relaunch. Registered on the
+ * backend; guarded via {@link invokeOptional} for older builds. */
+export function applyUpdate(): Promise<void> {
+  return invokeOptional("apply_update");
 }

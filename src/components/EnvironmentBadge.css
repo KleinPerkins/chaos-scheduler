@@ -1,0 +1,43 @@
+.env-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  color: hsl(var(--env-hue) 65% 82%);
+  background: hsl(var(--env-hue) 55% 22% / 0.55);
+  border: 1px solid hsl(var(--env-hue) 55% 45% / 0.45);
+}
+
+.env-badge--md {
+  padding: 3px 9px;
+  font-size: 11px;
+}
+
+.env-badge--sm {
+  padding: 2px 7px;
+  font-size: 10px;
+}
+
+.env-badge--managed {
+  border-style: dashed;
+}
+
+.env-badge-lock {
+  font-size: 0.85em;
+}
+
+/* Screen-reader-only supplement so the lock glyph conveys meaning to AT. */
+.env-badge-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

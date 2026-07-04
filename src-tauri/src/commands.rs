@@ -6,6 +6,7 @@ use crate::db::{
     WorkflowHistoryBucket, WorkflowResourceSample, WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
+use crate::service::{SchedulerService, WorkflowDraft};
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use serde::Serialize;
 use std::{
@@ -17,7 +18,8 @@ use tauri::State;
 pub struct AppState {
     pub db: Arc<Database>,
     pub scheduler: Arc<Mutex<WorkflowScheduler>>,
-    pub chaos_labs_root: String,
+    pub service: SchedulerService,
+    pub workspace_root: String,
     pub python_path: String,
 }
 
@@ -40,7 +42,10 @@ pub struct BackfillDispatchResult {
 #[tauri::command]
 pub fn get_app_config(state: State<AppState>) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
-        "chaos_labs_root": state.chaos_labs_root,
+        // `workspace_root` is the canonical key; `chaos_labs_root` retained for
+        // one transition version for backward-compatible frontends/scripts.
+        "workspace_root": state.workspace_root,
+        "chaos_labs_root": state.workspace_root,
         "python_path": state.python_path,
     }))
 }
@@ -55,41 +60,8 @@ pub fn get_workflow(state: State<AppState>, id: String) -> Result<Workflow, Stri
     state.db.get_workflow(&id).map_err(|e| e.to_string())
 }
 
-fn normalized_opt(value: Option<&str>) -> Option<String> {
-    value.and_then(|v| {
-        let trimmed = v.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-fn source_definition_changed(
-    existing: &Workflow,
-    name: &str,
-    description: Option<&str>,
-    script_path: &str,
-    cron_schedule: &str,
-    async_mode: bool,
-    corpus: &str,
-    domain: Option<&str>,
-    trigger_config: Option<&str>,
-    queue_config: Option<&str>,
-) -> bool {
-    existing.name != name
-        || existing.description != normalized_opt(description)
-        || existing.script_path != script_path
-        || existing.cron_schedule != cron_schedule
-        || existing.async_mode != async_mode
-        || existing.corpus != corpus
-        || existing.domain != normalized_opt(domain)
-        || existing.trigger_config != normalized_opt(trigger_config)
-        || existing.queue_config != normalized_opt(queue_config)
-}
-
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri IPC command: arg list mirrors the JS invoke() payload.
 pub fn create_workflow(
     state: State<AppState>,
     name: String,
@@ -100,32 +72,40 @@ pub fn create_workflow(
     email_on_failure: Option<bool>,
     timezone: Option<String>,
     corpus: Option<String>,
+    environment: Option<String>,
     domain: Option<String>,
     trigger_config: Option<String>,
     queue_config: Option<String>,
 ) -> Result<Workflow, String> {
-    if corpus.as_deref().unwrap_or("instance") == "source" {
-        return Err("source-corpus workflow definitions are source-controlled; create instance workflows from the Scheduler UI".to_string());
-    }
+    // Back-compat: accept `environment` (preferred) or legacy `corpus`; each
+    // defaults from the other so older frontends keep working.
+    let environment = environment.or_else(|| corpus.clone());
+    let corpus = corpus
+        .or_else(|| environment.clone())
+        .unwrap_or_else(|| "instance".to_string());
+    let draft = WorkflowDraft {
+        name,
+        description,
+        script_path,
+        cron_schedule,
+        async_mode: async_mode.unwrap_or(false),
+        email_on_failure: email_on_failure.unwrap_or(true),
+        timezone: timezone.unwrap_or_else(|| "UTC".to_string()),
+        corpus,
+        environment,
+        domain,
+        trigger_config,
+        queue_config,
+    };
+    // UI-originated: not permitted to mint externally-managed definitions.
     state
-        .db
-        .create_workflow(
-            &name,
-            description.as_deref(),
-            &script_path,
-            &cron_schedule,
-            async_mode.unwrap_or(false),
-            email_on_failure.unwrap_or(true),
-            timezone.as_deref().unwrap_or("UTC"),
-            corpus.as_deref().unwrap_or("instance"),
-            domain.as_deref(),
-            trigger_config.as_deref(),
-            queue_config.as_deref(),
-        )
+        .service
+        .create_workflow(draft, false)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri IPC command: arg list mirrors the JS invoke() payload.
 pub fn update_workflow(
     state: State<AppState>,
     id: String,
@@ -138,68 +118,197 @@ pub fn update_workflow(
     email_on_failure: Option<bool>,
     timezone: Option<String>,
     corpus: Option<String>,
+    environment: Option<String>,
     domain: Option<String>,
     trigger_config: Option<String>,
     queue_config: Option<String>,
 ) -> Result<Workflow, String> {
     let existing = state.db.get_workflow(&id).map_err(|e| e.to_string())?;
-    let next_corpus = corpus.as_deref().unwrap_or(&existing.corpus);
-    let next_domain = domain.as_deref().or(existing.domain.as_deref());
-    let next_trigger_config = trigger_config
-        .as_deref()
-        .or(existing.trigger_config.as_deref());
-    let next_queue_config = queue_config.as_deref().or(existing.queue_config.as_deref());
-    let next_async_mode = async_mode.unwrap_or(existing.async_mode);
-    if existing.corpus == "source"
-        && source_definition_changed(
-            &existing,
-            &name,
-            description.as_deref(),
-            &script_path,
-            &cron_schedule,
-            next_async_mode,
-            next_corpus,
-            next_domain,
-            next_trigger_config,
-            next_queue_config,
-        )
-    {
-        return Err("source-corpus workflow definitions are source-controlled; only enabled, email, and timezone runtime preferences are editable in the Scheduler UI".to_string());
-    }
+    let environment = environment
+        .or_else(|| corpus.clone())
+        .or_else(|| Some(existing.environment.clone()));
+    let draft = WorkflowDraft {
+        name,
+        description,
+        script_path,
+        cron_schedule,
+        async_mode: async_mode.unwrap_or(existing.async_mode),
+        email_on_failure: email_on_failure.unwrap_or(true),
+        timezone: timezone.unwrap_or_else(|| "UTC".to_string()),
+        corpus: corpus.unwrap_or_else(|| existing.corpus.clone()),
+        environment,
+        domain: domain.or_else(|| existing.domain.clone()),
+        trigger_config: trigger_config.or_else(|| existing.trigger_config.clone()),
+        queue_config: queue_config.or_else(|| existing.queue_config.clone()),
+    };
+    // UI-originated: may only touch runtime prefs on managed workflows.
     state
-        .db
-        .update_workflow(
-            &id,
-            &name,
-            description.as_deref(),
-            &script_path,
-            &cron_schedule,
-            enabled,
-            next_async_mode,
-            email_on_failure.unwrap_or(true),
-            timezone.as_deref().unwrap_or("UTC"),
-            next_corpus,
-            next_domain,
-            next_trigger_config,
-            next_queue_config,
-        )
+        .service
+        .update_workflow(&id, enabled, draft, false)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn delete_workflow(state: State<AppState>, id: String) -> Result<(), String> {
-    let existing = state.db.get_workflow(&id).map_err(|e| e.to_string())?;
-    if existing.corpus == "source" {
-        return Err("source-corpus workflows are source-controlled; remove them from the product registry instead of deleting from the Scheduler UI".to_string());
+    state
+        .service
+        .delete_workflow(&id, false)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_environments(state: State<AppState>) -> Result<Vec<crate::db::Environment>, String> {
+    state.service.list_environments().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn create_environment(
+    state: State<AppState>,
+    name: String,
+    description: Option<String>,
+    working_dir: Option<String>,
+    default_queue_capacity: Option<i64>,
+    default_tag_cap: Option<i64>,
+    default_max_queued: Option<i64>,
+) -> Result<crate::db::Environment, String> {
+    state
+        .service
+        .create_environment(
+            &name,
+            description.as_deref(),
+            working_dir.as_deref(),
+            default_queue_capacity,
+            default_tag_cap,
+            default_max_queued,
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_environment(state: State<AppState>, id: String) -> Result<(), String> {
+    state
+        .service
+        .delete_environment(&id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn update_environment(
+    state: State<AppState>,
+    id: String,
+    name: String,
+    description: Option<String>,
+    working_dir: Option<String>,
+    default_queue_capacity: Option<i64>,
+    default_tag_cap: Option<i64>,
+    default_max_queued: Option<i64>,
+) -> Result<crate::db::Environment, String> {
+    state
+        .service
+        .update_environment(
+            &id,
+            &name,
+            description.as_deref(),
+            working_dir.as_deref(),
+            default_queue_capacity,
+            default_tag_cap,
+            default_max_queued,
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// Validate + persist a workflow's execution spec (kind + spec_json).
+#[tauri::command]
+pub fn set_workflow_spec(
+    state: State<AppState>,
+    id: String,
+    spec: crate::workflow_spec::WorkflowSpec,
+) -> Result<Workflow, String> {
+    state
+        .service
+        .set_workflow_spec(&id, &spec)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_api_keys(state: State<AppState>) -> Result<Vec<crate::db::ApiKeyInfo>, String> {
+    state.service.list_api_keys().map_err(|e| e.to_string())
+}
+
+/// Check the configured updater endpoint for a newer release. Degrades
+/// gracefully (returns `available: false` with an `error` note) when the
+/// updater is unconfigured or the network is unavailable, so the UI never hard-
+/// fails.
+#[tauri::command]
+pub async fn check_for_update(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => return Ok(serde_json::json!({ "available": false, "error": e.to_string() })),
+    };
+    match updater.check().await {
+        Ok(Some(update)) => Ok(serde_json::json!({
+            "available": true,
+            "version": update.version,
+            "current_version": update.current_version,
+            "notes": update.body,
+        })),
+        Ok(None) => Ok(serde_json::json!({ "available": false })),
+        Err(e) => Ok(serde_json::json!({ "available": false, "error": e.to_string() })),
     }
-    state.db.delete_workflow(&id).map_err(|e| e.to_string())
+}
+
+/// Download + install the available update, then relaunch. Returns
+/// `applied: false` when there is nothing to install.
+#[tauri::command]
+pub async fn apply_update(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+        return Ok(serde_json::json!({ "applied": false, "reason": "no update available" }));
+    };
+    update
+        .download_and_install(|_downloaded, _total| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    // Relaunch into the freshly-installed version.
+    app.restart();
+}
+
+#[tauri::command]
+pub fn revoke_api_key(state: State<AppState>, id: String) -> Result<(), String> {
+    state.service.revoke_api_key(&id).map_err(|e| e.to_string())
+}
+
+/// Mint a new HTTP API key. Returns the plaintext token exactly once.
+#[tauri::command]
+pub fn create_api_key(
+    state: State<AppState>,
+    name: Option<String>,
+    scopes: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    let scope_refs: Vec<&str> = scopes
+        .as_ref()
+        .map(|s| s.iter().map(String::as_str).collect())
+        .unwrap_or_else(|| vec!["read"]);
+    let key = state
+        .service
+        .create_api_key(name.as_deref(), &scope_refs)
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "id": key.id,
+        "token": key.token,
+        "scopes": key.scopes,
+    }))
 }
 
 #[tauri::command]
 pub fn trigger_workflow(state: State<AppState>, id: String) -> Result<String, String> {
     let result = scheduler::execute_workflow_with_context(
         &state.db,
-        &state.chaos_labs_root,
+        &state.workspace_root,
         &state.python_path,
         &id,
         true,
@@ -216,7 +325,7 @@ pub fn trigger_workflow(state: State<AppState>, id: String) -> Result<String, St
     if result.completed {
         scheduler::trigger_on_completion(
             &state.db,
-            &state.chaos_labs_root,
+            &state.workspace_root,
             &state.python_path,
             &id,
             &result.run_id,
@@ -247,7 +356,7 @@ pub fn rerun_workflow(
     .to_string();
     let result = scheduler::execute_workflow_with_context(
         &state.db,
-        &state.chaos_labs_root,
+        &state.workspace_root,
         &state.python_path,
         &workflow_id,
         true,
@@ -264,7 +373,7 @@ pub fn rerun_workflow(
     if result.completed {
         scheduler::trigger_on_completion(
             &state.db,
-            &state.chaos_labs_root,
+            &state.workspace_root,
             &state.python_path,
             &workflow_id,
             &result.run_id,
@@ -417,7 +526,7 @@ pub fn dispatch_backfill(
         .to_string();
         outcomes.push(scheduler::dispatch_non_cron_workflow(
             &state.db,
-            &state.chaos_labs_root,
+            &state.workspace_root,
             &state.python_path,
             &workflow_id,
             scheduler::NonCronDispatchOptions {
@@ -516,7 +625,7 @@ pub fn recover_dead_letter(
     .to_string();
     let outcome = scheduler::dispatch_non_cron_workflow(
         &state.db,
-        &state.chaos_labs_root,
+        &state.workspace_root,
         &state.python_path,
         &dead_letter.workflow_id,
         scheduler::NonCronDispatchOptions {
@@ -736,17 +845,16 @@ fn normalize_time_bucket(value: Option<&str>) -> Result<String, String> {
     }
 }
 
+/// Normalize a mission-control environment filter. Environments are
+/// user-managed, so any non-empty value is passed through as the partition to
+/// filter on; empty / "all" means no environment filter.
 fn normalize_mission_corpus_filter(value: Option<String>, default: &str) -> String {
-    match value
-        .as_deref()
-        .unwrap_or(default)
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "source" => "source".to_string(),
-        "instance" => "instance".to_string(),
-        _ => "all".to_string(),
+    let raw = value.unwrap_or_else(|| default.to_string());
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
+        "all".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -1040,6 +1148,7 @@ pub fn get_mission_control_snapshot(
                             workflow_id: workflow.id.clone(),
                             workflow_name: workflow.name.clone(),
                             corpus: workflow.corpus.clone(),
+                            environment: workflow.environment.clone(),
                             domain: workflow_owner(workflow),
                             trigger_kind,
                             trigger_label: cron,
@@ -1147,6 +1256,7 @@ pub fn get_scheduler_status(state: State<AppState>) -> Result<SchedulerStatus, S
                         workflow_id: w.id.clone(),
                         workflow_name: w.name.clone(),
                         corpus: w.corpus.clone(),
+                        environment: w.environment.clone(),
                         next_time: t,
                     })
                 })
@@ -1179,6 +1289,10 @@ mod tests {
             async_mode: false,
             email_on_failure: true,
             corpus: "source".to_string(),
+            environment: "source".to_string(),
+            managed_externally: true,
+            kind: "generic".to_string(),
+            spec_json: None,
             domain: Some("scheduler".to_string()),
             timezone: "UTC".to_string(),
             trigger_config: trigger_config.map(str::to_string),
@@ -1226,51 +1340,6 @@ mod tests {
             ]
         );
     }
-
-    #[test]
-    fn source_definition_change_detects_only_source_controlled_fields() {
-        let workflow = workflow_with_trigger(
-            Some(r#"{"triggers":[{"kind":"cron","cron":"0 3 * * *"}]}"#),
-            "0 2 * * *",
-        );
-
-        assert!(!source_definition_changed(
-            &workflow,
-            "Workflow",
-            None,
-            "scripts/workflows/noop.py",
-            "0 2 * * *",
-            false,
-            "source",
-            Some("scheduler"),
-            Some(r#"{"triggers":[{"kind":"cron","cron":"0 3 * * *"}]}"#),
-            None,
-        ));
-        assert!(source_definition_changed(
-            &workflow,
-            "Workflow",
-            None,
-            "scripts/workflows/replaced.py",
-            "0 2 * * *",
-            false,
-            "source",
-            Some("scheduler"),
-            Some(r#"{"triggers":[{"kind":"cron","cron":"0 3 * * *"}]}"#),
-            None,
-        ));
-        assert!(source_definition_changed(
-            &workflow,
-            "Workflow",
-            None,
-            "scripts/workflows/noop.py",
-            "0 2 * * *",
-            false,
-            "instance",
-            Some("scheduler"),
-            Some(r#"{"triggers":[{"kind":"cron","cron":"0 3 * * *"}]}"#),
-            None,
-        ));
-    }
 }
 
 #[tauri::command]
@@ -1282,14 +1351,14 @@ pub fn list_queues(state: State<AppState>) -> Result<Vec<QueueInfo>, String> {
 pub fn update_queue(
     state: State<AppState>,
     name: String,
-    corpus: String,
+    environment: String,
     capacity: i64,
     tag_cap: Option<i64>,
     max_queued: Option<i64>,
 ) -> Result<QueueInfo, String> {
     state
         .db
-        .upsert_queue(&name, &corpus, capacity, tag_cap, max_queued)
+        .upsert_queue(&name, &environment, capacity, tag_cap, max_queued)
         .map_err(|e| e.to_string())
 }
 
@@ -1401,13 +1470,13 @@ pub fn set_launch_at_login(enabled: bool) -> Result<String, String> {
 
 #[tauri::command]
 pub fn list_available_scripts(state: State<AppState>) -> Result<Vec<AvailableScript>, String> {
-    let root = &state.chaos_labs_root;
+    let root = &state.workspace_root;
     let workflows_dir = std::path::Path::new(root).join("scripts").join("workflows");
 
     let mut scripts = Vec::new();
 
     if workflows_dir.exists() {
-        collect_scripts(&workflows_dir, &root, &mut scripts)?;
+        collect_scripts(&workflows_dir, root, &mut scripts)?;
     }
 
     scripts.sort_by(|a, b| a.path.cmp(&b.path));
@@ -1549,7 +1618,7 @@ pub fn analyze_run_error(
         return Ok(existing.clone());
     }
 
-    let root = &state.chaos_labs_root;
+    let root = &state.workspace_root;
     let python_path = &state.python_path;
     let script_path = format!("{}/scripts/analyze_error.py", root);
 
@@ -1561,7 +1630,7 @@ pub fn analyze_run_error(
         "stdout": run.stdout,
     });
 
-    let output = std::process::Command::new(&python_path)
+    let output = std::process::Command::new(python_path)
         .arg(&script_path)
         .current_dir(root)
         .env("CHAOS_LABS_ROOT", root)
@@ -1592,7 +1661,7 @@ pub fn generate_workflow_description(
     state: State<AppState>,
     script_path: String,
 ) -> Result<String, String> {
-    let root = &state.chaos_labs_root;
+    let root = &state.workspace_root;
     let python_path = &state.python_path;
     let analysis_script = format!("{}/scripts/analyze_workflow.py", root);
 
@@ -1605,7 +1674,7 @@ pub fn generate_workflow_description(
         "chaos_labs_root": root,
     });
 
-    let output = std::process::Command::new(&python_path)
+    let output = std::process::Command::new(python_path)
         .arg(&analysis_script)
         .current_dir(root)
         .env("CHAOS_LABS_ROOT", root)
@@ -1676,69 +1745,34 @@ pub fn test_email_config(state: State<AppState>) -> Result<serde_json::Value, St
         return Err("Email configuration is incomplete".to_string());
     }
 
-    run_email_script(&state.chaos_labs_root, &config, None, "test")
+    send_email_alert(&config, None, "test")
 }
 
-/// Invoke the Python email script with the given context.
-/// Used by both test_email_config and send_failure_email.
-pub fn run_email_script(
-    chaos_labs_root: &str,
+/// Send scheduler email natively via `lettre` (replaces the former
+/// `email_alert.py` subprocess). Returns the `{success, error?}` JSON shape the
+/// callers/UI expect. Used by both `test_email_config` and `send_failure_email`.
+pub fn send_email_alert(
     config: &EmailConfig,
     run_context: Option<&serde_json::Value>,
     mode: &str,
 ) -> Result<serde_json::Value, String> {
-    let python_path = format!("{}/.venv/bin/python3", chaos_labs_root);
-    let script_path = format!("{}/scripts/email_alert.py", chaos_labs_root);
+    let (subject, body) = match mode {
+        "test" => (
+            "Chaos Scheduler — test email".to_string(),
+            "This is a test message from Chaos Scheduler. Your SMTP configuration works."
+                .to_string(),
+        ),
+        _ => match run_context {
+            Some(ctx) => crate::email::compose_failure_alert(ctx),
+            None => (
+                "Chaos Scheduler alert".to_string(),
+                "A workflow reported a failure.".to_string(),
+            ),
+        },
+    };
 
-    if !std::path::Path::new(&script_path).exists() {
-        return Err("email_alert.py not found — run deploy.py to sync scripts".to_string());
+    match crate::email::send_email(config, &config.alert_email, &subject, &body) {
+        Ok(()) => Ok(serde_json::json!({ "success": true })),
+        Err(e) => Ok(serde_json::json!({ "success": false, "error": e })),
     }
-
-    let mut context = run_context
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-    if let Some(obj) = context.as_object_mut() {
-        obj.insert("mode".to_string(), serde_json::json!(mode));
-        obj.insert("smtp_host".to_string(), serde_json::json!(config.smtp_host));
-        obj.insert("smtp_port".to_string(), serde_json::json!(config.smtp_port));
-        obj.insert("smtp_user".to_string(), serde_json::json!(config.smtp_user));
-        obj.insert(
-            "smtp_password".to_string(),
-            serde_json::json!(config.smtp_password),
-        );
-        obj.insert(
-            "from_address".to_string(),
-            serde_json::json!(config.from_address),
-        );
-        obj.insert("from_name".to_string(), serde_json::json!(config.from_name));
-        obj.insert(
-            "to_address".to_string(),
-            serde_json::json!(config.alert_email),
-        );
-    }
-
-    let output = std::process::Command::new(&python_path)
-        .arg(&script_path)
-        .current_dir(chaos_labs_root)
-        .env("CHAOS_LABS_ROOT", chaos_labs_root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            if let Some(stdin) = child.stdin.as_mut() {
-                let _ = stdin.write_all(context.to_string().as_bytes());
-            }
-            child.wait_with_output()
-        })
-        .map_err(|e| format!("Failed to run email script: {}", e))?;
-
-    let result_str = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(result_str.trim()).map_err(|e| {
-        format!(
-            "Failed to parse email script output: {} — raw: {}",
-            e, result_str
-        )
-    })
 }

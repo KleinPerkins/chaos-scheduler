@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getGlobalRunHistory } from "../lib/commands";
 import type { Run } from "../lib/commands";
+import { useEnvironments } from "../hooks/useEnvironments";
 import "./RunHistory.css";
 import "./QueueView.css";
 
@@ -10,14 +11,18 @@ interface Props {
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
-  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${d.toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZoneName: "short",
-  })}`;
+  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${d.toLocaleTimeString(
+    [],
+    {
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZoneName: "short",
+    },
+  )}`;
 }
 
 export default function GlobalHistory({ onViewRun }: Props) {
+  const { environments } = useEnvironments();
   const [runs, setRuns] = useState<Run[]>([]);
   const [statusFilter, setStatusFilter] = useState("all");
   const [triggerKind, setTriggerKind] = useState("all");
@@ -29,7 +34,13 @@ export default function GlobalHistory({ onViewRun }: Props) {
   const load = () => {
     setLoading(true);
     setError(null);
-    getGlobalRunHistory(statusFilter, triggerKind, corpusFilter, domainFilter, 100)
+    getGlobalRunHistory(
+      statusFilter,
+      triggerKind,
+      corpusFilter,
+      domainFilter,
+      100,
+    )
       .then(setRuns)
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
@@ -45,7 +56,9 @@ export default function GlobalHistory({ onViewRun }: Props) {
       <div className="page-header">
         <div>
           <h1 className="page-title">Global History</h1>
-          <p className="page-subtitle">Filter indexed scheduler.db runs across workflows.</p>
+          <p className="page-subtitle">
+            Filter indexed scheduler.db runs across workflows.
+          </p>
         </div>
       </div>
 
@@ -57,7 +70,10 @@ export default function GlobalHistory({ onViewRun }: Props) {
         <div className="queue-fields">
           <label>
             Status
-            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+            >
               <option value="all">All</option>
               <option value="running">Running</option>
               <option value="success">Success</option>
@@ -67,7 +83,10 @@ export default function GlobalHistory({ onViewRun }: Props) {
           </label>
           <label>
             Trigger
-            <select value={triggerKind} onChange={(e) => setTriggerKind(e.target.value)}>
+            <select
+              value={triggerKind}
+              onChange={(e) => setTriggerKind(e.target.value)}
+            >
               <option value="all">All</option>
               <option value="cron">Cron</option>
               <option value="manual">Manual</option>
@@ -76,18 +95,37 @@ export default function GlobalHistory({ onViewRun }: Props) {
             </select>
           </label>
           <label>
-            Corpus
-            <select value={corpusFilter} onChange={(e) => setCorpusFilter(e.target.value)}>
+            Environment
+            <select
+              value={corpusFilter}
+              onChange={(e) => setCorpusFilter(e.target.value)}
+            >
               <option value="all">All</option>
-              <option value="source">Source</option>
-              <option value="instance">Instance</option>
+              {environments.map((env) => (
+                <option key={env.id} value={env.name}>
+                  {env.name.charAt(0).toUpperCase() + env.name.slice(1)}
+                </option>
+              ))}
+              {environments.length === 0 && (
+                <>
+                  <option value="source">Source</option>
+                  <option value="instance">Instance</option>
+                </>
+              )}
             </select>
           </label>
           <label>
             Domain
-            <input value={domainFilter} onChange={(e) => setDomainFilter(e.target.value || "all")} />
+            <input
+              value={domainFilter}
+              onChange={(e) => setDomainFilter(e.target.value || "all")}
+            />
           </label>
-          <button className="btn btn-primary btn-sm" onClick={load} disabled={loading}>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={load}
+            disabled={loading}
+          >
             {loading ? "Loading..." : "Apply"}
           </button>
         </div>
@@ -113,14 +151,19 @@ export default function GlobalHistory({ onViewRun }: Props) {
             {runs.map((run) => (
               <tr key={run.id}>
                 <td>
-                  <span className={`status-badge ${run.status}`}>{run.status}</span>
+                  <span className={`status-badge ${run.status}`}>
+                    {run.status}
+                  </span>
                 </td>
                 <td>{run.workflow_name ?? run.workflow_id}</td>
                 <td>{formatDate(run.started_at)}</td>
                 <td>{run.trigger_kind ?? "cron"}</td>
                 <td>{run.exit_code ?? "—"}</td>
                 <td>
-                  <button className="btn btn-ghost btn-sm" onClick={() => onViewRun(run)}>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => onViewRun(run)}
+                  >
                     Details
                   </button>
                 </td>

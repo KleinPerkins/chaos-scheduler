@@ -1,5 +1,5 @@
 .editor-form {
-  max-width: 560px;
+  max-width: 720px;
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -89,10 +89,248 @@
 }
 
 @keyframes aiPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
 }
 
 .btn-ai:disabled .btn-ai-loading {
   animation: aiPulse 1.2s ease-in-out infinite;
+}
+
+/* --- Managed / notice banners --- */
+.editor-managed-banner {
+  background: rgba(124, 108, 255, 0.08);
+  border: 1px dashed rgba(124, 108, 255, 0.35);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.editor-notice {
+  background: rgba(124, 108, 255, 0.06);
+  border: 1px solid rgba(124, 108, 255, 0.2);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+}
+
+/* --- Kind selector --- */
+.editor-kind {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin: 0;
+}
+
+.editor-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.editor-radio input {
+  margin: 0;
+}
+
+.editor-field-row {
+  display: flex;
+  gap: 12px;
+}
+
+.editor-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* --- Step-flow builder --- */
+.step-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.step-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+}
+
+.step-card-legend {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  padding: 0 4px;
+}
+
+.step-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.step-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 120px;
+}
+
+.step-field > span,
+.step-field-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.step-field-id {
+  max-width: 160px;
+}
+
+.step-field-mode {
+  max-width: 160px;
+}
+
+.step-remove {
+  flex: 0 0 auto;
+}
+
+.step-deps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.step-dep-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.step-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.step-add {
+  align-self: flex-start;
+}
+
+/* --- Operator form --- */
+.operator-form,
+.operator-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* --- Actions editor --- */
+.editor-actions-section {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+}
+
+.actions-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.actions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.actions-add {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.actions-empty {
+  padding: 6px 0;
+}
+
+.action-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.action-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.action-row select,
+.action-row input {
+  min-width: 0;
+}
+
+.action-row input[type="url"],
+.action-row input[type="email"] {
+  flex: 1;
+  min-width: 160px;
+}
+
+.action-inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* --- Advanced collapsibles --- */
+.editor-advanced {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+}
+
+.editor-advanced > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.editor-advanced .editor-field {
+  margin-top: 12px;
 }

@@ -7,12 +7,33 @@ import RunDetail from "./RunDetail";
 import GlobalHistory from "./GlobalHistory";
 import QueueView from "./QueueView";
 import Settings from "./Settings";
-import MissionControl, { type MissionControlReturnState, type MissionTab } from "./MissionControl";
-import { getMissionControlPreferences, getSchedulerStatus, getSlaViolations, getWorkflow } from "../lib/commands";
+import Environments from "./Environments";
+import Integrations from "./Integrations";
+import MissionControl, {
+  type MissionControlReturnState,
+  type MissionTab,
+} from "./MissionControl";
+import {
+  getMissionControlPreferences,
+  getSchedulerStatus,
+  getSlaViolations,
+  getWorkflow,
+} from "../lib/commands";
 import type { SchedulerStatus, SlaViolation, Workflow } from "../lib/commands";
+import { PRODUCT_SHORT_NAME, APP_VERSION } from "../lib/branding";
 import "./Dashboard.css";
 
-type View = "mission" | "workflows" | "editor" | "history" | "detail" | "global_history" | "queues" | "settings";
+type View =
+  | "mission"
+  | "workflows"
+  | "editor"
+  | "history"
+  | "detail"
+  | "global_history"
+  | "queues"
+  | "environments"
+  | "integrations"
+  | "settings";
 
 interface NavState {
   view: View;
@@ -77,13 +98,20 @@ export default function Dashboard() {
         const returnTo: NavState = { view: "mission", missionTab: "activity" };
         try {
           const wf = await getWorkflow(event.payload.workflowId);
-          setNav({ view: "detail", workflow: wf, runId: event.payload.runId, returnTo });
+          setNav({
+            view: "detail",
+            workflow: wf,
+            runId: event.payload.runId,
+            returnTo,
+          });
         } catch {
           setNav({ view: "detail", runId: event.payload.runId, returnTo });
         }
-      }
+      },
     );
-    return () => { unlisten.then((fn) => fn()); };
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, []);
 
   useEffect(() => {
@@ -92,15 +120,24 @@ export default function Dashboard() {
       setLandingResolved(true);
       setNav({ view: "mission" });
     });
-    return () => { unlisten.then((fn) => fn()); };
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, []);
 
   useEffect(() => {
     let cancelled = false;
     getMissionControlPreferences()
       .then((prefs) => {
-        if (cancelled || forcedMissionLanding.current || prefs.default_landing !== "dashboard") return;
-        setNav((current) => (current.view === "mission" ? { view: "workflows" } : current));
+        if (
+          cancelled ||
+          forcedMissionLanding.current ||
+          prefs.default_landing !== "dashboard"
+        )
+          return;
+        setNav((current) =>
+          current.view === "mission" ? { view: "workflows" } : current,
+        );
       })
       .catch(() => {})
       .finally(() => {
@@ -113,8 +150,12 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (nav.view !== "workflows") return;
-    getSchedulerStatus().then(setStatus).catch(() => setStatus(null));
-    getSlaViolations().then(setSlaViolations).catch(() => setSlaViolations([]));
+    getSchedulerStatus()
+      .then(setStatus)
+      .catch(() => setStatus(null));
+    getSlaViolations()
+      .then(setSlaViolations)
+      .catch(() => setSlaViolations([]));
   }, [nav.view, refreshKey]);
 
   if (!landingResolved) {
@@ -125,10 +166,12 @@ export default function Dashboard() {
     <div className="dashboard">
       <aside className="dashboard-sidebar">
         <div className="sidebar-brand">
-          <span className="brand-icon">&#9881;</span>
-          <span className="brand-text">Chaos Labs</span>
+          <span className="brand-icon" aria-hidden="true">
+            &#9881;
+          </span>
+          <span className="brand-text">{PRODUCT_SHORT_NAME}</span>
         </div>
-        <nav className="sidebar-nav">
+        <nav className="sidebar-nav" aria-label="Primary navigation">
           <button
             className={`sidebar-link ${nav.view === "mission" ? "active" : ""}`}
             onClick={() => setNav({ view: "mission" })}
@@ -158,6 +201,20 @@ export default function Dashboard() {
             Queues
           </button>
           <button
+            className={`sidebar-link ${nav.view === "environments" ? "active" : ""}`}
+            onClick={() => setNav({ view: "environments" })}
+          >
+            <span className="sidebar-icon">&#9709;</span>
+            Environments
+          </button>
+          <button
+            className={`sidebar-link ${nav.view === "integrations" ? "active" : ""}`}
+            onClick={() => setNav({ view: "integrations" })}
+          >
+            <span className="sidebar-icon">&#128268;</span>
+            Integrations
+          </button>
+          <button
             className={`sidebar-link ${nav.view === "settings" ? "active" : ""}`}
             onClick={() => setNav({ view: "settings" })}
           >
@@ -166,7 +223,7 @@ export default function Dashboard() {
           </button>
         </nav>
         <div className="sidebar-footer">
-          <span className="sidebar-version">v0.1.0</span>
+          <span className="sidebar-version">v{APP_VERSION}</span>
         </div>
       </aside>
 
@@ -197,19 +254,37 @@ export default function Dashboard() {
             {status && (
               <div className="dashboard-status-grid">
                 <div className="dashboard-status-card">
-                  <span className="dashboard-status-value">{status.active_workflows}</span>
-                  <span className="dashboard-status-label">Active workflows</span>
+                  <span className="dashboard-status-value">
+                    {status.active_workflows}
+                  </span>
+                  <span className="dashboard-status-label">
+                    Active workflows
+                  </span>
                 </div>
                 <div className="dashboard-status-card">
-                  <span className="dashboard-status-value">{status.running_count}</span>
+                  <span className="dashboard-status-value">
+                    {status.running_count}
+                  </span>
                   <span className="dashboard-status-label">Running now</span>
                 </div>
                 <div className="dashboard-status-card">
-                  <span className="dashboard-status-value">{status.recent_runs.filter((run) => run.status === "failed").length}</span>
-                  <span className="dashboard-status-label">Recent failures</span>
+                  <span className="dashboard-status-value">
+                    {
+                      status.recent_runs.filter(
+                        (run) => run.status === "failed",
+                      ).length
+                    }
+                  </span>
+                  <span className="dashboard-status-label">
+                    Recent failures
+                  </span>
                 </div>
-                <div className={`dashboard-status-card ${slaViolations.length ? "warning" : ""}`}>
-                  <span className="dashboard-status-value">{slaViolations.length}</span>
+                <div
+                  className={`dashboard-status-card ${slaViolations.length ? "warning" : ""}`}
+                >
+                  <span className="dashboard-status-value">
+                    {slaViolations.length}
+                  </span>
                   <span className="dashboard-status-label">SLA violations</span>
                 </div>
               </div>
@@ -217,7 +292,10 @@ export default function Dashboard() {
             {slaViolations.length > 0 && (
               <div className="dashboard-alert-list">
                 {slaViolations.slice(0, 3).map((violation) => (
-                  <div key={`${violation.workflow_id}-${violation.violation_type}`} className="dashboard-alert">
+                  <div
+                    key={`${violation.workflow_id}-${violation.violation_type}`}
+                    className="dashboard-alert"
+                  >
                     <strong>{violation.workflow_name}</strong>
                     <span>{violation.message}</span>
                   </div>
@@ -251,7 +329,11 @@ export default function Dashboard() {
                 view: "detail",
                 workflow: nav.workflow,
                 runId,
-                returnTo: { view: "history", workflow: nav.workflow, returnTo: nav.returnTo },
+                returnTo: {
+                  view: "history",
+                  workflow: nav.workflow,
+                  returnTo: nav.returnTo,
+                },
               })
             }
           />
@@ -260,20 +342,30 @@ export default function Dashboard() {
           <RunDetail
             runId={nav.runId}
             onBack={() =>
-              setNav(nav.returnTo ?? { view: "history", workflow: nav.workflow })
+              setNav(
+                nav.returnTo ?? { view: "history", workflow: nav.workflow },
+              )
             }
           />
         )}
         {nav.view === "global_history" && (
           <GlobalHistory
             onViewRun={(run) =>
-              setNav({ view: "detail", runId: run.id, returnTo: { view: "global_history" } })
+              setNav({
+                view: "detail",
+                runId: run.id,
+                returnTo: { view: "global_history" },
+              })
             }
           />
         )}
         {nav.view === "queues" && (
-          <QueueView onBack={nav.returnTo ? () => setNav(nav.returnTo!) : undefined} />
+          <QueueView
+            onBack={nav.returnTo ? () => setNav(nav.returnTo!) : undefined}
+          />
         )}
+        {nav.view === "environments" && <Environments />}
+        {nav.view === "integrations" && <Integrations />}
         {nav.view === "settings" && <Settings />}
       </main>
     </div>
