@@ -415,7 +415,7 @@ async fn register_workflow(
     // API-registered workflows are externally-managed by definition.
     let mut wf = st.service.create_workflow(draft, true)?;
     if let Some(spec) = body.spec {
-        wf = st.service.set_workflow_spec(&wf.id, &spec)?;
+        wf = st.service.set_workflow_spec(&wf.id, &spec, true)?;
     }
     Ok(Json(json!({ "workflow": wf })))
 }
@@ -443,7 +443,7 @@ async fn set_spec(
         "POST",
         "/api/v1/workflows/{id}/spec",
     )?;
-    let wf = st.service.set_workflow_spec(&id, &spec)?;
+    let wf = st.service.set_workflow_spec(&id, &spec, true)?;
     Ok(Json(json!({ "workflow": wf })))
 }
 
@@ -454,6 +454,7 @@ fn dispatch_with_idempotency(
     trigger_kind: &str,
     payload: Option<&str>,
 ) -> Result<Json<Value>, ApiError> {
+    st.service.ensure_workflow_execution_allowed(id)?;
     let idem = headers
         .get("idempotency-key")
         .and_then(|v| v.to_str().ok())
@@ -944,6 +945,99 @@ mod tests {
         let (status, value) = body_json(resp).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(value["workflows"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn protected_environment_write_endpoints_are_rejected() {
+        let (state, token) = test_state();
+        let wf = state
+            .db
+            .create_workflow(
+                "Prod WF",
+                None,
+                "scripts/prod.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "prod",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let app = router(state);
+
+        let register = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workflows")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "name": "blocked",
+                            "script_path": "scripts/x.py",
+                            "cron_schedule": "0 0 * * *",
+                            "environment": "prod"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(register.status(), StatusCode::FORBIDDEN);
+
+        let run = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workflows/{}/run", wf.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(run.status(), StatusCode::FORBIDDEN);
+
+        let spec = json!({
+            "kind": "generic",
+            "generic": {
+                "steps": [{ "id": "s1", "command": "echo hi" }]
+            }
+        });
+        let set_spec = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workflows/{}/spec", wf.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(spec.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(set_spec.status(), StatusCode::FORBIDDEN);
+
+        let delete = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/workflows/{}", wf.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

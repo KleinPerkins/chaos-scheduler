@@ -209,5 +209,10 @@ export interface CreateEnvironmentInput {
   default_max_queued?: number;
 }
 
-/** Scopes recognized by the backend API-key model (`service.rs`). */
+/**
+ * Scopes recognized by the backend API-key model (`service.rs`).
+ *
+ * `write` and `admin` keys can register/run local workflows and should be
+ * treated as local-code-execution credentials.
+ */
 export type ApiScope = "read" | "write" | "admin";

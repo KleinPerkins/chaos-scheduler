@@ -64,6 +64,17 @@ sent as `Authorization: Bearer <id>.<secret>`. Scopes:
 | `write` | create/register/delete, run/enqueue/dispatch |
 | `admin` | superuser (implies `read` + `write`)         |
 
+`write` and `admin` keys are local-code-execution credentials: a holder can
+register or run workflows that execute commands on the scheduler host. Store
+them in a secret manager, rotate/revoke aggressively, and avoid putting them in
+logs, prompts, or issue trackers.
+
+Protected environments default to `prod,production`. Backend write paths refuse
+to create, edit, delete, or execute workflows in those environments unless the
+scheduler process is started with
+`CHAOS_SCHEDULER_ALLOW_PROTECTED_WRITES=1`. Override the protected-name list with
+`CHAOS_SCHEDULER_PROTECTED_ENVIRONMENTS=prod,production,...`.
+
 `getHealth()` and `getVersion()` need no key.
 
 > **Note:** API-key creation/listing is **not** exposed over REST; keys are

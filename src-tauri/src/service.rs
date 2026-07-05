@@ -189,14 +189,32 @@ pub struct SchedulerService {
     notifier: Arc<dyn Notifier>,
     #[allow(dead_code)]
     clock: Arc<dyn Clock>,
+    protected_environments: Vec<String>,
+    allow_protected_writes: bool,
 }
 
 impl SchedulerService {
     pub fn new(db: Arc<Database>, notifier: Arc<dyn Notifier>) -> Self {
+        Self::with_protection_config(
+            db,
+            notifier,
+            protected_environments_from_env(),
+            protected_writes_allowed_from_env(),
+        )
+    }
+
+    pub fn with_protection_config(
+        db: Arc<Database>,
+        notifier: Arc<dyn Notifier>,
+        protected_environments: Vec<String>,
+        allow_protected_writes: bool,
+    ) -> Self {
         Self {
             db,
             notifier,
             clock: Arc::new(SystemClock),
+            protected_environments: normalize_environment_names(protected_environments),
+            allow_protected_writes,
         }
     }
 
@@ -211,6 +229,8 @@ impl SchedulerService {
             db,
             notifier,
             clock,
+            protected_environments: protected_environments_from_env(),
+            allow_protected_writes: protected_writes_allowed_from_env(),
         }
     }
 
@@ -236,6 +256,51 @@ impl SchedulerService {
         workflow.managed_externally
     }
 
+    pub fn is_protected_environment_name(&self, environment: &str) -> bool {
+        let normalized = normalize_environment_name(environment);
+        !normalized.is_empty()
+            && self
+                .protected_environments
+                .iter()
+                .any(|protected| protected == &normalized)
+    }
+
+    pub fn ensure_environment_target_writable(
+        &self,
+        environment: &str,
+        action: &str,
+    ) -> ServiceResult<()> {
+        if self.allow_protected_writes || !self.is_protected_environment_name(environment) {
+            return Ok(());
+        }
+        Err(ServiceError::Governance(format!(
+            "environment '{environment}' is protected; refusing to {action}. Set CHAOS_SCHEDULER_ALLOW_PROTECTED_WRITES=1 only for an intentional local-code-execution write"
+        )))
+    }
+
+    fn ensure_environment_record_writable(
+        &self,
+        environment: &crate::db::Environment,
+        action: &str,
+    ) -> ServiceResult<()> {
+        if self.allow_protected_writes {
+            return Ok(());
+        }
+        if environment.managed_externally || self.is_protected_environment_name(&environment.name) {
+            return Err(ServiceError::Governance(format!(
+                "environment '{}' is protected; refusing to {action}. Set CHAOS_SCHEDULER_ALLOW_PROTECTED_WRITES=1 only for an intentional local-code-execution write",
+                environment.name
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn ensure_workflow_execution_allowed(&self, id: &str) -> ServiceResult<Workflow> {
+        let workflow = self.get_workflow(id)?;
+        self.ensure_environment_target_writable(&workflow.environment, "execute workflow")?;
+        Ok(workflow)
+    }
+
     /// Validate a workflow spec (structure + operator config) without persisting.
     pub fn validate_spec(&self, spec: &WorkflowSpec) -> ServiceResult<()> {
         spec.validate().map_err(ServiceError::Validation)?;
@@ -251,9 +316,20 @@ impl SchedulerService {
     }
 
     /// Validate and persist a workflow's execution spec (`kind` + `spec_json`).
-    pub fn set_workflow_spec(&self, id: &str, spec: &WorkflowSpec) -> ServiceResult<Workflow> {
+    pub fn set_workflow_spec(
+        &self,
+        id: &str,
+        spec: &WorkflowSpec,
+        allow_managed_edit: bool,
+    ) -> ServiceResult<Workflow> {
         self.validate_spec(spec)?;
-        self.get_workflow(id)?;
+        let existing = self.get_workflow(id)?;
+        self.ensure_environment_target_writable(&existing.environment, "set workflow spec")?;
+        if !allow_managed_edit && self.is_managed_externally(&existing) {
+            return Err(ServiceError::Governance(
+                "externally-managed workflow specs are source-controlled; edit them through their external owner".into(),
+            ));
+        }
         self.db
             .set_workflow_spec(id, spec.kind.as_str(), Some(&spec.to_json()))
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
@@ -337,10 +413,12 @@ impl SchedulerService {
                 "environment name is required".into(),
             ));
         }
-        // Ensure the environment exists first.
-        self.db
+        let env = self
+            .db
             .get_environment(id)
             .map_err(|_| ServiceError::NotFound(format!("environment {id} not found")))?;
+        self.ensure_environment_record_writable(&env, "update environment")?;
+        self.ensure_environment_target_writable(trimmed, "rename environment")?;
         // Reject renaming onto another environment's name.
         if let Some(existing) = self
             .db
@@ -387,6 +465,7 @@ impl SchedulerService {
                 "environment name is required".into(),
             ));
         }
+        self.ensure_environment_target_writable(trimmed, "create environment")?;
         if self
             .db
             .get_environment_by_name(trimmed)
@@ -417,6 +496,7 @@ impl SchedulerService {
             .db
             .get_environment(id)
             .map_err(|_| ServiceError::NotFound(format!("environment {id} not found")))?;
+        self.ensure_environment_record_writable(&env, "delete environment")?;
         let count = self
             .db
             .count_workflows_in_environment(&env.name)
@@ -485,6 +565,7 @@ impl SchedulerService {
             ));
         }
         let environment = draft.effective_environment();
+        self.ensure_environment_target_writable(&environment, "create workflow")?;
         let workflow = self
             .db
             .create_workflow(
@@ -559,6 +640,7 @@ impl SchedulerService {
             ));
         }
         let environment = draft.effective_environment();
+        self.ensure_environment_target_writable(&environment, "update workflow")?;
         let updated = self
             .db
             .update_workflow(
@@ -590,6 +672,7 @@ impl SchedulerService {
     /// to deregister an externally-managed workflow.
     pub fn delete_workflow(&self, id: &str, force: bool) -> ServiceResult<()> {
         let existing = self.get_workflow(id)?;
+        self.ensure_environment_target_writable(&existing.environment, "delete workflow")?;
         if !force && self.is_managed_externally(&existing) {
             return Err(ServiceError::Governance(
                 "source-corpus workflows are source-controlled; remove them from the product registry instead of deleting from the Scheduler UI".into(),
@@ -664,13 +747,80 @@ fn normalize_scopes(scopes: &[&str]) -> String {
     out.join(",")
 }
 
+fn normalize_environment_name(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn normalize_environment_names(values: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = values
+        .into_iter()
+        .map(|value| normalize_environment_name(&value))
+        .filter(|value| !value.is_empty())
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn env_list(value: Option<String>, defaults: &[&str]) -> Vec<String> {
+    value
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_else(|| defaults.iter().map(|item| item.to_string()).collect())
+}
+
+fn env_bool(value: Option<String>) -> bool {
+    value
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn protected_environments_from_env() -> Vec<String> {
+    normalize_environment_names(env_list(
+        std::env::var("CHAOS_SCHEDULER_PROTECTED_ENVIRONMENTS").ok(),
+        &["prod", "production"],
+    ))
+}
+
+fn protected_writes_allowed_from_env() -> bool {
+    env_bool(std::env::var("CHAOS_SCHEDULER_ALLOW_PROTECTED_WRITES").ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn service(dir: &std::path::Path) -> SchedulerService {
         let db = Arc::new(Database::new(dir));
-        SchedulerService::new(db, Arc::new(NoopNotifier))
+        SchedulerService::with_protection_config(
+            db,
+            Arc::new(NoopNotifier),
+            vec!["prod".into(), "production".into()],
+            false,
+        )
+    }
+
+    fn service_with_db(
+        db: Arc<Database>,
+        protected: Vec<&str>,
+        allow_protected_writes: bool,
+    ) -> SchedulerService {
+        SchedulerService::with_protection_config(
+            db,
+            Arc::new(NoopNotifier),
+            protected.into_iter().map(str::to_string).collect(),
+            allow_protected_writes,
+        )
     }
 
     fn draft(name: &str, corpus: &str) -> WorkflowDraft {
@@ -694,6 +844,29 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("chaos-core-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn spec() -> crate::workflow_spec::WorkflowSpec {
+        crate::workflow_spec::WorkflowSpec {
+            kind: crate::workflow_spec::WorkflowKind::Generic,
+            environment: Some("instance".into()),
+            generic: Some(crate::workflow_spec::GenericSpec {
+                steps: vec![crate::workflow_spec::StepSpec {
+                    id: "s1".into(),
+                    command: Some("echo hi".into()),
+                    script: None,
+                    args: vec![],
+                    working_dir: None,
+                    depends_on: vec![],
+                    retry: None,
+                    timeout_seconds: None,
+                    continue_on_error: false,
+                }],
+            }),
+            typed: None,
+            on_success: vec![],
+            on_failure: vec![],
+        }
     }
 
     #[test]
@@ -771,29 +944,104 @@ mod tests {
         let dir = tmpdir();
         let svc = service(&dir);
         let wf = svc.create_workflow(draft("wf", "instance"), false).unwrap();
-        let spec = crate::workflow_spec::WorkflowSpec {
-            kind: crate::workflow_spec::WorkflowKind::Generic,
-            environment: Some("instance".into()),
-            generic: Some(crate::workflow_spec::GenericSpec {
-                steps: vec![crate::workflow_spec::StepSpec {
-                    id: "s1".into(),
-                    command: Some("echo hi".into()),
-                    script: None,
-                    args: vec![],
-                    working_dir: None,
-                    depends_on: vec![],
-                    retry: None,
-                    timeout_seconds: None,
-                    continue_on_error: false,
-                }],
-            }),
-            typed: None,
-            on_success: vec![],
-            on_failure: vec![],
-        };
-        let updated = svc.set_workflow_spec(&wf.id, &spec).unwrap();
+        let spec = spec();
+        let updated = svc.set_workflow_spec(&wf.id, &spec, false).unwrap();
         assert_eq!(updated.kind, "generic");
         assert!(updated.spec_json.is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ui_cannot_set_managed_workflow_spec() {
+        let dir = tmpdir();
+        let svc = service(&dir);
+        let wf = svc.create_workflow(draft("wf", "source"), true).unwrap();
+        let err = svc.set_workflow_spec(&wf.id, &spec(), false).unwrap_err();
+        assert!(matches!(err, ServiceError::Governance(_)));
+        assert!(svc.set_workflow_spec(&wf.id, &spec(), true).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn protected_environment_blocks_workflow_writes_and_execution() {
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec!["prod"], false);
+
+        let mut draft_prod = draft("prod wf", "instance");
+        draft_prod.environment = Some("prod".into());
+        assert!(matches!(
+            svc.create_workflow(draft_prod.clone(), false).unwrap_err(),
+            ServiceError::Governance(_)
+        ));
+
+        let override_svc = service_with_db(db.clone(), vec!["prod"], true);
+        let wf = override_svc
+            .create_workflow(draft_prod.clone(), false)
+            .unwrap();
+
+        assert!(matches!(
+            svc.update_workflow(&wf.id, true, draft_prod.clone(), false)
+                .unwrap_err(),
+            ServiceError::Governance(_)
+        ));
+        assert!(matches!(
+            svc.set_workflow_spec(&wf.id, &spec(), true).unwrap_err(),
+            ServiceError::Governance(_)
+        ));
+        assert!(matches!(
+            svc.ensure_workflow_execution_allowed(&wf.id).unwrap_err(),
+            ServiceError::Governance(_)
+        ));
+        assert!(matches!(
+            svc.delete_workflow(&wf.id, true).unwrap_err(),
+            ServiceError::Governance(_)
+        ));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn protected_and_managed_environment_metadata_is_read_only() {
+        let dir = tmpdir();
+        let svc = service(&dir);
+
+        assert!(matches!(
+            svc.create_environment("prod", None, None, None, None, None)
+                .unwrap_err(),
+            ServiceError::Governance(_)
+        ));
+
+        let source = svc
+            .db
+            .get_environment_by_name("source")
+            .unwrap()
+            .expect("source env seeded");
+        assert!(matches!(
+            svc.update_environment(&source.id, "source2", None, None, None, None, None)
+                .unwrap_err(),
+            ServiceError::Governance(_)
+        ));
+        assert!(matches!(
+            svc.delete_environment(&source.id).unwrap_err(),
+            ServiceError::Governance(_)
+        ));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn protected_write_override_is_explicit() {
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db, vec!["prod"], true);
+        let env = svc
+            .create_environment("prod", None, None, None, None, None)
+            .unwrap();
+        assert_eq!(env.name, "prod");
+        let mut d = draft("prod wf", "instance");
+        d.environment = Some("prod".into());
+        assert!(svc.create_workflow(d, false).is_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -817,9 +1065,9 @@ mod tests {
         let svc = service(&dir);
         let wf = svc.create_workflow(draft("wf", "instance"), false).unwrap();
         let mut d = draft("wf", "instance");
-        d.environment = Some("prod".to_string());
+        d.environment = Some("staging".to_string());
         let updated = svc.update_workflow(&wf.id, true, d, false).unwrap();
-        assert_eq!(updated.environment, "prod");
+        assert_eq!(updated.environment, "staging");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -830,7 +1078,7 @@ mod tests {
         let a = svc
             .create_environment("staging", None, None, None, None, None)
             .unwrap();
-        svc.create_environment("prod", None, None, None, None, None)
+        svc.create_environment("qa", None, None, None, None, None)
             .unwrap();
         // Rename staging -> staging2 ok.
         let renamed = svc
@@ -839,7 +1087,7 @@ mod tests {
         assert_eq!(renamed.name, "staging2");
         // Renaming onto an existing name is rejected.
         let err = svc
-            .update_environment(&a.id, "prod", None, None, None, None, None)
+            .update_environment(&a.id, "qa", None, None, None, None, None)
             .unwrap_err();
         assert!(matches!(err, ServiceError::Validation(_)));
         let _ = std::fs::remove_dir_all(dir);
