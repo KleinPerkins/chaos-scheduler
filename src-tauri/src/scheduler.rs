@@ -1,4 +1,4 @@
-use crate::db::{Database, RunAdmission, Workflow, WorkflowResourceSample};
+use crate::db::{Database, Run, RunAdmission, Workflow, WorkflowResourceSample};
 use chrono::Utc;
 use chrono_tz::Tz;
 use cron::Schedule;
@@ -32,6 +32,8 @@ const PROCESS_SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 const OUTPUT_CAPTURE_LIMIT_BYTES: usize = 1024 * 1024;
 const TASK_EVENT_CAPTURE_LIMIT_BYTES: usize = 256 * 1024;
 const BACKGROUND_MONITOR_MAX_POLLS: usize = 8_640; // 24h at 10s/poll.
+const BACKGROUND_PID_MONITOR_INTERVAL: Duration = Duration::from_secs(10);
+const COMPLETION_CHAIN_MAX_DEPTH: usize = 16;
 
 #[derive(Clone)]
 struct ResourceSampleMetadata {
@@ -45,6 +47,17 @@ struct ResourceSampleMetadata {
 struct ResourceSamplerHandle {
     stop_tx: mpsc::Sender<()>,
     join: std::thread::JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PidIdentity {
+    pid: u32,
+    start_time_ticks: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompletionChain {
+    visited_workflow_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -779,14 +792,134 @@ fn is_terminal_status(status: &str) -> bool {
             | "cascade-skipped"
             | "dead_letter"
             | "dead_lettered"
+            | "stale"
     )
 }
 
 fn is_failure_terminal(status: &str) -> bool {
     matches!(
         status,
-        "failed" | "cancelled" | "cascade-skipped" | "dead_letter" | "dead_lettered"
+        "failed" | "cancelled" | "cascade-skipped" | "dead_letter" | "dead_lettered" | "stale"
     )
+}
+
+impl CompletionChain {
+    fn root(workflow_id: &str) -> Self {
+        Self {
+            visited_workflow_ids: vec![workflow_id.to_string()],
+        }
+    }
+
+    fn from_trigger_payload(payload: Option<&str>, current_workflow_id: &str) -> Self {
+        let mut visited = payload
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .and_then(|value| value.get("_chain").cloned())
+            .and_then(|chain| {
+                chain
+                    .get("visited_workflow_ids")
+                    .and_then(Value::as_array)
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(Value::as_str)
+                            .filter(|id| !id.trim().is_empty())
+                            .take(COMPLETION_CHAIN_MAX_DEPTH + 1)
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .filter(|ids| !ids.is_empty())
+            .unwrap_or_else(|| vec![current_workflow_id.to_string()]);
+
+        if !visited.iter().any(|id| id == current_workflow_id) {
+            visited.push(current_workflow_id.to_string());
+        }
+        Self {
+            visited_workflow_ids: visited,
+        }
+    }
+
+    fn depth(&self) -> usize {
+        self.visited_workflow_ids.len().saturating_sub(1)
+    }
+
+    fn try_advance(&self, workflow_id: &str) -> Result<Self, String> {
+        if self.visited_workflow_ids.iter().any(|id| id == workflow_id) {
+            return Err(format!(
+                "completion chain cycle detected at workflow {workflow_id}"
+            ));
+        }
+        if self.depth() >= COMPLETION_CHAIN_MAX_DEPTH {
+            return Err(format!(
+                "completion chain depth {} reached max {}",
+                self.depth(),
+                COMPLETION_CHAIN_MAX_DEPTH
+            ));
+        }
+        let mut visited = self.visited_workflow_ids.clone();
+        visited.push(workflow_id.to_string());
+        Ok(Self {
+            visited_workflow_ids: visited,
+        })
+    }
+
+    fn as_json(&self) -> Value {
+        serde_json::json!({
+            "depth": self.depth(),
+            "max_depth": COMPLETION_CHAIN_MAX_DEPTH,
+            "visited_workflow_ids": self.visited_workflow_ids,
+        })
+    }
+}
+
+fn payload_with_chain(mut payload: Value, chain: &CompletionChain) -> String {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("_chain".to_string(), chain.as_json());
+    }
+    payload.to_string()
+}
+
+fn completion_trigger_payload(
+    upstream_workflow_id: &str,
+    upstream_run_id: &str,
+    status: &str,
+    chain: &CompletionChain,
+) -> String {
+    payload_with_chain(
+        serde_json::json!({
+            "upstream_workflow_id": upstream_workflow_id,
+            "upstream_run_id": upstream_run_id,
+            "status": status,
+        }),
+        chain,
+    )
+}
+
+fn run_workflow_action_payload(
+    upstream_workflow_id: &str,
+    upstream_run_id: &str,
+    chain: &CompletionChain,
+) -> String {
+    payload_with_chain(
+        serde_json::json!({
+            "upstream_workflow_id": upstream_workflow_id,
+            "upstream_run_id": upstream_run_id,
+            "source": "run_workflow_action",
+        }),
+        chain,
+    )
+}
+
+fn completion_chain_for_run(
+    db: &Arc<Database>,
+    run_id: &str,
+    workflow_id: &str,
+) -> CompletionChain {
+    db.get_run(run_id)
+        .ok()
+        .map(|run| {
+            CompletionChain::from_trigger_payload(run.trigger_payload.as_deref(), workflow_id)
+        })
+        .unwrap_or_else(|| CompletionChain::root(workflow_id))
 }
 
 /// Compute the next run time for a cron expression in the given timezone.
@@ -1611,10 +1744,11 @@ pub fn execute_workflow_with_context(
 
                 let bg_log = extract_log_path(&stdout);
                 let log_start_offset = extract_log_start_offset(&stdout);
+                let pid_identity = capture_pid_identity(pid);
 
                 std::thread::spawn(move || {
                     monitor_background_pid(
-                        pid,
+                        pid_identity,
                         &run_id,
                         &wf_name,
                         &wf_script,
@@ -1739,6 +1873,34 @@ pub fn trigger_on_completion(
     notify_on_failure: bool,
     email_on_failure_enabled: bool,
 ) {
+    let chain = completion_chain_for_run(db, upstream_run_id, upstream_workflow_id);
+    trigger_on_completion_with_chain(
+        db,
+        chaos_labs_root,
+        python_path,
+        upstream_workflow_id,
+        upstream_run_id,
+        upstream_success,
+        notify_on_success,
+        notify_on_failure,
+        email_on_failure_enabled,
+        chain,
+    );
+}
+
+#[allow(clippy::too_many_arguments)] // Threads full run context through recursive completion chains.
+fn trigger_on_completion_with_chain(
+    db: &Arc<Database>,
+    chaos_labs_root: &str,
+    python_path: &str,
+    upstream_workflow_id: &str,
+    upstream_run_id: &str,
+    upstream_success: bool,
+    notify_on_success: bool,
+    notify_on_failure: bool,
+    email_on_failure_enabled: bool,
+    chain: CompletionChain,
+) {
     let status = if upstream_success {
         "success"
     } else {
@@ -1775,12 +1937,20 @@ pub fn trigger_on_completion(
         if !should_run {
             continue;
         }
-        let payload = serde_json::json!({
-            "upstream_workflow_id": upstream_workflow_id,
-            "upstream_run_id": upstream_run_id,
-            "status": status,
-        })
-        .to_string();
+        let next_chain = match chain.try_advance(&workflow.id) {
+            Ok(next_chain) => next_chain,
+            Err(reason) => {
+                log::warn!(
+                    "Skipping completion-triggered workflow {} from {}: {}",
+                    workflow.id,
+                    upstream_workflow_id,
+                    reason
+                );
+                continue;
+            }
+        };
+        let payload =
+            completion_trigger_payload(upstream_workflow_id, upstream_run_id, status, &next_chain);
         let queue_config =
             parse_queue_config(workflow.queue_config.as_deref(), &workflow.environment);
         match dependency_decision_for_db(db, &workflow, &queue_config) {
@@ -1838,7 +2008,7 @@ pub fn trigger_on_completion(
             None,
             None,
         ) {
-            Ok(result) if result.completed => trigger_on_completion(
+            Ok(result) if result.completed => trigger_on_completion_with_chain(
                 db,
                 chaos_labs_root,
                 python_path,
@@ -1848,6 +2018,7 @@ pub fn trigger_on_completion(
                 notify_on_success,
                 notify_on_failure,
                 email_on_failure_enabled,
+                next_chain,
             ),
             Ok(_) => {}
             Err(e) => {
@@ -2669,6 +2840,37 @@ fn extract_result_url(stdout: &str) -> Option<String> {
     None
 }
 
+fn capture_pid_identity(pid: u32) -> PidIdentity {
+    PidIdentity {
+        pid,
+        start_time_ticks: process_start_time_ticks(pid),
+    }
+}
+
+fn pid_identity_is_alive(identity: &PidIdentity) -> bool {
+    let alive = unsafe { libc::kill(identity.pid as i32, 0) } == 0;
+    if !alive {
+        return false;
+    }
+    match identity.start_time_ticks {
+        Some(expected) => process_start_time_ticks(identity.pid) == Some(expected),
+        None => true,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_start_time_ticks(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Field 2 may contain spaces inside parentheses; starttime is field 22.
+    let after_name = stat.rsplit_once(") ")?.1;
+    after_name.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_start_time_ticks(_pid: u32) -> Option<u64> {
+    None
+}
+
 /// Look for evidence that the script spawned a long-running background process.
 /// Checks stdout for the launcher convention "launched (PID <n>)". Only falls
 /// back to PID file detection when stdout already contains a launch signal, so
@@ -2750,7 +2952,7 @@ fn extract_log_start_offset(stdout: &str) -> Option<u64> {
 /// Poll a background PID until it exits, then finalize the run record.
 #[allow(clippy::too_many_arguments)] // Threads full run context into the background monitor.
 fn monitor_background_pid(
-    pid: u32,
+    pid_identity: PidIdentity,
     run_id: &str,
     wf_name: &str,
     wf_script: &str,
@@ -2769,13 +2971,14 @@ fn monitor_background_pid(
 ) {
     log::info!(
         "Monitoring background PID {} for workflow '{}'",
-        pid,
+        pid_identity.pid,
         wf_name
     );
-    let sampler = spawn_resource_sampler(sample_metadata, pid);
+    let sampler = spawn_resource_sampler(sample_metadata, pid_identity.pid);
 
+    let mut exited = false;
     for _ in 0..BACKGROUND_MONITOR_MAX_POLLS {
-        std::thread::sleep(Duration::from_secs(10));
+        std::thread::sleep(BACKGROUND_PID_MONITOR_INTERVAL);
 
         if SHUTDOWN.load(Ordering::Relaxed) {
             let _ = db.finish_run_with_status_details(
@@ -2790,8 +2993,8 @@ fn monitor_background_pid(
             return;
         }
 
-        let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
-        if !alive {
+        if !pid_identity_is_alive(&pid_identity) {
+            exited = true;
             break;
         }
     }
@@ -2799,9 +3002,14 @@ fn monitor_background_pid(
     stop_resource_sampler(Some(sampler));
 
     log::info!(
-        "Background PID {} for workflow '{}' has exited",
-        pid,
-        wf_name
+        "Background PID {} for workflow '{}' has {}",
+        pid_identity.pid,
+        wf_name,
+        if exited {
+            "exited"
+        } else {
+            "exceeded monitor bound"
+        }
     );
 
     let log_path = bg_log_path
@@ -2845,9 +3053,18 @@ fn monitor_background_pid(
         .or_else(|| extract_result_url(&stdout))
         .or_else(|| Some(format!("file://{}", log_path)));
 
-    let _ = db.finish_run(run_id, exit_code, &stdout, "", result_url.as_deref());
+    let success = if exited {
+        let _ = db.finish_run(run_id, exit_code, &stdout, "", result_url.as_deref());
+        exit_code == 0
+    } else {
+        let stderr = format!(
+            "background PID monitor exhausted after {} polls for pid {}",
+            BACKGROUND_MONITOR_MAX_POLLS, pid_identity.pid
+        );
+        let _ = db.finish_run_with_status(run_id, "stale", &stdout, &stderr);
+        false
+    };
 
-    let success = exit_code == 0;
     let result = RunResult {
         run_id: run_id.to_string(),
         workflow_name: wf_name.to_string(),
@@ -3267,17 +3484,40 @@ impl crate::service::Notifier for SchedulerNotifier {
 
 /// Enqueue a chained workflow requested by an `on_success`/`on_failure`
 /// `run_workflow` action, so the normal scheduler loop admits it.
-fn enqueue_chained_workflow(db: &Arc<Database>, workflow_id: &str, upstream_run_id: &str) {
+fn enqueue_chained_workflow(
+    db: &Arc<Database>,
+    workflow_id: &str,
+    upstream_run: &Run,
+    upstream_workflow: &Workflow,
+) {
     match db.get_workflow(workflow_id) {
         Ok(target) => {
+            let chain = CompletionChain::from_trigger_payload(
+                upstream_run.trigger_payload.as_deref(),
+                &upstream_workflow.id,
+            );
+            let next_chain = match chain.try_advance(&target.id) {
+                Ok(next_chain) => next_chain,
+                Err(reason) => {
+                    log::warn!(
+                        "Skipping run_workflow action target {} from {}: {}",
+                        target.id,
+                        upstream_workflow.id,
+                        reason
+                    );
+                    return;
+                }
+            };
             let qc = parse_queue_config(target.queue_config.as_deref(), &target.environment);
+            let payload =
+                run_workflow_action_payload(&upstream_workflow.id, &upstream_run.id, &next_chain);
             if let Err(e) = db.upsert_queued_run_with_context(
                 &target.id,
                 &qc.queue,
                 qc.priority,
                 Some("run_workflow_action"),
-                None,
-                Some(upstream_run_id),
+                Some(&payload),
+                Some(&upstream_run.id),
                 None,
                 None,
             ) {
@@ -3337,6 +3577,24 @@ fn dispatch_completion_actions(
     app_handle: Option<&tauri::AppHandle>,
     result: &RunResult,
 ) -> bool {
+    dispatch_completion_actions_impl(db, app_handle, result, true)
+}
+
+#[cfg(test)]
+fn dispatch_completion_actions_sync(
+    db: &Arc<Database>,
+    app_handle: Option<&tauri::AppHandle>,
+    result: &RunResult,
+) -> bool {
+    dispatch_completion_actions_impl(db, app_handle, result, false)
+}
+
+fn dispatch_completion_actions_impl(
+    db: &Arc<Database>,
+    app_handle: Option<&tauri::AppHandle>,
+    result: &RunResult,
+    async_dispatch: bool,
+) -> bool {
     let Ok(run) = db.get_run(&result.run_id) else {
         return false;
     };
@@ -3365,43 +3623,57 @@ fn dispatch_completion_actions(
     );
 
     if !actions.is_empty() {
-        let notifier: Arc<dyn crate::service::Notifier> = Arc::new(SchedulerNotifier {
-            app: app_handle.cloned(),
-        });
-        let payload = serde_json::json!({
-            "workflow_id": workflow.id,
-            "workflow_name": workflow.name,
-            "run_id": run.id,
-            "status": if result.success { "success" } else { "failed" },
-            "exit_code": run.exit_code,
-            "stdout": run.stdout,
-            "stderr": run.stderr,
-            "started_at": run.started_at,
-            "finished_at": run.finished_at,
-        });
-        let ctx = crate::actions::ActionContext {
-            db: Arc::clone(db),
-            notifier,
-            workflow_name: workflow.name.clone(),
-            run_id: run.id.clone(),
-            success: result.success,
-            result_payload: payload,
-        };
-        for outcome in crate::actions::dispatch_actions(&actions, &ctx) {
-            if !outcome.success {
-                log::warn!(
-                    "on-completion action '{}' failed for run {}: {}",
-                    outcome.kind,
-                    run.id,
-                    outcome.message
-                );
+        let db = Arc::clone(db);
+        let app_handle = app_handle.cloned();
+        let success = result.success;
+        let dispatch = move || {
+            let notifier: Arc<dyn crate::service::Notifier> =
+                Arc::new(SchedulerNotifier { app: app_handle });
+            let payload = serde_json::json!({
+                "workflow_id": workflow.id.clone(),
+                "workflow_name": workflow.name.clone(),
+                "run_id": run.id.clone(),
+                "status": if success { "success" } else { "failed" },
+                "exit_code": run.exit_code,
+                "stdout": run.stdout.clone(),
+                "stderr": run.stderr.clone(),
+                "started_at": run.started_at.clone(),
+                "finished_at": run.finished_at.clone(),
+            });
+            let ctx = crate::actions::ActionContext {
+                db: Arc::clone(&db),
+                notifier,
+                workflow_name: workflow.name.clone(),
+                run_id: run.id.clone(),
+                success,
+                result_payload: payload,
+            };
+            for outcome in crate::actions::dispatch_actions_with_budget(
+                &actions,
+                &ctx,
+                crate::actions::ACTION_DISPATCH_TOTAL_BUDGET,
+            ) {
+                if !outcome.success {
+                    log::warn!(
+                        "on-completion action '{}' failed for run {}: {}",
+                        outcome.kind,
+                        run.id,
+                        outcome.message
+                    );
+                }
             }
-        }
 
-        for action in &actions {
-            if let crate::actions::ActionSpec::RunWorkflow { workflow_id, .. } = action {
-                enqueue_chained_workflow(db, workflow_id, &run.id);
+            for action in &actions {
+                if let crate::actions::ActionSpec::RunWorkflow { workflow_id, .. } = action {
+                    enqueue_chained_workflow(&db, workflow_id, &run, &workflow);
+                }
             }
+        };
+
+        if async_dispatch {
+            std::thread::spawn(dispatch);
+        } else {
+            dispatch();
         }
     }
     true
@@ -3882,7 +4154,7 @@ mod tests {
             should_notify: false,
             email_on_failure: false,
         };
-        assert!(!dispatch_completion_actions(&db, None, &result));
+        assert!(!dispatch_completion_actions_sync(&db, None, &result));
 
         // Spec workflow => handled here (returns true).
         let spec = r#"{"kind":"generic","generic":{"steps":[{"id":"s","command":"true"}]},"on_success":[{"type":"desktop_notification"}]}"#;
@@ -3900,7 +4172,7 @@ mod tests {
             should_notify: false,
             email_on_failure: false,
         };
-        assert!(dispatch_completion_actions(&db, None, &result2));
+        assert!(dispatch_completion_actions_sync(&db, None, &result2));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -3941,10 +4213,77 @@ mod tests {
             should_notify: false,
             email_on_failure: false,
         };
-        assert!(dispatch_completion_actions(&db, None, &result));
-        // The chain target should now be queued.
+        assert!(dispatch_completion_actions_sync(&db, None, &result));
+        // The chain target should now be queued with chain metadata.
         let queued = db.list_queued_runs(50).unwrap();
-        assert!(queued.iter().any(|q| q.workflow_id == target.id));
+        let chained = queued.iter().find(|q| q.workflow_id == target.id).unwrap();
+        let payload: Value =
+            serde_json::from_str(chained.trigger_payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["_chain"]["depth"], serde_json::json!(1));
+        assert_eq!(
+            payload["_chain"]["visited_workflow_ids"],
+            serde_json::json!([wf_id, target.id])
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn completion_chain_rejects_cycles_and_depth_overflow() {
+        let root = CompletionChain::root("wf-a");
+        assert!(root.try_advance("wf-a").unwrap_err().contains("cycle"));
+
+        let full = CompletionChain {
+            visited_workflow_ids: (0..=COMPLETION_CHAIN_MAX_DEPTH)
+                .map(|idx| format!("wf-{idx}"))
+                .collect(),
+        };
+        assert_eq!(full.depth(), COMPLETION_CHAIN_MAX_DEPTH);
+        assert!(full.try_advance("wf-overflow").unwrap_err().contains("max"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_workflow_action_skips_self_cycle() {
+        let (db, dir) = structured_test_db();
+        let wf = db
+            .create_workflow(
+                "Self Cycle",
+                None,
+                "scripts/self.py",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "instance",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let spec = format!(
+            r#"{{"kind":"generic","generic":{{"steps":[{{"id":"s","command":"true"}}]}},"on_success":[{{"type":"run_workflow","workflow_id":"{}"}}]}}"#,
+            wf.id
+        );
+        db.set_workflow_spec(&wf.id, "generic", Some(&spec))
+            .unwrap();
+        let run = db
+            .create_run_with_context(&wf.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        db.finish_run(&run.id, 0, "", "", None).unwrap();
+        let result = RunResult {
+            run_id: run.id.clone(),
+            workflow_name: wf.name.clone(),
+            script_path: wf.script_path.clone(),
+            success: true,
+            completed: true,
+            should_notify: false,
+            email_on_failure: false,
+        };
+
+        assert!(dispatch_completion_actions_sync(&db, None, &result));
+
+        let queued = db.list_queued_runs(50).unwrap();
+        assert!(!queued.iter().any(|q| q.workflow_id == wf.id));
         let _ = std::fs::remove_dir_all(dir);
     }
 
