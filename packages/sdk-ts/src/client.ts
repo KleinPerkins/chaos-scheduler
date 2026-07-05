@@ -7,7 +7,7 @@
  *   - Errors: non-2xx render as `{ "error": "<message>" }`.
  *   - Response envelopes: `{ environments }`, `{ workflows }`, `{ workflow }`,
  *     `{ runs }`, `{ run }`, `{ deleted }`; dispatch returns a bare
- *     `DispatchOutcome` (or `{ status: "duplicate", run_id, queued_run_id }` on replay).
+ *     `DispatchOutcome` (or `{ status: "duplicate", run_id }` on replay).
  */
 
 import { ChaosApiError } from "./errors.js";
@@ -15,8 +15,13 @@ import type {
   CreateEnvironmentInput,
   DispatchResult,
   Environment,
+  QueueInfo,
+  QueuedRun,
   RegisterWorkflowInput,
   Run,
+  RunLogs,
+  RunMetric,
+  RunTasksResult,
   VersionInfo,
   Workflow,
   WorkflowSpec,
@@ -228,7 +233,7 @@ export class ChaosSchedulerClient {
   /**
    * `POST /api/v1/workflows/{id}/run` — dispatch a run now (scope: write).
    * Supply `idempotencyKey` for safe retries; a reused key returns
-   * `{ status: "duplicate", run_id, queued_run_id }`.
+   * `{ status: "duplicate", run_id }`.
    */
   async runWorkflow(
     id: string,
@@ -296,6 +301,49 @@ export class ChaosSchedulerClient {
       `/api/v1/runs/${encodeURIComponent(id)}`,
     );
     return res.run;
+  }
+
+  /** `GET /api/v1/runs/{id}/logs` — stdout/stderr/exit for a run (scope: read). */
+  async getRunLogs(id: string): Promise<RunLogs> {
+    return this.request<RunLogs>(
+      "GET",
+      `/api/v1/runs/${encodeURIComponent(id)}/logs`,
+    );
+  }
+
+  /** `GET /api/v1/runs/{id}/tasks` — step tasks + retry attempts (scope: read). */
+  async getRunTasks(id: string): Promise<RunTasksResult> {
+    return this.request<RunTasksResult>(
+      "GET",
+      `/api/v1/runs/${encodeURIComponent(id)}/tasks`,
+    );
+  }
+
+  /** `GET /api/v1/runs/{id}/metrics` — emitted metric samples (scope: read). */
+  async getRunMetrics(id: string): Promise<RunMetric[]> {
+    const res = await this.request<{ metrics: RunMetric[] }>(
+      "GET",
+      `/api/v1/runs/${encodeURIComponent(id)}/metrics`,
+    );
+    return res.metrics;
+  }
+
+  /** `GET /api/v1/queues` — queue capacity snapshots (scope: read). */
+  async listQueues(): Promise<QueueInfo[]> {
+    const res = await this.request<{ queues: QueueInfo[] }>(
+      "GET",
+      "/api/v1/queues",
+    );
+    return res.queues;
+  }
+
+  /** `GET /api/v1/queued-runs` — durable queued runs (scope: read). */
+  async listQueuedRuns(): Promise<QueuedRun[]> {
+    const res = await this.request<{ queued_runs: QueuedRun[] }>(
+      "GET",
+      "/api/v1/queued-runs",
+    );
+    return res.queued_runs;
   }
 
   /**
