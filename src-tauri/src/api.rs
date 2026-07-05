@@ -1,8 +1,8 @@
 //! Secure `/api/v1` HTTP surface (axum).
 //!
 //! Binds loopback by default, authenticates with hashed, scoped API keys,
-//! records an audit log, applies a request-body limit + a simple per-key rate
-//! limit, and reuses [`SchedulerService`] for **all** governance/validation so
+//! records authenticated audit events, applies request-body and rate limits,
+//! and reuses [`SchedulerService`] for **all** governance/validation so
 //! there is no duplicated business logic vs the Tauri commands.
 
 use crate::db::Database;
@@ -10,15 +10,17 @@ use crate::scheduler::{dispatch_non_cron_workflow, NonCronDispatchOptions};
 use crate::service::{ApiIdentity, SchedulerService, ServiceError, WorkflowDraft};
 use crate::workflow_spec::WorkflowSpec;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,6 +32,10 @@ pub struct ApiState {
     pub workspace_root: String,
     pub python_path: String,
     pub rate: Arc<Mutex<RateLimiter>>,
+    /// Pre-authentication limiter keyed by bearer token hash or anonymous request source.
+    pub preauth_rate: Arc<Mutex<RateLimiter>>,
+    /// Allowed Host header values in addition to loopback hosts.
+    pub host_allowlist: Vec<String>,
     /// Allowed CORS origins. Empty = no cross-origin (same-origin/loopback),
     /// the secure default.
     pub cors_allowlist: Vec<String>,
@@ -97,10 +103,89 @@ impl From<ServiceError> for ApiError {
 /// Extract the bearer token from the Authorization header.
 fn bearer(headers: &HeaderMap) -> Option<String> {
     let value = headers.get("authorization")?.to_str().ok()?;
-    value
+    let token = value
         .strip_prefix("Bearer ")
-        .or_else(|| value.strip_prefix("bearer "))
-        .map(|t| t.trim().to_string())
+        .or_else(|| value.strip_prefix("bearer "))?
+        .trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+fn hash_value(value: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn preauth_rate_key(headers: &HeaderMap) -> String {
+    if let Some(token) = bearer(headers) {
+        return format!("bearer:{:x}", hash_value(&token));
+    }
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
+        return format!("origin:{}", origin.trim().to_ascii_lowercase());
+    }
+    if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
+        return format!("host:{}", host.trim().to_ascii_lowercase());
+    }
+    "anonymous".to_string()
+}
+
+fn normalize_host(host: &str) -> String {
+    let value = host.trim().to_ascii_lowercase();
+    if value.starts_with('[') {
+        if let Some(end) = value.find(']') {
+            return value[1..end].to_string();
+        }
+    }
+    value.split(':').next().unwrap_or("").to_string()
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = normalize_host(host);
+    host == "localhost"
+        || host == "::1"
+        || host == "0:0:0:0:0:0:0:1"
+        || host == "127.0.0.1"
+        || host.starts_with("127.")
+}
+
+fn host_allowed(state: &ApiState, headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+    if is_loopback_host(host) {
+        return true;
+    }
+    let host = normalize_host(host);
+    state
+        .host_allowlist
+        .iter()
+        .map(|h| normalize_host(h))
+        .any(|allowed| allowed == host)
+}
+
+fn origin_allowed(state: &ApiState, headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+    state.cors_allowlist.iter().any(|allowed| allowed == origin)
+}
+
+async fn request_guard(
+    State(state): State<ApiState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    if !host_allowed(&state, req.headers()) {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "host not allowed"));
+    }
+    if !origin_allowed(&state, req.headers()) {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "origin not allowed"));
+    }
+    Ok(next.run(req).await)
 }
 
 /// Authenticate + authorize a request, enforce rate limits, and audit the
@@ -112,15 +197,21 @@ fn authorize(
     method: &str,
     path: &str,
 ) -> Result<ApiIdentity, ApiError> {
+    if let Ok(mut limiter) = state.preauth_rate.lock() {
+        if !limiter.allow(&preauth_rate_key(headers)) {
+            return Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "pre-auth rate limit exceeded",
+            ));
+        }
+    }
     let Some(token) = bearer(headers) else {
-        let _ = state.db.record_api_audit(None, method, path, 401, None);
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "missing bearer token",
         ));
     };
     let Some(identity) = state.service.verify_api_key(&token) else {
-        let _ = state.db.record_api_audit(None, method, path, 401, None);
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "invalid API key"));
     };
     if !identity.has_scope(required_scope) {
@@ -198,7 +289,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/queues", get(list_queues))
         .route("/api/v1/queued-runs", get(list_queued_runs))
         .route("/api/v1/integrations/cursor/webhook", post(cursor_webhook))
-        .layer(RequestBodyLimitLayer::new(256 * 1024));
+        .layer(RequestBodyLimitLayer::new(256 * 1024))
+        .layer(middleware::from_fn_with_state(state.clone(), request_guard));
 
     let router = match cors {
         Some(layer) => router.layer(layer),
@@ -660,6 +752,8 @@ mod tests {
             workspace_root: "/tmp".to_string(),
             python_path: "python3".to_string(),
             rate: Arc::new(Mutex::new(RateLimiter::new(1000, Duration::from_secs(60)))),
+            preauth_rate: Arc::new(Mutex::new(RateLimiter::new(1000, Duration::from_secs(60)))),
+            host_allowlist: vec![],
             cors_allowlist: vec![],
         };
         (state, key.token)
@@ -704,6 +798,108 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn rejects_unallowlisted_host_header() {
+        let (state, _) = test_state();
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header("host", "evil.example:9618")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn rejects_unallowlisted_origin_and_allows_configured_origin() {
+        let (mut state, _) = test_state();
+        state.cors_allowlist = vec!["https://trusted.example".to_string()];
+        let app = router(state);
+
+        let blocked = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header("origin", "https://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+
+        let allowed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header("origin", "https://trusted.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+        assert_eq!(
+            allowed
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://trusted.example")
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_auth_is_preauth_rate_limited_without_audit_growth() {
+        let (state, _) = test_state();
+        let audit_db_path = state.db.path().to_string();
+        rusqlite::Connection::open(&audit_db_path)
+            .unwrap()
+            .execute("DELETE FROM api_audit_log", [])
+            .unwrap();
+        let app = router(ApiState {
+            preauth_rate: Arc::new(Mutex::new(RateLimiter::new(2, Duration::from_secs(60)))),
+            ..state
+        });
+
+        let mut statuses = Vec::new();
+        for _ in 0..3 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/workflows")
+                        .header("host", "127.0.0.1:9618")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            statuses.push(resp.status());
+        }
+
+        assert_eq!(
+            statuses,
+            vec![
+                StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
+                StatusCode::TOO_MANY_REQUESTS,
+            ]
+        );
+        let audit_count: i64 = rusqlite::Connection::open(&audit_db_path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM api_audit_log", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(audit_count, 0, "unauthenticated 401/429s are not persisted");
     }
 
     #[tokio::test]
@@ -871,6 +1067,8 @@ mod tests {
             workspace_root: "/tmp".into(),
             python_path: "python3".into(),
             rate: Arc::new(Mutex::new(RateLimiter::new(1000, Duration::from_secs(60)))),
+            preauth_rate: Arc::new(Mutex::new(RateLimiter::new(1000, Duration::from_secs(60)))),
+            host_allowlist: vec![],
             cors_allowlist: vec![],
         };
         let app = router(state);
