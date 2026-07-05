@@ -1063,9 +1063,31 @@ fn verify_inbound_webhook(
     Ok(())
 }
 
+/// Refuse a non-loopback REST/metrics bind unless the operator explicitly opts
+/// in with `CHAOS_SCHEDULER_ALLOW_REMOTE_API=1`. A loopback bind is always fine.
+pub fn validate_remote_api_bind(addr: &str) -> Result<(), String> {
+    let socket: std::net::SocketAddr = addr
+        .parse()
+        .map_err(|e| format!("invalid bind address '{addr}': {e}"))?;
+    if socket.ip().is_loopback() {
+        return Ok(());
+    }
+    if std::env::var("CHAOS_SCHEDULER_ALLOW_REMOTE_API").as_deref() == Ok("1") {
+        return Ok(());
+    }
+    Err(format!(
+        "refusing non-loopback bind '{addr}'; set CHAOS_SCHEDULER_ALLOW_REMOTE_API=1 to opt in"
+    ))
+}
+
 /// Spawn the API server on its own tokio runtime + thread. Never blocks the
-/// caller. Binds `addr` (loopback by default).
+/// caller. Binds `addr` (loopback by default; non-loopback requires the
+/// remote-API opt-in flag).
 pub fn start_api_server(state: ApiState, addr: String) {
+    if let Err(err) = validate_remote_api_bind(&addr) {
+        log::error!("{err}");
+        return;
+    }
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -1197,6 +1219,17 @@ mod tests {
         );
         let err = verify_inbound_webhook(&state, &legacy, "POST", path, body, secret).unwrap_err();
         assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn validate_remote_api_bind_allows_loopback_and_blocks_remote_without_flag() {
+        std::env::remove_var("CHAOS_SCHEDULER_ALLOW_REMOTE_API");
+        assert!(validate_remote_api_bind("127.0.0.1:9618").is_ok());
+        assert!(validate_remote_api_bind("[::1]:9618").is_ok());
+        assert!(validate_remote_api_bind("0.0.0.0:9618").is_err());
+        std::env::set_var("CHAOS_SCHEDULER_ALLOW_REMOTE_API", "1");
+        assert!(validate_remote_api_bind("0.0.0.0:9618").is_ok());
+        std::env::remove_var("CHAOS_SCHEDULER_ALLOW_REMOTE_API");
     }
 
     #[tokio::test]
