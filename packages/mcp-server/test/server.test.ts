@@ -55,6 +55,57 @@ const ROUTES: Record<string, unknown> = {
   "GET /api/v1/runs/r1": {
     run: { id: "r1", workflow_id: "w1", status: "success", exit_code: 0 },
   },
+  "GET /api/v1/runs/r1/logs": {
+    run_id: "r1",
+    status: "success",
+    exit_code: 0,
+    stdout: "ok",
+    stderr: "",
+    result_url: null,
+  },
+  "GET /api/v1/runs/r1/tasks": {
+    tasks: [{ id: "t1", run_id: "r1", task_id: "step1", status: "success" }],
+    attempts: [],
+  },
+  "GET /api/v1/runs/r1/metrics": {
+    metrics: [
+      {
+        id: "m1",
+        run_id: "r1",
+        task_id: null,
+        metric_name: "duration_ms",
+        metric_value: 42,
+        metric_unit: "ms",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+    ],
+  },
+  "GET /api/v1/queues": {
+    queues: [
+      {
+        name: "instance-default",
+        environment: "instance",
+        capacity: 4,
+        active_count: 0,
+        queued_count: 0,
+        global_parallelism_cap: 8,
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+    ],
+  },
+  "GET /api/v1/queued-runs": {
+    queued_runs: [
+      {
+        id: "q1",
+        run_id: null,
+        workflow_id: "w1",
+        queue_name: "instance-default",
+        environment: "instance",
+        status: "queued",
+        queued_at: "2026-01-01T00:00:00Z",
+      },
+    ],
+  },
 };
 
 async function connectedPair(envOverrides: Record<string, string> = {}) {
@@ -99,10 +150,15 @@ describe("Chaos MCP server", () => {
         "dispatch_workflow",
         "enqueue_workflow",
         "get_run",
+        "get_run_logs",
+        "get_run_metrics",
+        "get_run_tasks",
         "get_version",
         "get_workflow",
         "health_check",
         "list_environments",
+        "list_queued_runs",
+        "list_queues",
         "list_workflow_runs",
         "list_workflows",
         "register_workflow",
@@ -182,5 +238,31 @@ describe("Chaos MCP server", () => {
     const res = await client.readResource({ uri: "chaos://runs/r1" });
     const text = (res.contents[0] as { text: string }).text;
     expect(JSON.parse(text).status).toBe("success");
+  });
+
+  it("get_run_logs tool proxies the backend", async () => {
+    const { client } = await connectedPair();
+    const result = (await client.callTool({
+      name: "get_run_logs",
+      arguments: { id: "r1" },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(textOf(result)).stdout).toBe("ok");
+  });
+
+  it("list_queues tool proxies the backend", async () => {
+    const { client } = await connectedPair();
+    const result = (await client.callTool({
+      name: "list_queues",
+      arguments: {},
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(textOf(result))[0].name).toBe("instance-default");
   });
 });

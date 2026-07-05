@@ -387,6 +387,60 @@ export function buildServer(deps: ServerDeps): McpServer {
     async (args) => jsonResult(await client.getRun(args.id)),
   );
 
+  tool(
+    "get_run_logs",
+    {
+      title: "Get run logs",
+      description:
+        "Fetch stdout/stderr/exit metadata for a run (lighter than get_run).",
+      inputSchema: { id: z.string().describe("Run id") },
+      readOnly: true,
+    },
+    async (args) => jsonResult(await client.getRunLogs(args.id)),
+  );
+
+  tool(
+    "get_run_tasks",
+    {
+      title: "Get run tasks",
+      description: "Fetch per-step task rows and retry attempts for a run.",
+      inputSchema: { id: z.string().describe("Run id") },
+      readOnly: true,
+    },
+    async (args) => jsonResult(await client.getRunTasks(args.id)),
+  );
+
+  tool(
+    "get_run_metrics",
+    {
+      title: "Get run metrics",
+      description: "Fetch emitted metric samples for a run.",
+      inputSchema: { id: z.string().describe("Run id") },
+      readOnly: true,
+    },
+    async (args) => jsonResult(await client.getRunMetrics(args.id)),
+  );
+
+  tool(
+    "list_queues",
+    {
+      title: "List queues",
+      description: "List queue capacity snapshots across environments.",
+      readOnly: true,
+    },
+    async () => jsonResult(await client.listQueues()),
+  );
+
+  tool(
+    "list_queued_runs",
+    {
+      title: "List queued runs",
+      description: "List durable queued runs awaiting admission.",
+      readOnly: true,
+    },
+    async () => jsonResult(await client.listQueuedRuns()),
+  );
+
   // ---- Resources (read-only state for @-referencing) ----
 
   server.registerResource(
@@ -458,6 +512,40 @@ export function buildServer(deps: ServerDeps): McpServer {
       jsonResource(uri, await client.getRun(String(variables.id))),
   );
 
+  server.registerResource(
+    "run-logs",
+    new ResourceTemplate("chaos://runs/{id}/logs", { list: undefined }),
+    {
+      title: "Run logs",
+      description: "Stdout/stderr/exit metadata for a run",
+      mimeType: "application/json",
+    },
+    async (uri, variables) =>
+      jsonResource(uri, await client.getRunLogs(String(variables.id))),
+  );
+
+  server.registerResource(
+    "queues",
+    "chaos://queues",
+    {
+      title: "Queues",
+      description: "Queue capacity snapshots",
+      mimeType: "application/json",
+    },
+    async (uri) => jsonResource(uri, await client.listQueues()),
+  );
+
+  server.registerResource(
+    "queued-runs",
+    "chaos://queued-runs",
+    {
+      title: "Queued runs",
+      description: "Durable queued runs awaiting admission",
+      mimeType: "application/json",
+    },
+    async (uri) => jsonResource(uri, await client.listQueuedRuns()),
+  );
+
   // ---- Prompts (triage/reporting templates) ----
 
   server.registerPrompt(
@@ -476,7 +564,7 @@ export function buildServer(deps: ServerDeps): McpServer {
             text:
               `Investigate Chaos Scheduler run \`${run_id}\`.\n\n` +
               `1. Read the run via the \`get_run\` tool (or the \`chaos://runs/${run_id}\` resource).\n` +
-              `2. Summarize why it failed (exit code, stderr tail).\n` +
+              `2. Summarize why it failed (exit code, stderr tail). Use \`get_run_logs\` when you only need stdout/stderr.\n` +
               `3. Inspect the owning workflow with \`get_workflow\`.\n` +
               `4. Propose a concrete fix, and if it is a transient failure, offer to re-run it ` +
               `with \`run_workflow_now\` using a fresh idempotency key.`,
