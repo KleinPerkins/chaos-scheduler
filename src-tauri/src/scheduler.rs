@@ -2219,7 +2219,22 @@ fn build_workflow_command(
         scheduler_db_path,
         input_json,
     );
+    scrub_scheduler_secrets_from_child(&mut cmd);
     cmd
+}
+
+/// Strip the scheduler's own secrets from a child command's inherited env before
+/// spawn. We keep the rest of the parent env (personal scripts rely on
+/// `SSH_AUTH_SOCK`, proxies, venv/`PYTHONPATH`, Homebrew `PATH`, cloud CLI creds,
+/// etc.), removing only named scheduler-internal secrets so they cannot leak to
+/// arbitrary workflow scripts. None of the explicit `CHAOS_SCHEDULER_*` context
+/// vars set by `apply_workflow_env` match the deny-list, so they survive.
+fn scrub_scheduler_secrets_from_child(cmd: &mut Command) {
+    for (key, _) in std::env::vars() {
+        if crate::service::should_scrub_child_env_key(&key) {
+            cmd.env_remove(key);
+        }
+    }
 }
 
 /// Export the scheduler's context to a child process. Emits the new
@@ -4061,6 +4076,56 @@ mod tests {
         assert!(output.stdout_truncated);
         assert!(output.stderr_truncated);
         assert!(output.task_events_truncated);
+    }
+
+    #[test]
+    fn scrub_scheduler_secrets_from_child_removes_denied_keys() {
+        // Shares the global test lock: mutates process env + reads std::env::vars().
+        let _guard = lock_shutdown_test_state();
+        std::env::set_var("CURSOR_API_KEY", "fake-cursor-key-for-test");
+        std::env::set_var("SMTP_PASSWORD", "smtp-secret");
+        std::env::set_var("CHAOS_SCHEDULER_API_TOKEN", "api-token");
+        let mut cmd = Command::new("true");
+        cmd.env("PATH", "/usr/bin");
+        scrub_scheduler_secrets_from_child(&mut cmd);
+        let is_removed = |key: &str| cmd.get_envs().any(|(k, v)| k == key && v.is_none());
+        assert!(is_removed("CURSOR_API_KEY"));
+        assert!(is_removed("SMTP_PASSWORD"));
+        assert!(is_removed("CHAOS_SCHEDULER_API_TOKEN"));
+        assert_eq!(
+            cmd.get_envs()
+                .find(|(k, _)| *k == "PATH")
+                .and_then(|(_, v)| v)
+                .and_then(|v| v.to_str()),
+            Some("/usr/bin")
+        );
+        std::env::remove_var("CURSOR_API_KEY");
+        std::env::remove_var("SMTP_PASSWORD");
+        std::env::remove_var("CHAOS_SCHEDULER_API_TOKEN");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn child_process_does_not_inherit_scrubbed_scheduler_secrets() {
+        let _guard = lock_shutdown_test_state();
+        std::env::set_var("CURSOR_API_KEY", "fake-cursor-key-for-test");
+        let cmd = build_workflow_command(
+            "[ \"${CURSOR_API_KEY:-}\" = \"\" ] && echo MISSING || echo LEAKED",
+            "/tmp",
+            "python3",
+            "run-1",
+            "wf-1",
+            "instance-default",
+            "instance",
+            None,
+            "/tmp/db.sqlite",
+            None,
+        );
+        let output = run_workflow_command(cmd, None, Duration::from_secs(5)).unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("MISSING"), "stdout was: {stdout}");
+        assert!(std::env::var("PATH").is_ok());
+        std::env::remove_var("CURSOR_API_KEY");
     }
 
     #[test]
