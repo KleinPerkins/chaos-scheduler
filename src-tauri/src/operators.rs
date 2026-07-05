@@ -476,6 +476,10 @@ pub struct CursorAgentOperator;
 
 const CURSOR_DEFAULT_API_BASE: &str = "https://api.cursor.com";
 const CURSOR_DEFAULT_SECRET: &str = "cursor_api_key";
+const CURSOR_DEFAULT_POLL_ATTEMPTS: u64 = 150;
+const CURSOR_MAX_POLL_ATTEMPTS: u64 = 300;
+const CURSOR_DEFAULT_POLL_INTERVAL_MS: u64 = 2_000;
+const CURSOR_MAX_POLL_INTERVAL_MS: u64 = 30_000;
 
 impl CursorAgentOperator {
     fn mode(config: &Value) -> &str {
@@ -551,15 +555,10 @@ impl CursorAgentOperator {
 
         // Poll for completion. (SSE is the documented streaming channel; polling
         // is the primary, GA-safe path used here per the plan.)
-        let poll_attempts = config
-            .get("poll_attempts")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(150)
-            .max(1);
-        let poll_interval_ms = config
-            .get("poll_interval_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(2000);
+        let poll_attempts =
+            clamp_cursor_poll_attempts(config.get("poll_attempts").and_then(|v| v.as_u64()));
+        let poll_interval_ms =
+            clamp_cursor_poll_interval_ms(config.get("poll_interval_ms").and_then(|v| v.as_u64()));
 
         let status_url = format!("{api_base}/v1/agents/{agent_id}");
         let mut last_body = launch.body.clone();
@@ -588,6 +587,9 @@ impl CursorAgentOperator {
                     }
                 }
             }
+            if !is_terminal(&terminal_status) {
+                terminal_status = "POLL_EXHAUSTED".to_string();
+            }
         }
 
         let success = is_success_status(&terminal_status);
@@ -608,6 +610,8 @@ impl CursorAgentOperator {
                 "mode": "cloud",
                 "agent_id": agent_id,
                 "status": terminal_status,
+                "poll_attempts": poll_attempts,
+                "poll_interval_ms": poll_interval_ms,
                 "pr_url": pr_url,
                 "result": last_body,
             }),
@@ -665,6 +669,18 @@ fn status_str(body: &Value) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_ascii_uppercase()
+}
+
+fn clamp_cursor_poll_attempts(value: Option<u64>) -> u64 {
+    value
+        .unwrap_or(CURSOR_DEFAULT_POLL_ATTEMPTS)
+        .clamp(1, CURSOR_MAX_POLL_ATTEMPTS)
+}
+
+fn clamp_cursor_poll_interval_ms(value: Option<u64>) -> u64 {
+    value
+        .unwrap_or(CURSOR_DEFAULT_POLL_INTERVAL_MS)
+        .min(CURSOR_MAX_POLL_INTERVAL_MS)
 }
 
 fn is_terminal(status: &str) -> bool {
@@ -958,6 +974,7 @@ mod tests {
     struct MockHttp {
         launch: Value,
         polls: Mutex<Vec<Value>>,
+        get_count: Mutex<usize>,
         posted: Mutex<Vec<(String, Value, bool)>>, // (url, body, had_auth)
     }
     impl HttpClient for MockHttp {
@@ -984,6 +1001,7 @@ mod tests {
             _url: &str,
             _headers: &[(String, String)],
         ) -> Result<HttpResponse, String> {
+            *self.get_count.lock().unwrap() += 1;
             let mut polls = self.polls.lock().unwrap();
             let body = if polls.len() > 1 {
                 polls.remove(0)
@@ -1039,6 +1057,7 @@ mod tests {
                 serde_json::json!({"id": "bc_123", "status": "RUNNING"}),
                 serde_json::json!({"id": "bc_123", "status": "FINISHED", "summary": "done", "target": {"prUrl": "https://gh/pr/1"}}),
             ]),
+            get_count: Mutex::new(0),
             posted: Mutex::new(vec![]),
         };
         let mut secrets = HashMap::new();
@@ -1081,6 +1100,7 @@ mod tests {
         let http = MockHttp {
             launch: serde_json::json!({"id": "x", "status": "RUNNING"}),
             polls: Mutex::new(vec![]),
+            get_count: Mutex::new(0),
             posted: Mutex::new(vec![]),
         };
         let secrets = no_secrets();
@@ -1104,6 +1124,7 @@ mod tests {
         let http = MockHttp {
             launch: serde_json::json!({"id": "bc_9", "status": "ERROR"}),
             polls: Mutex::new(vec![]),
+            get_count: Mutex::new(0),
             posted: Mutex::new(vec![]),
         };
         let mut m = HashMap::new();
@@ -1116,6 +1137,79 @@ mod tests {
         );
         assert!(!outcome.success);
         assert_eq!(outcome.details["status"], serde_json::json!("ERROR"));
+    }
+
+    #[test]
+    fn cursor_agent_poll_bounds_and_exhaustion_are_reported() {
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let http = MockHttp {
+            launch: serde_json::json!({"id": "bc_poll", "status": "RUNNING"}),
+            polls: Mutex::new(vec![
+                serde_json::json!({"id": "bc_poll", "status": "RUNNING"}),
+            ]),
+            get_count: Mutex::new(0),
+            posted: Mutex::new(vec![]),
+        };
+        let mut m = HashMap::new();
+        m.insert("cursor_api_key".to_string(), "k".to_string());
+        let secrets = MapSecrets(m);
+        let ctx = cursor_ctx(&runner, &http, &secrets);
+
+        // `poll_interval_ms: 0` keeps the test fast (no sleeps) while a huge
+        // `poll_attempts` still exercises the attempt clamp and exhaustion path.
+        let outcome = CursorAgentOperator.execute(
+            &ctx,
+            &serde_json::json!({
+                "mode": "cloud",
+                "prompt": "p",
+                "repository": "r",
+                "poll_attempts": 999_999,
+                "poll_interval_ms": 0
+            }),
+        );
+
+        assert!(!outcome.success);
+        assert_eq!(
+            outcome.details["status"],
+            serde_json::json!("POLL_EXHAUSTED")
+        );
+        assert_eq!(
+            outcome.details["poll_attempts"],
+            serde_json::json!(CURSOR_MAX_POLL_ATTEMPTS)
+        );
+        assert_eq!(outcome.details["poll_interval_ms"], serde_json::json!(0));
+        assert_eq!(
+            *http.get_count.lock().unwrap(),
+            CURSOR_MAX_POLL_ATTEMPTS as usize
+        );
+    }
+
+    #[test]
+    fn cursor_agent_poll_clamps_are_bounded() {
+        // Attempts clamp to [1, MAX]; a missing value uses the default.
+        assert_eq!(clamp_cursor_poll_attempts(Some(0)), 1);
+        assert_eq!(
+            clamp_cursor_poll_attempts(None),
+            CURSOR_DEFAULT_POLL_ATTEMPTS
+        );
+        assert_eq!(
+            clamp_cursor_poll_attempts(Some(999_999)),
+            CURSOR_MAX_POLL_ATTEMPTS
+        );
+
+        // Interval clamps to <= MAX; 0 is preserved as "no delay".
+        assert_eq!(clamp_cursor_poll_interval_ms(Some(0)), 0);
+        assert_eq!(
+            clamp_cursor_poll_interval_ms(None),
+            CURSOR_DEFAULT_POLL_INTERVAL_MS
+        );
+        assert_eq!(
+            clamp_cursor_poll_interval_ms(Some(999_999)),
+            CURSOR_MAX_POLL_INTERVAL_MS
+        );
     }
 
     #[test]
