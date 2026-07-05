@@ -13,6 +13,8 @@ describe("config", () => {
     expect(cfg.transport).toBe("stdio");
     expect(cfg.protectedEnvironments).toEqual(["prod", "production"]);
     expect(cfg.allowProtectedWrites).toBe(false);
+    expect(cfg.allowRemoteHttp).toBe(false);
+    expect(cfg.httpMaxBodyBytes).toBe(1024 * 1024);
     expect(cfg.maxToolCalls).toBe(0);
   });
 
@@ -22,6 +24,8 @@ describe("config", () => {
       CHAOS_SCHEDULER_API_KEY: "id.secret",
       CHAOS_SCHEDULER_MCP_TRANSPORT: "http",
       CHAOS_SCHEDULER_MCP_HTTP_PORT: "9800",
+      CHAOS_SCHEDULER_MCP_ALLOW_REMOTE_HTTP: "true",
+      CHAOS_SCHEDULER_MCP_HTTP_MAX_BODY_BYTES: "4096",
       CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "prod, staging",
       CHAOS_SCHEDULER_MCP_ALLOW_PROTECTED_WRITES: "true",
       CHAOS_SCHEDULER_MCP_MAX_TOOL_CALLS: "50",
@@ -30,6 +34,8 @@ describe("config", () => {
     expect(cfg.apiKey).toBe("id.secret");
     expect(cfg.transport).toBe("http");
     expect(cfg.httpPort).toBe(9800);
+    expect(cfg.allowRemoteHttp).toBe(true);
+    expect(cfg.httpMaxBodyBytes).toBe(4096);
     expect(cfg.protectedEnvironments).toEqual(["prod", "staging"]);
     expect(cfg.allowProtectedWrites).toBe(true);
     expect(cfg.maxToolCalls).toBe(50);
@@ -48,10 +54,15 @@ describe("config", () => {
       "--http",
       "--port",
       "9999",
+      "--allow-remote-http",
+      "--http-max-body-bytes",
+      "4096",
       "--allow-protected-writes",
     ]);
     expect(cfg.transport).toBe("http");
     expect(cfg.httpPort).toBe(9999);
+    expect(cfg.allowRemoteHttp).toBe(true);
+    expect(cfg.httpMaxBodyBytes).toBe(4096);
     expect(cfg.allowProtectedWrites).toBe(true);
   });
 });

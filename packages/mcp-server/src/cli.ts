@@ -26,6 +26,8 @@ async function main(): Promise<void> {
         "  --http                      Use Streamable HTTP transport",
         "  --host <host>               HTTP bind host (default 127.0.0.1)",
         "  --port <port>               HTTP bind port (default 9700)",
+        "  --allow-remote-http         Permit non-loopback HTTP binds",
+        "  --http-max-body-bytes <n>   HTTP request body cap (default 1048576)",
         "  --url <baseUrl>             Scheduler API base URL (default http://127.0.0.1:9618)",
         "  --allow-protected-writes    Permit writes to protected environments",
         "",
