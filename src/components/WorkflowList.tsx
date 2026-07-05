@@ -350,6 +350,7 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
       </div>
       <div className="wf-card-actions">
         <button
+          type="button"
           className="btn btn-ghost btn-sm"
           onClick={() => void handleRun(w)}
           disabled={
@@ -364,6 +365,7 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
           {isPending(w, "run") ? "Running…" : "▶ Run"}
         </button>
         <button
+          type="button"
           className="btn btn-ghost btn-sm"
           onClick={() => void handleEnqueue(w)}
           disabled={
@@ -377,13 +379,22 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
         >
           {pendingEnqueueId === w.id ? "Enqueueing…" : "Enqueue"}
         </button>
-        <button className="btn btn-ghost btn-sm" onClick={() => onHistory(w)}>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={() => onHistory(w)}
+        >
           History
         </button>
-        <button className="btn btn-ghost btn-sm" onClick={() => onEdit(w)}>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={() => onEdit(w)}
+        >
           Edit
         </button>
         <button
+          type="button"
           className={`btn btn-sm ${pendingDeleteId === w.id ? "btn-danger-confirm" : "btn-danger"}`}
           onClick={() => void handleDelete(w)}
           disabled={isPending(w, "run") || isPending(w, "toggle")}

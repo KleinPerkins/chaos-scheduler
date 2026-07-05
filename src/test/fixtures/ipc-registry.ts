@@ -85,6 +85,10 @@ declare global {
   interface Window {
     /** Per-test overrides merged on top of {@link createDefaultIpcRegistry}. */
     __CHAOS_IPC_OVERRIDES__?: Partial<Record<IpcCommand, IpcHandler>>;
+    /** Mutable fixture flags for Playwright flows (e.g. simulated delete). */
+    __CHAOS_FIXTURE_FLAGS__?: {
+      workflowDeleted?: boolean;
+    };
   }
 }
 
@@ -109,7 +113,8 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       workspace_root: "/tmp/chaos-scheduler",
       python_path: "python3",
     }),
-    list_workflows: () => [sampleWorkflow],
+    list_workflows: () =>
+      window.__CHAOS_FIXTURE_FLAGS__?.workflowDeleted ? [] : [sampleWorkflow],
     get_workflow: (args) => workflowById(String(args.id)),
     create_workflow: () => sampleWorkflow,
     update_workflow: (args) => ({
@@ -117,7 +122,12 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       id: String(args.id ?? sampleWorkflow.id),
       enabled: Boolean(args.enabled ?? true),
     }),
-    delete_workflow: () => undefined,
+    delete_workflow: () => {
+      window.__CHAOS_FIXTURE_FLAGS__ = {
+        ...window.__CHAOS_FIXTURE_FLAGS__,
+        workflowDeleted: true,
+      };
+    },
     list_environments: () => sampleEnvironments,
     create_environment: (args) => ({
       id: "env-new",
@@ -202,7 +212,18 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
     get_run_attempts: () => [],
     get_run_metrics: () => [],
     get_run_relationships: () => [],
-    get_global_run_history: () => [sampleRun],
+    get_global_run_history: (args) => {
+      const statusFilter = String(args.statusFilter ?? "all");
+      const pollExhaustedRun: Run = {
+        ...sampleRun,
+        id: "run-poll-exhausted",
+        status: "poll_exhausted",
+        exit_code: 1,
+      };
+      const runs = [sampleRun, pollExhaustedRun];
+      if (statusFilter === "all") return runs;
+      return runs.filter((run) => run.status === statusFilter);
+    },
     cleanup_retention: () => ({
       cutoff: sampleRun.started_at,
       candidate_runs: 0,
