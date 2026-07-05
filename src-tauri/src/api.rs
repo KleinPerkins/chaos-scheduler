@@ -1221,6 +1221,55 @@ mod tests {
         assert_eq!(err.status, StatusCode::UNAUTHORIZED);
     }
 
+    #[derive(serde::Deserialize)]
+    struct WebhookVectorsFile {
+        inbound: Vec<InboundVector>,
+        outbound: Vec<OutboundVector>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct InboundVector {
+        method: String,
+        path: String,
+        timestamp: String,
+        #[allow(dead_code)]
+        event_id: String,
+        body: String,
+        secret: String,
+        signature_hex: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OutboundVector {
+        secret: String,
+        body: String,
+        signature_hex: String,
+    }
+
+    /// Cross-checks the shared cross-language vectors in
+    /// `packages/test-fixtures/webhook-vectors.v1.json` (owned by the TS SDK) against the
+    /// Rust backend's own signing primitives, proving both sides agree on the exact same
+    /// canonical bytes for inbound requests and the same raw-body signature for outbound.
+    #[test]
+    fn webhook_vectors_match_sdk_fixtures() {
+        const RAW: &str = include_str!("../../packages/test-fixtures/webhook-vectors.v1.json");
+        let vectors: WebhookVectorsFile = serde_json::from_str(RAW).expect("parse vectors");
+        for outbound in &vectors.outbound {
+            let sig = crate::actions::sign_payload(&outbound.secret, outbound.body.as_bytes());
+            assert_eq!(sig, outbound.signature_hex);
+        }
+        for inbound in &vectors.inbound {
+            let canonical = inbound_canonical_payload(
+                &inbound.method,
+                &inbound.path,
+                &inbound.timestamp,
+                inbound.body.as_bytes(),
+            );
+            let sig = crate::actions::sign_payload(&inbound.secret, canonical.as_bytes());
+            assert_eq!(sig, inbound.signature_hex);
+        }
+    }
+
     #[test]
     fn validate_remote_api_bind_allows_loopback_and_blocks_remote_without_flag() {
         std::env::remove_var("CHAOS_SCHEDULER_ALLOW_REMOTE_API");
