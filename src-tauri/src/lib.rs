@@ -149,6 +149,12 @@ fn migrate_legacy_scheduler_db(app_data_dir: &Path) {
 }
 
 fn start_metrics_endpoint(db: Arc<Database>) {
+    // Same remote-surface gate as the REST API: refuse a non-loopback metrics
+    // bind unless CHAOS_SCHEDULER_ALLOW_REMOTE_API=1.
+    if let Err(err) = crate::api::validate_remote_api_bind(branding::METRICS_ADDR) {
+        log::error!("{err}");
+        return;
+    }
     std::thread::spawn(move || {
         let Ok(listener) = TcpListener::bind(branding::METRICS_ADDR) else {
             log::warn!(
