@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   getRunAttempts,
   getRunLog,
@@ -8,7 +8,15 @@ import {
   openUrl,
   analyzeRunError,
 } from "../lib/commands";
-import type { ErrorAnalysis, Run, RunAttempt, RunMetric, RunRelationship, RunTask } from "../lib/commands";
+import type {
+  ErrorAnalysis,
+  Run,
+  RunAttempt,
+  RunMetric,
+  RunRelationship,
+  RunTask,
+} from "../lib/commands";
+import { isActiveRunStatus, nextPollDelayMs } from "../lib/runPolling";
 import "./RunDetail.css";
 
 interface Props {
@@ -29,7 +37,6 @@ interface RunSummary {
   [key: string]: unknown;
 }
 
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -47,7 +54,14 @@ function asStatsData(value: unknown): Record<string, number | string> | null {
   return Object.fromEntries(entries) as Record<string, number | string>;
 }
 
-function asItemList(value: unknown): Array<{ name: string; detail?: string; url?: string; badge?: string }> | null {
+function asItemList(
+  value: unknown,
+): Array<{
+  name: string;
+  detail?: string;
+  url?: string;
+  badge?: string;
+}> | null {
   if (!Array.isArray(value)) return null;
   const items = value.filter(isRecord).map((item) => ({
     name: typeof item.name === "string" ? item.name : "Untitled",
@@ -58,16 +72,22 @@ function asItemList(value: unknown): Array<{ name: string; detail?: string; url?
   return items;
 }
 
-function asLinkList(value: unknown): Array<{ label: string; url: string }> | null {
+function asLinkList(
+  value: unknown,
+): Array<{ label: string; url: string }> | null {
   if (!Array.isArray(value)) return null;
   const links = value
     .filter(isRecord)
-    .filter((item) => typeof item.label === "string" && typeof item.url === "string")
+    .filter(
+      (item) => typeof item.label === "string" && typeof item.url === "string",
+    )
     .map((item) => ({ label: item.label as string, url: item.url as string }));
   return links;
 }
 
-function asPhaseList(value: unknown): Array<{ name: string; status: string; duration?: string }> | null {
+function asPhaseList(
+  value: unknown,
+): Array<{ name: string; status: string; duration?: string }> | null {
   if (!Array.isArray(value)) return null;
   return value.filter(isRecord).map((phase) => ({
     name: typeof phase.name === "string" ? phase.name : "Unnamed phase",
@@ -76,8 +96,15 @@ function asPhaseList(value: unknown): Array<{ name: string; status: string; dura
   }));
 }
 
-function asTableData(value: unknown): { headers: string[]; rows: string[][] } | null {
-  if (!isRecord(value) || !Array.isArray(value.headers) || !Array.isArray(value.rows)) return null;
+function asTableData(
+  value: unknown,
+): { headers: string[]; rows: string[][] } | null {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.headers) ||
+    !Array.isArray(value.rows)
+  )
+    return null;
   const headers = value.headers.map((header) => String(header));
   const rows = value.rows
     .filter(Array.isArray)
@@ -124,16 +151,18 @@ function StatsGrid({ data }: { data: Record<string, number | string> }) {
   );
 }
 
-function ItemList({ data }: { data: Array<{ name: string; detail?: string; url?: string; badge?: string }> }) {
+function ItemList({
+  data,
+}: {
+  data: Array<{ name: string; detail?: string; url?: string; badge?: string }>;
+}) {
   return (
     <div className="rd-item-list">
       {data.map((item, i) => (
         <div key={i} className="rd-item">
           <div className="rd-item-main">
             <span className="rd-item-name">{item.name}</span>
-            {item.badge && (
-              <span className="rd-item-badge">{item.badge}</span>
-            )}
+            {item.badge && <span className="rd-item-badge">{item.badge}</span>}
           </div>
           {item.detail && <div className="rd-item-detail">{item.detail}</div>}
           {item.url && (
@@ -166,7 +195,11 @@ function LinkList({ data }: { data: Array<{ label: string; url: string }> }) {
   );
 }
 
-function PhaseTimeline({ data }: { data: Array<{ name: string; status: string; duration?: string }> }) {
+function PhaseTimeline({
+  data,
+}: {
+  data: Array<{ name: string; status: string; duration?: string }>;
+}) {
   return (
     <div className="rd-phases">
       {data.map((phase, i) => (
@@ -186,7 +219,11 @@ function TextBlock({ data }: { data: string }) {
   return <div className="rd-text-block">{data}</div>;
 }
 
-function TableView({ data }: { data: { headers: string[]; rows: string[][] } }) {
+function TableView({
+  data,
+}: {
+  data: { headers: string[]; rows: string[][] };
+}) {
   return (
     <table className="rd-table">
       <thead>
@@ -213,25 +250,53 @@ function SectionRenderer({ section }: { section: SummarySection }) {
   switch (section.type) {
     case "stats": {
       const data = asStatsData(section.data);
-      return data ? <StatsGrid data={data} /> : <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>;
+      return data ? (
+        <StatsGrid data={data} />
+      ) : (
+        <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>
+      );
     }
     case "items": {
       const data = asItemList(section.data);
-      return data ? <ItemList data={data} /> : <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>;
+      return data ? (
+        <ItemList data={data} />
+      ) : (
+        <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>
+      );
     }
     case "links": {
       const data = asLinkList(section.data);
-      return data ? <LinkList data={data} /> : <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>;
+      return data ? (
+        <LinkList data={data} />
+      ) : (
+        <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>
+      );
     }
     case "phases": {
       const data = asPhaseList(section.data);
-      return data ? <PhaseTimeline data={data} /> : <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>;
+      return data ? (
+        <PhaseTimeline data={data} />
+      ) : (
+        <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>
+      );
     }
     case "text":
-      return <TextBlock data={typeof section.data === "string" ? section.data : stringifyUnknown(section.data)} />;
+      return (
+        <TextBlock
+          data={
+            typeof section.data === "string"
+              ? section.data
+              : stringifyUnknown(section.data)
+          }
+        />
+      );
     case "table": {
       const data = asTableData(section.data);
-      return data ? <TableView data={data} /> : <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>;
+      return data ? (
+        <TableView data={data} />
+      ) : (
+        <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>
+      );
     }
     default:
       return <pre className="rd-raw">{stringifyUnknown(section.data)}</pre>;
@@ -240,6 +305,8 @@ function SectionRenderer({ section }: { section: SummarySection }) {
 
 export default function RunDetail({ runId, onBack }: Props) {
   const [run, setRun] = useState<Run | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [tasks, setTasks] = useState<RunTask[]>([]);
   const [attempts, setAttempts] = useState<RunAttempt[]>([]);
   const [metrics, setMetrics] = useState<RunMetric[]>([]);
@@ -247,42 +314,133 @@ export default function RunDetail({ runId, onBack }: Props) {
   const [showLogs, setShowLogs] = useState(false);
   const [logTab, setLogTab] = useState<"stdout" | "stderr">("stdout");
   const [analysis, setAnalysis] = useState<ErrorAnalysis | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const pollAttemptRef = useRef(0);
 
-  useEffect(() => {
-    getRunLog(runId).then((r) => {
+  const loadObservability = useCallback(async () => {
+    const [taskRows, attemptRows, metricRows, relationshipRows] =
+      await Promise.all([
+        getRunTasks(runId).catch(() => [] as RunTask[]),
+        getRunAttempts(runId).catch(() => [] as RunAttempt[]),
+        getRunMetrics(runId).catch(() => [] as RunMetric[]),
+        getRunRelationships(runId).catch(() => [] as RunRelationship[]),
+      ]);
+    setTasks(taskRows);
+    setAttempts(attemptRows);
+    setMetrics(metricRows);
+    setRelationships(relationshipRows);
+  }, [runId]);
+
+  const loadRun = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const r = await getRunLog(runId);
       setRun(r);
       if (r.status === "failed") {
         setShowLogs(true);
         if (!r.stdout && r.stderr) setLogTab("stderr");
         if (r.error_analysis) setAnalysis(r.error_analysis);
       }
-    });
-    getRunTasks(runId).then(setTasks).catch(() => setTasks([]));
-    getRunAttempts(runId).then(setAttempts).catch(() => setAttempts([]));
-    getRunMetrics(runId).then(setMetrics).catch(() => setMetrics([]));
-    getRunRelationships(runId).then(setRelationships).catch(() => setRelationships([]));
-  }, [runId]);
+      await loadObservability();
+    } catch (e) {
+      setRun(null);
+      setLoadError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [runId, loadObservability]);
+
+  useEffect(() => {
+    pollAttemptRef.current = 0;
+    const id = window.setTimeout(() => void loadRun(), 0);
+    return () => window.clearTimeout(id);
+  }, [loadRun]);
+
+  useEffect(() => {
+    if (!run || !isActiveRunStatus(run.status)) return;
+
+    const delay = nextPollDelayMs(pollAttemptRef.current);
+    const timer = window.setTimeout(() => {
+      pollAttemptRef.current += 1;
+      void getRunLog(runId)
+        .then(async (r) => {
+          setRun(r);
+          if (r.status === "failed") {
+            setShowLogs(true);
+            if (!r.stdout && r.stderr) setLogTab("stderr");
+            if (r.error_analysis) setAnalysis(r.error_analysis);
+          }
+          if (!isActiveRunStatus(r.status)) {
+            await loadObservability();
+          }
+        })
+        .catch((e) => setLoadError(String(e)));
+    }, delay);
+
+    return () => window.clearTimeout(timer);
+  }, [run, runId, loadObservability]);
 
   const handleAnalyze = async () => {
     setAnalyzing(true);
+    setAnalysisError(null);
     try {
       const result = await analyzeRunError(runId);
       setAnalysis(result);
     } catch (e) {
-      console.error("Analysis failed:", e);
+      setAnalysisError(String(e));
     } finally {
       setAnalyzing(false);
     }
   };
 
+  if (loading && !run) {
+    return (
+      <div className="rd-page">
+        <div className="page-header">
+          <h1 className="page-title">Run Details</h1>
+          <button className="btn btn-ghost" onClick={onBack}>
+            &larr; Back
+          </button>
+        </div>
+        <div className="rd-loading">Loading run...</div>
+      </div>
+    );
+  }
+
+  if (loadError && !run) {
+    return (
+      <div className="rd-page">
+        <div className="page-header">
+          <h1 className="page-title">Run Details</h1>
+          <button className="btn btn-ghost" onClick={onBack}>
+            &larr; Back
+          </button>
+        </div>
+        <div className="rd-error">
+          <span>Failed to load run: {loadError}</span>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => void loadRun()}
+            disabled={loading}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (!run) {
-    return <div className="rd-loading">Loading...</div>;
+    return null;
   }
 
   const summary = isRecord(run.summary) ? (run.summary as RunSummary) : null;
-  const summaryTitle = typeof summary?.title === "string" ? summary.title : null;
-  const summaryDescription = typeof summary?.description === "string" ? summary.description : null;
+  const summaryTitle =
+    typeof summary?.title === "string" ? summary.title : null;
+  const summaryDescription =
+    typeof summary?.description === "string" ? summary.description : null;
   const summarySections = Array.isArray(summary?.sections)
     ? summary.sections.filter(isSummarySection)
     : [];
@@ -290,21 +448,20 @@ export default function RunDetail({ runId, onBack }: Props) {
   const isFailed = run.status === "failed";
   const hasStderr = !!run.stderr;
   const recommendedSteps = analysis?.recommended_steps ?? [];
-  const attemptsByTask = attempts.reduce<Record<string, RunAttempt[]>>((acc, attempt) => {
-    acc[attempt.task_id] = [...(acc[attempt.task_id] ?? []), attempt];
-    return acc;
-  }, {});
+  const attemptsByTask = attempts.reduce<Record<string, RunAttempt[]>>(
+    (acc, attempt) => {
+      acc[attempt.task_id] = [...(acc[attempt.task_id] ?? []), attempt];
+      return acc;
+    },
+    {},
+  );
 
   return (
     <div className="rd-page">
       <div className="page-header">
         <div>
-          <h1 className="page-title">
-            {run.workflow_name ?? "Workflow Run"}
-          </h1>
-          {summaryTitle && (
-            <p className="page-subtitle">{summaryTitle}</p>
-          )}
+          <h1 className="page-title">{run.workflow_name ?? "Workflow Run"}</h1>
+          {summaryTitle && <p className="page-subtitle">{summaryTitle}</p>}
         </div>
         <button className="btn btn-ghost" onClick={onBack}>
           &larr; Back
@@ -314,6 +471,11 @@ export default function RunDetail({ runId, onBack }: Props) {
       {/* Run metadata bar */}
       <div className="rd-meta-bar">
         <span className={`status-badge ${run.status}`}>{run.status}</span>
+        {isActiveRunStatus(run.status) && (
+          <span className="rd-live-indicator" aria-live="polite">
+            Live
+          </span>
+        )}
         <span className="rd-meta-item">
           Started {formatDate(run.started_at)}
         </span>
@@ -344,7 +506,9 @@ export default function RunDetail({ runId, onBack }: Props) {
                 <div className="rd-task-label">
                   <span className={`status-dot ${task.status}`} />
                   <span>{task.task_id}</span>
-                  <span className="rd-task-attempt">attempt {task.attempt_number}</span>
+                  <span className="rd-task-attempt">
+                    attempt {task.attempt_number}
+                  </span>
                 </div>
                 <div className="rd-task-bar-wrap">
                   <div className={`rd-task-bar ${task.status}`}>
@@ -372,9 +536,20 @@ export default function RunDetail({ runId, onBack }: Props) {
                   <tr key={attempt.id}>
                     <td>{taskId}</td>
                     <td>{attempt.attempt_number}</td>
-                    <td><span className={`status-badge ${attempt.status}`}>{attempt.status}</span></td>
-                    <td>{formatDuration(attempt.started_at, attempt.finished_at ?? null)}</td>
-                    <td>{attempt.error_message ?? attempt.error_type ?? "—"}</td>
+                    <td>
+                      <span className={`status-badge ${attempt.status}`}>
+                        {attempt.status}
+                      </span>
+                    </td>
+                    <td>
+                      {formatDuration(
+                        attempt.started_at,
+                        attempt.finished_at ?? null,
+                      )}
+                    </td>
+                    <td>
+                      {attempt.error_message ?? attempt.error_type ?? "—"}
+                    </td>
                   </tr>
                 )),
               )}
@@ -400,7 +575,10 @@ export default function RunDetail({ runId, onBack }: Props) {
                 <tr key={metric.id}>
                   <td>{metric.metric_name}</td>
                   <td>{metric.task_id ?? "workflow"}</td>
-                  <td>{metric.metric_value}{metric.metric_unit ? ` ${metric.metric_unit}` : ""}</td>
+                  <td>
+                    {metric.metric_value}
+                    {metric.metric_unit ? ` ${metric.metric_unit}` : ""}
+                  </td>
                   <td>{formatDate(metric.emitted_at)}</td>
                 </tr>
               ))}
@@ -432,9 +610,16 @@ export default function RunDetail({ runId, onBack }: Props) {
                     <td>{rel.child_workflow_name ?? rel.child_workflow_id}</td>
                     <td>{rel.task_id ?? "workflow"}</td>
                     <td>{rel.wait ? "wait" : "fire-and-forget"}</td>
-                    <td><span className={`status-badge ${rel.status}`}>{rel.status}</span></td>
+                    <td>
+                      <span className={`status-badge ${rel.status}`}>
+                        {rel.status}
+                      </span>
+                    </td>
                     <td className="rd-meta-mono">
-                      {rel.child_run_id ?? rel.queued_run_id ?? rel.reason ?? "pending"}
+                      {rel.child_run_id ??
+                        rel.queued_run_id ??
+                        rel.reason ??
+                        "pending"}
                     </td>
                   </tr>
                 );
@@ -473,7 +658,9 @@ export default function RunDetail({ runId, onBack }: Props) {
           </div>
           {recommendedSteps.length > 0 && (
             <div className="rd-analysis-steps">
-              <span className="rd-analysis-steps-label">Recommended steps:</span>
+              <span className="rd-analysis-steps-label">
+                Recommended steps:
+              </span>
               <ol>
                 {recommendedSteps.map((step, i) => (
                   <li key={i}>{step}</li>
@@ -498,6 +685,11 @@ export default function RunDetail({ runId, onBack }: Props) {
               Uses Claude to diagnose the failure and suggest fixes
             </span>
           )}
+          {analysisError && (
+            <div className="rd-analysis-error" role="alert">
+              Analysis failed: {analysisError}
+            </div>
+          )}
         </div>
       )}
 
@@ -511,7 +703,8 @@ export default function RunDetail({ runId, onBack }: Props) {
           {summarySections.map((section, i) => (
             <div key={i} className="rd-section">
               <h3 className="rd-section-title">
-                {(typeof section.title === "string" && section.title) || `Section ${i + 1}`}
+                {(typeof section.title === "string" && section.title) ||
+                  `Section ${i + 1}`}
               </h3>
               <SectionRenderer section={section} />
             </div>
@@ -521,7 +714,7 @@ export default function RunDetail({ runId, onBack }: Props) {
         <div className="rd-no-summary">
           <p>No structured summary available for this run.</p>
           <p className="rd-no-summary-hint">
-            Workflow scripts can emit <code>SUMMARY_JSON:{'{ ... }'}</code> to
+            Workflow scripts can emit <code>SUMMARY_JSON:{"{ ... }"}</code> to
             provide rich run details here.
           </p>
         </div>

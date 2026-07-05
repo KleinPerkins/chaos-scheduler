@@ -136,7 +136,16 @@ export default function GlobalHistory({ onViewRun }: Props) {
       </div>
 
       {error ? (
-        <div className="rh-error">{error}</div>
+        <div className="rh-error">
+          <span>Global history failed to load: {error}</span>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={load}
+            disabled={loading}
+          >
+            Retry
+          </button>
+        </div>
       ) : runs.length === 0 ? (
         <div className="rh-empty">No runs match these filters.</div>
       ) : (

@@ -10,6 +10,7 @@ import {
 import type { Workflow } from "../lib/commands";
 import { cronToHuman } from "./ScheduleBuilder";
 import EnvironmentBadge from "./EnvironmentBadge";
+import NoticeBanner from "./NoticeBanner";
 import "./WorkflowList.css";
 
 interface Props {
@@ -53,21 +54,95 @@ function getFrequencyGroup(cronSchedule: string): FrequencyGroup {
   return "Daily";
 }
 
+interface DescriptionBlockProps {
+  workflowId: string;
+  description: string;
+  expanded: boolean;
+  onToggle: (truncated: boolean) => void;
+}
+
+function DescriptionBlock({
+  description,
+  expanded,
+  onToggle,
+}: DescriptionBlockProps) {
+  const descRef = useRef<HTMLParagraphElement>(null);
+  const [truncated, setTruncated] = useState(false);
+
+  useEffect(() => {
+    const el = descRef.current;
+    if (!el) return;
+    const check = () => setTruncated(el.scrollHeight > el.clientHeight + 1);
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, [description]);
+
+  return (
+    <div className="wf-card-desc-zone">
+      {truncated ? (
+        <button
+          type="button"
+          className="wf-card-desc-button"
+          aria-expanded={expanded}
+          onClick={() => onToggle(truncated)}
+        >
+          <span
+            ref={descRef}
+            className={`wf-card-desc ${expanded ? "wf-card-desc-expanded" : ""}`}
+          >
+            {description}
+          </span>
+          <span className="wf-card-desc-hint">
+            {expanded ? "Show less" : "Show full description"}
+          </span>
+        </button>
+      ) : (
+        <p ref={descRef} className="wf-card-desc wf-card-desc-full">
+          {description}
+        </p>
+      )}
+      {expanded && truncated && (
+        <div className="wf-card-desc-tooltip">{description}</div>
+      )}
+    </div>
+  );
+}
+
 export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
-  const { workflows, loading, refresh } = useWorkflows();
+  const { workflows, loading, error, refresh } = useWorkflows();
   const { environments } = useEnvironments();
   const [envFilter, setEnvFilter] = useState<EnvFilter>("all");
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
-  const [hoveredDescId, setHoveredDescId] = useState<string | null>(null);
+  const [expandedDescId, setExpandedDescId] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<{
+    id: string;
+    kind: "run" | "toggle" | "delete";
+  } | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [runNotice, setRunNotice] = useState<string | null>(null);
   const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
 
   useEffect(() => {
     return () => {
       clearTimeout(deleteTimerRef.current);
+      clearTimeout(noticeTimerRef.current);
     };
   }, []);
+
+  const showRunNotice = (message: string) => {
+    setRunNotice(message);
+    clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = setTimeout(() => setRunNotice(null), 5000);
+  };
+
+  const isPending = (w: Workflow, kind: "run" | "toggle" | "delete") =>
+    pendingAction?.id === w.id && pendingAction.kind === kind;
 
   // Environment options are sourced from the environments backend and unioned
   // with any environments observed on the current workflows (so a workflow in
@@ -109,20 +184,30 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
   }, [visibleWorkflows]);
 
   const handleToggle = async (w: Workflow) => {
-    await updateWorkflow({
-      id: w.id,
-      name: w.name,
-      description: w.description ?? undefined,
-      scriptPath: w.script_path,
-      cronSchedule: w.cron_schedule,
-      enabled: !w.enabled,
-      asyncMode: w.async_mode,
-      emailOnFailure: w.email_on_failure,
-      timezone: w.timezone,
-      corpus: w.corpus ?? "source",
-      domain: w.domain,
-    });
-    refresh();
+    setActionError(null);
+    setPendingAction({ id: w.id, kind: "toggle" });
+    try {
+      await updateWorkflow({
+        id: w.id,
+        name: w.name,
+        description: w.description ?? undefined,
+        scriptPath: w.script_path,
+        cronSchedule: w.cron_schedule,
+        enabled: !w.enabled,
+        asyncMode: w.async_mode,
+        emailOnFailure: w.email_on_failure,
+        timezone: w.timezone,
+        corpus: w.corpus ?? "source",
+        domain: w.domain,
+      });
+      await refresh();
+    } catch (e) {
+      setActionError(
+        `Failed to ${w.enabled ? "disable" : "enable"} ${w.name}: ${e}`,
+      );
+    } finally {
+      setPendingAction(null);
+    }
   };
 
   const handleDelete = async (w: Workflow) => {
@@ -132,33 +217,69 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
       deleteTimerRef.current = setTimeout(() => setPendingDeleteId(null), 3000);
       return;
     }
+    setActionError(null);
+    setPendingAction({ id: w.id, kind: "delete" });
     clearTimeout(deleteTimerRef.current);
     setPendingDeleteId(null);
-    await deleteWorkflow(w.id);
-    refresh();
+    try {
+      await deleteWorkflow(w.id);
+      await refresh();
+    } catch (e) {
+      setActionError(`Failed to delete ${w.name}: ${e}`);
+    } finally {
+      setPendingAction(null);
+    }
   };
 
   const handleRun = async (w: Workflow) => {
-    await triggerWorkflow(w.id);
-    refresh();
+    setActionError(null);
+    setPendingAction({ id: w.id, kind: "run" });
+    try {
+      const runId = await triggerWorkflow(w.id);
+      showRunNotice(
+        `Started run for ${w.name}${runId ? ` (${runId.slice(0, 8)}…)` : ""}.`,
+      );
+      await refresh();
+    } catch (e) {
+      setActionError(`Failed to run ${w.name}: ${e}`);
+    } finally {
+      setPendingAction(null);
+    }
   };
 
-  const handleDescEnter = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>, wId: string) => {
-      const el = e.currentTarget.querySelector(".wf-card-desc") as HTMLElement;
-      if (el && el.scrollHeight > el.clientHeight + 1) {
-        setHoveredDescId(wId);
-      }
-    },
-    [],
-  );
-
-  const handleDescLeave = useCallback(() => {
-    setHoveredDescId(null);
+  const toggleDescription = useCallback((wId: string, truncated: boolean) => {
+    if (!truncated) return;
+    setExpandedDescId((current) => (current === wId ? null : wId));
   }, []);
 
-  if (loading) {
+  if (loading && workflows.length === 0 && !error) {
     return <div className="wf-loading">Loading workflows...</div>;
+  }
+
+  if (error && workflows.length === 0) {
+    return (
+      <div>
+        <div className="page-header">
+          <div>
+            <h1 className="page-title">Workflows</h1>
+            <p className="page-subtitle">Could not load workflows</p>
+          </div>
+          <button className="btn btn-primary" onClick={onNew}>
+            + Add Workflow
+          </button>
+        </div>
+        <div className="wf-error">
+          <span>{error}</span>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => void refresh()}
+            disabled={loading}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
   }
 
   const renderCard = (w: Workflow) => (
@@ -176,27 +297,20 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
           <input
             type="checkbox"
             checked={w.enabled}
-            onChange={() => handleToggle(w)}
+            onChange={() => void handleToggle(w)}
+            disabled={isPending(w, "toggle") || isPending(w, "delete")}
             aria-label={`${w.enabled ? "Disable" : "Enable"} ${w.name}`}
           />
           <span className="wf-toggle-track" aria-hidden="true" />
         </label>
       </div>
       {w.description && (
-        <div
-          className="wf-card-desc-zone"
-          onMouseEnter={(e) => handleDescEnter(e, w.id)}
-          onMouseLeave={handleDescLeave}
-        >
-          <div
-            className={`wf-card-desc ${hoveredDescId === w.id ? "wf-card-desc-active" : ""}`}
-          >
-            {w.description}
-          </div>
-          {hoveredDescId === w.id && (
-            <div className="wf-card-desc-tooltip">{w.description}</div>
-          )}
-        </div>
+        <DescriptionBlock
+          workflowId={w.id}
+          description={w.description}
+          expanded={expandedDescId === w.id}
+          onToggle={(truncated) => toggleDescription(w.id, truncated)}
+        />
       )}
       <div className="wf-card-meta">
         <span className="wf-card-schedule">
@@ -207,10 +321,15 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
       <div className="wf-card-actions">
         <button
           className="btn btn-ghost btn-sm"
-          onClick={() => handleRun(w)}
+          onClick={() => void handleRun(w)}
+          disabled={
+            isPending(w, "run") ||
+            isPending(w, "toggle") ||
+            isPending(w, "delete")
+          }
           title="Run now"
         >
-          &#9654; Run
+          {isPending(w, "run") ? "Running…" : "▶ Run"}
         </button>
         <button className="btn btn-ghost btn-sm" onClick={() => onHistory(w)}>
           History
@@ -220,9 +339,14 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
         </button>
         <button
           className={`btn btn-sm ${pendingDeleteId === w.id ? "btn-danger-confirm" : "btn-danger"}`}
-          onClick={() => handleDelete(w)}
+          onClick={() => void handleDelete(w)}
+          disabled={isPending(w, "run") || isPending(w, "toggle")}
         >
-          {pendingDeleteId === w.id ? "Confirm?" : "Delete"}
+          {isPending(w, "delete")
+            ? "Deleting…"
+            : pendingDeleteId === w.id
+              ? "Confirm?"
+              : "Delete"}
         </button>
       </div>
     </div>
@@ -230,6 +354,27 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
 
   return (
     <div>
+      {runNotice && (
+        <NoticeBanner
+          message={runNotice}
+          tone="success"
+          onDismiss={() => setRunNotice(null)}
+        />
+      )}
+      {actionError && (
+        <NoticeBanner
+          message={actionError}
+          tone="error"
+          onDismiss={() => setActionError(null)}
+        />
+      )}
+      {error && workflows.length > 0 && (
+        <NoticeBanner
+          message={`Workflow list may be stale: ${error}`}
+          tone="error"
+          onDismiss={() => void refresh()}
+        />
+      )}
       <div className="page-header">
         <div>
           <h1 className="page-title">Workflows</h1>
