@@ -565,8 +565,14 @@ impl CursorAgentOperator {
         let mut terminal_status = status_str(&launch.body);
         if !is_terminal(&terminal_status) {
             for attempt in 0..poll_attempts {
+                if crate::scheduler::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                    terminal_status = "POLL_EXHAUSTED".to_string();
+                    break;
+                }
                 if attempt > 0 && poll_interval_ms > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(poll_interval_ms));
+                    crate::scheduler::sleep_interruptible(std::time::Duration::from_millis(
+                        poll_interval_ms,
+                    ));
                 }
                 match ctx.http.get_json(&status_url, &headers) {
                     Ok(resp) if resp.is_success() => {
@@ -1184,6 +1190,55 @@ mod tests {
         assert_eq!(
             *http.get_count.lock().unwrap(),
             CURSOR_MAX_POLL_ATTEMPTS as usize
+        );
+    }
+
+    #[test]
+    fn shutdown_interrupts_cursor_agent_poll_promptly() {
+        use crate::scheduler::{initiate_shutdown, lock_shutdown_test_state};
+        use std::time::{Duration, Instant};
+
+        let _guard = lock_shutdown_test_state();
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let http = MockHttp {
+            launch: serde_json::json!({"id": "bc_shutdown", "status": "RUNNING"}),
+            polls: Mutex::new(vec![
+                serde_json::json!({"id": "bc_shutdown", "status": "RUNNING"}),
+            ]),
+            get_count: Mutex::new(0),
+            posted: Mutex::new(vec![]),
+        };
+        let mut m = HashMap::new();
+        m.insert("cursor_api_key".to_string(), "k".to_string());
+        let secrets = MapSecrets(m);
+        let ctx = cursor_ctx(&runner, &http, &secrets);
+        let shutdown_handle = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(50));
+            initiate_shutdown();
+        });
+        let start = Instant::now();
+        let outcome = CursorAgentOperator.execute(
+            &ctx,
+            &serde_json::json!({
+                "mode": "cloud",
+                "prompt": "p",
+                "repository": "r",
+                "api_base": "https://mock.local",
+                "poll_attempts": 300,
+                "poll_interval_ms": 5000
+            }),
+        );
+        let _ = shutdown_handle.join();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "poll loop should exit promptly when SHUTDOWN is set"
+        );
+        assert_eq!(
+            outcome.details["status"],
+            serde_json::json!("POLL_EXHAUSTED")
         );
     }
 
