@@ -12,6 +12,11 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+const WEBHOOK_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+pub const ACTION_MAX_RETRIES: u32 = 3;
+pub const ACTION_DISPATCH_TOTAL_BUDGET: Duration = Duration::from_secs(30);
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -97,12 +102,37 @@ pub struct ActionContext {
 }
 
 /// Dispatch a list of actions, returning per-action outcomes. Never panics; a
-/// failing action is recorded and does not abort the others.
+/// failing action is recorded and does not abort the others. Convenience
+/// wrapper over [`dispatch_actions_with_budget`] using the default total budget;
+/// retained for API stability and used by the REST test-dispatch path.
+#[allow(dead_code)] // Production paths call `dispatch_actions_with_budget` directly.
 pub fn dispatch_actions(actions: &[ActionSpec], ctx: &ActionContext) -> Vec<ActionResult> {
-    actions
-        .iter()
-        .map(|action| dispatch_one(action, ctx))
-        .collect()
+    dispatch_actions_with_budget(actions, ctx, ACTION_DISPATCH_TOTAL_BUDGET)
+}
+
+pub fn dispatch_actions_with_budget(
+    actions: &[ActionSpec],
+    ctx: &ActionContext,
+    budget: Duration,
+) -> Vec<ActionResult> {
+    let started = Instant::now();
+    let mut results = Vec::with_capacity(actions.len());
+    for action in actions {
+        if started.elapsed() >= budget {
+            results.push(ActionResult {
+                kind: action.kind(),
+                success: false,
+                message: format!(
+                    "action dispatch budget exhausted before '{}' ran",
+                    action.kind()
+                ),
+            });
+            continue;
+        }
+        let remaining = budget.saturating_sub(started.elapsed());
+        results.push(dispatch_one(action, ctx, remaining));
+    }
+    results
 }
 
 #[derive(Debug, Clone)]
@@ -112,7 +142,7 @@ pub struct ActionResult {
     pub message: String,
 }
 
-fn dispatch_one(action: &ActionSpec, ctx: &ActionContext) -> ActionResult {
+fn dispatch_one(action: &ActionSpec, ctx: &ActionContext, budget: Duration) -> ActionResult {
     let kind = action.kind();
     let outcome = match action {
         ActionSpec::Email { to } => dispatch_email(to.as_deref(), ctx),
@@ -120,7 +150,7 @@ fn dispatch_one(action: &ActionSpec, ctx: &ActionContext) -> ActionResult {
             url,
             secret,
             max_retries,
-        } => dispatch_webhook(url, secret.as_deref(), *max_retries, ctx),
+        } => dispatch_webhook(url, secret.as_deref(), *max_retries, ctx, budget),
         ActionSpec::RunWorkflow { workflow_id, .. } => dispatch_run_workflow(workflow_id, ctx),
         ActionSpec::DesktopNotification { title } => dispatch_desktop(title.as_deref(), ctx),
     };
@@ -188,18 +218,25 @@ fn dispatch_webhook(
     secret: Option<&str>,
     max_retries: u32,
     ctx: &ActionContext,
+    budget: Duration,
 ) -> Result<String, String> {
+    let started = Instant::now();
     let body = serde_json::to_vec(&ctx.result_payload).map_err(|e| e.to_string())?;
     let signature = secret.map(|s| sign_payload(s, &body));
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let attempts = max_retries.saturating_add(1);
+    let attempts = webhook_attempts(max_retries);
     let mut last_err = String::new();
     for attempt in 0..attempts {
+        if started.elapsed() >= budget {
+            last_err = "action dispatch budget exhausted".to_string();
+            break;
+        }
+        let remaining = budget.saturating_sub(started.elapsed());
+        let timeout = remaining.min(WEBHOOK_REQUEST_TIMEOUT);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|e| e.to_string())?;
         let mut req = client
             .post(url)
             .header("content-type", "application/json")
@@ -227,9 +264,13 @@ fn dispatch_webhook(
             }
         }
         if attempt + 1 < attempts {
-            std::thread::sleep(std::time::Duration::from_millis(
-                200 * (1 << attempt.min(5)) as u64,
-            ));
+            let backoff = Duration::from_millis(200 * (1u64 << attempt.min(5)));
+            let remaining = budget.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                last_err = "action dispatch budget exhausted".to_string();
+                break;
+            }
+            std::thread::sleep(backoff.min(remaining));
         }
     }
     // Exhausted retries: route to the dead-letter table for later inspection.
@@ -239,6 +280,14 @@ fn dispatch_webhook(
     Err(format!(
         "webhook delivery failed after {attempts} attempt(s): {last_err}"
     ))
+}
+
+pub fn clamp_action_max_retries(max_retries: u32) -> u32 {
+    max_retries.min(ACTION_MAX_RETRIES)
+}
+
+fn webhook_attempts(max_retries: u32) -> u32 {
+    clamp_action_max_retries(max_retries).saturating_add(1)
 }
 
 #[cfg(test)]
@@ -275,6 +324,41 @@ mod tests {
         assert!(ActionSpec::DesktopNotification { title: None }
             .validate()
             .is_ok());
+    }
+
+    #[test]
+    fn action_retry_count_is_clamped() {
+        assert_eq!(clamp_action_max_retries(0), 0);
+        assert_eq!(
+            clamp_action_max_retries(ACTION_MAX_RETRIES + 100),
+            ACTION_MAX_RETRIES
+        );
+        assert_eq!(webhook_attempts(u32::MAX), ACTION_MAX_RETRIES + 1);
+    }
+
+    #[test]
+    fn action_dispatch_budget_blocks_late_actions() {
+        use crate::service::NoopNotifier;
+
+        let dir = std::env::temp_dir().join(format!("chaos-act-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = ActionContext {
+            db: Arc::new(Database::new(&dir)),
+            notifier: Arc::new(NoopNotifier),
+            workflow_name: "WF".into(),
+            run_id: "run-1".into(),
+            success: true,
+            result_payload: serde_json::json!({"status":"success","run_id":"run-1"}),
+        };
+        let action = ActionSpec::DesktopNotification { title: None };
+
+        let results =
+            dispatch_actions_with_budget(std::slice::from_ref(&action), &ctx, Duration::ZERO);
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].success);
+        assert!(results[0].message.contains("budget exhausted"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
