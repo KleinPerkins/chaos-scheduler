@@ -3,6 +3,7 @@ import { useWorkflows } from "../hooks/useWorkflows";
 import { useEnvironments } from "../hooks/useEnvironments";
 import {
   triggerWorkflow,
+  enqueueWorkflow,
   updateWorkflow,
   deleteWorkflow,
   environmentOf,
@@ -11,6 +12,7 @@ import type { Workflow } from "../lib/commands";
 import { cronToHuman } from "./ScheduleBuilder";
 import EnvironmentBadge from "./EnvironmentBadge";
 import NoticeBanner from "./NoticeBanner";
+import { buildEnqueueIdempotencyKey } from "../lib/workflowValidation";
 import "./WorkflowList.css";
 
 interface Props {
@@ -121,6 +123,8 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
   } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [runNotice, setRunNotice] = useState<string | null>(null);
+  const [pendingEnqueueId, setPendingEnqueueId] = useState<string | null>(null);
+  const enqueueKeysRef = useRef<Record<string, string>>({});
   const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
@@ -141,7 +145,7 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
     noticeTimerRef.current = setTimeout(() => setRunNotice(null), 5000);
   };
 
-  const isPending = (w: Workflow, kind: "run" | "toggle" | "delete") =>
+  const isPending = (w: Workflow, kind: "run" | "toggle" | "delete" | "enqueue") =>
     pendingAction?.id === w.id && pendingAction.kind === kind;
 
   // Environment options are sourced from the environments backend and unioned
@@ -244,6 +248,30 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
       setActionError(`Failed to run ${w.name}: ${e}`);
     } finally {
       setPendingAction(null);
+    }
+  };
+
+  const handleEnqueue = async (w: Workflow) => {
+    setActionError(null);
+    setPendingEnqueueId(w.id);
+    const key =
+      enqueueKeysRef.current[w.id] ?? buildEnqueueIdempotencyKey(w.id);
+    enqueueKeysRef.current[w.id] = key;
+    try {
+      const outcome = await enqueueWorkflow(w.id, key);
+      delete enqueueKeysRef.current[w.id];
+      showRunNotice(
+        outcome.status === "queued"
+          ? `Queued ${w.name}${outcome.queued_run_id ? ` (${outcome.queued_run_id.slice(0, 8)}…)` : ""}.`
+          : outcome.status === "duplicate"
+            ? `Duplicate enqueue for ${w.name}.`
+            : `Enqueued ${w.name} — ${outcome.status}${outcome.run_id ? ` (${outcome.run_id.slice(0, 8)}…)` : ""}.`,
+      );
+      await refresh();
+    } catch (e) {
+      setActionError(`Failed to enqueue ${w.name}: ${e}`);
+    } finally {
+      setPendingEnqueueId(null);
     }
   };
 

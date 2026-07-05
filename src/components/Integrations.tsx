@@ -3,11 +3,12 @@ import {
   createApiKey,
   listApiKeys,
   revokeApiKey,
-  openUrl,
   isCommandUnavailable,
 } from "../lib/commands";
 import type { ApiKey, ApiKeyScope, NewApiKey } from "../lib/commands";
 import { PRODUCT_NAME, REPO_SLUG, RELEASES_URL } from "../lib/branding";
+import Notice from "./ui/Notice";
+import { openExternalSafe } from "../lib/openExternalSafe";
 import "./Integrations.css";
 
 const ALL_SCOPES: ApiKeyScope[] = ["read", "write", "admin"];
@@ -56,6 +57,7 @@ export default function Integrations() {
     "info",
   );
   const [copied, setCopied] = useState<string | null>(null);
+  const [revokePendingId, setRevokePendingId] = useState<string | null>(null);
 
   const notify = (msg: string, type: "info" | "error" | "success" = "info") => {
     setStatus(msg);
@@ -125,6 +127,11 @@ export default function Integrations() {
   };
 
   const handleRevoke = async (id: string) => {
+    if (revokePendingId !== id) {
+      setRevokePendingId(id);
+      return;
+    }
+    setRevokePendingId(null);
     setBusy(true);
     try {
       await revokeApiKey(id);
@@ -161,9 +168,9 @@ export default function Integrations() {
       </div>
 
       {status && (
-        <div className={`intg-status intg-status--${statusType}`} role="status">
+        <Notice variant={statusType} onDismiss={() => setStatus(null)}>
           {status}
-        </div>
+        </Notice>
       )}
 
       <section className="intg-section">
@@ -257,8 +264,15 @@ export default function Integrations() {
                       className="btn btn-danger btn-sm"
                       onClick={() => handleRevoke(key.id)}
                       disabled={busy}
+                      aria-label={
+                        revokePendingId === key.id
+                          ? "Confirm revoke API key"
+                          : "Revoke API key"
+                      }
                     >
-                      Revoke
+                      {revokePendingId === key.id
+                        ? "Confirm revoke?"
+                        : "Revoke"}
                     </button>
                   </td>
                 </tr>
@@ -297,7 +311,7 @@ export default function Integrations() {
             type="button"
             className="btn btn-primary"
             onClick={() =>
-              openUrl(addToCursorLink(tokenForSnippet)).catch(() =>
+              openExternalSafe(addToCursorLink(tokenForSnippet)).catch(() =>
                 notify("Could not open Cursor.", "error"),
               )
             }
@@ -329,7 +343,9 @@ export default function Integrations() {
           <li>
             <button
               className="intg-link"
-              onClick={() => openUrl(`https://github.com/${REPO_SLUG}#readme`)}
+              onClick={() =>
+                openExternalSafe(`https://github.com/${REPO_SLUG}#readme`)
+              }
             >
               Integration guide (README)
             </button>
@@ -338,7 +354,7 @@ export default function Integrations() {
             <button
               className="intg-link"
               onClick={() =>
-                openUrl(
+                openExternalSafe(
                   `https://github.com/${REPO_SLUG}/tree/main/packages/sdk-ts`,
                 )
               }
@@ -347,7 +363,10 @@ export default function Integrations() {
             </button>
           </li>
           <li>
-            <button className="intg-link" onClick={() => openUrl(RELEASES_URL)}>
+            <button
+              className="intg-link"
+              onClick={() => openExternalSafe(RELEASES_URL)}
+            >
               Releases &amp; downloads
             </button>
           </li>

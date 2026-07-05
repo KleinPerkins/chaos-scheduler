@@ -629,6 +629,13 @@ export function triggerWorkflow(id: string): Promise<string> {
   return invoke("trigger_workflow", { id });
 }
 
+export function enqueueWorkflow(
+  id: string,
+  idempotencyKey?: string,
+): Promise<DispatchOutcome> {
+  return invoke("enqueue_workflow", { id, idempotencyKey });
+}
+
 export function rerunWorkflow(
   workflowId: string,
   sourceRunId?: string,
@@ -671,10 +678,6 @@ export function listDeadLetters(
   limit = 50,
 ): Promise<SchedulerDeadLetter[]> {
   return invoke("list_dead_letters", { includeAcknowledged, limit });
-}
-
-export function getDeadLetter(id: string): Promise<SchedulerDeadLetter> {
-  return invoke("get_dead_letter", { id });
 }
 
 export function acknowledgeDeadLetter(
@@ -759,25 +762,6 @@ export function getSlaViolations(): Promise<SlaViolation[]> {
   return invoke("get_sla_violations");
 }
 
-export function queryResourceSamples(
-  workflowId: string,
-  timeWindow = "24h",
-): Promise<WorkflowResourceSample[]> {
-  return invoke("query_resource_samples", { workflowId, timeWindow });
-}
-
-export function queryTokenUsageRollup(
-  groupBy?: TokenRollupDimension[],
-  timeWindow = "24h",
-  timeBucket: "minute" | "hour" | "day" = "hour",
-): Promise<WorkflowTokenUsageRollup[]> {
-  return invoke("query_token_usage_rollup", {
-    groupBy,
-    timeWindow,
-    timeBucket,
-  });
-}
-
 export function getSchedulerStatus(): Promise<SchedulerStatus> {
   return invoke("get_scheduler_status");
 }
@@ -803,13 +787,6 @@ export function getMissionControlSnapshot(
   domainFilter?: string,
 ): Promise<MissionControlSnapshot> {
   return invoke("get_mission_control_snapshot", { corpusFilter, domainFilter });
-}
-
-export function queryStaleAssets(
-  maxAgeSeconds = 24 * 60 * 60,
-  assetKind?: string,
-): Promise<SchedulerAsset[]> {
-  return invoke("query_stale_assets", { maxAgeSeconds, assetKind });
 }
 
 export function listQueues(): Promise<QueueInfo[]> {

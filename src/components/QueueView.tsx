@@ -19,6 +19,7 @@ import type {
   RetentionPreview,
   SchedulerDeadLetter,
 } from "../lib/commands";
+import Notice from "./ui/Notice";
 import "./QueueView.css";
 
 interface QueueDraft {
@@ -99,6 +100,11 @@ export default function QueueView({ onBack }: QueueViewProps) {
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [backfillBusy, setBackfillBusy] = useState(false);
+  const [retentionBusy, setRetentionBusy] = useState(false);
+  const [deadLetterBusyId, setDeadLetterBusyId] = useState<string | null>(null);
+  const [cancelBusyId, setCancelBusyId] = useState<string | null>(null);
+  const [retentionMessage, setRetentionMessage] = useState<string | null>(null);
 
   const load = async () => {
     setError(null);
@@ -171,11 +177,14 @@ export default function QueueView({ onBack }: QueueViewProps) {
 
   const cancelRun = async (id: string) => {
     setError(null);
+    setCancelBusyId(id);
     try {
       await cancelQueuedRun(id);
       await load();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setCancelBusyId(null);
     }
   };
 
@@ -186,6 +195,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
 
   const previewBackfill = async () => {
     setError(null);
+    setBackfillBusy(true);
     try {
       const plan = await planBackfill(
         backfillWorkflowId.trim(),
@@ -196,11 +206,14 @@ export default function QueueView({ onBack }: QueueViewProps) {
       setBackfillPlan(plan);
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBackfillBusy(false);
     }
   };
 
   const dispatchBackfillPlan = async () => {
     setError(null);
+    setBackfillBusy(true);
     try {
       const result = await dispatchBackfill(
         backfillWorkflowId.trim(),
@@ -213,6 +226,8 @@ export default function QueueView({ onBack }: QueueViewProps) {
       await load();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBackfillBusy(false);
     }
   };
 
@@ -223,21 +238,27 @@ export default function QueueView({ onBack }: QueueViewProps) {
       return;
     }
     setError(null);
+    setDeadLetterBusyId(id);
     try {
       await acknowledgeDeadLetter(id, reason, "scheduler-ui", false);
       await load();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setDeadLetterBusyId(null);
     }
   };
 
   const recover = async (id: string) => {
     setError(null);
+    setDeadLetterBusyId(id);
     try {
       await recoverDeadLetter(id, true);
       await load();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setDeadLetterBusyId(null);
     }
   };
 
@@ -248,12 +269,20 @@ export default function QueueView({ onBack }: QueueViewProps) {
       return;
     }
     setError(null);
+    setRetentionBusy(true);
     try {
       const result = await cleanupRetention(days, dryRun);
       setRetentionPreview(result);
+      setRetentionMessage(
+        dryRun
+          ? `Dry run: ${result.candidate_runs} run(s) would be deleted; ${result.preserved_dead_letter_runs} dead-letter run(s) preserved.`
+          : `Deleted ${result.deleted_runs ?? result.candidate_runs} run(s); ${result.preserved_dead_letter_runs} dead-letter run(s) preserved.`,
+      );
       if (!dryRun) await load();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setRetentionBusy(false);
     }
   };
 
@@ -282,105 +311,116 @@ export default function QueueView({ onBack }: QueueViewProps) {
         </div>
       </div>
 
-      {error && <div className="queue-error">{error}</div>}
+      {error && (
+        <Notice variant="error" assertive>
+          {error}
+        </Notice>
+      )}
 
       <section className="queue-section">
         <div className="queue-section-header">
           <h2>Queue Capacity</h2>
           <span>cap order: tag &lt;= queue &lt;= global</span>
         </div>
-        <div className="queue-grid">
-          {queues.map((queue) => {
-            const key = `${queue.corpus}/${queue.name}`;
-            const draft = drafts[key] ?? draftFromQueue(queue);
-            const validation = validationByQueue[key];
-            return (
-              <div key={key} className="queue-card">
-                <div className="queue-card-header">
-                  <div>
-                    <div className="queue-name">{queue.name}</div>
-                    <div className="queue-corpus">{environmentOf(queue)}</div>
+        {queues.length === 0 ? (
+          <div className="queue-empty">No queues configured yet.</div>
+        ) : (
+          <div className="queue-grid">
+            {queues.map((queue) => {
+              const key = `${queue.corpus}/${queue.name}`;
+              const draft = drafts[key] ?? draftFromQueue(queue);
+              const validation = validationByQueue[key];
+              return (
+                <div key={key} className="queue-card">
+                  <div className="queue-card-header">
+                    <div>
+                      <div className="queue-name">{queue.name}</div>
+                      <div className="queue-corpus">{environmentOf(queue)}</div>
+                    </div>
+                    <div className="queue-counts">
+                      <span>{queue.active_count} active</span>
+                      <span>{queue.queued_count} queued</span>
+                    </div>
                   </div>
-                  <div className="queue-counts">
-                    <span>{queue.active_count} active</span>
-                    <span>{queue.queued_count} queued</span>
+
+                  <div className="queue-fields">
+                    <label>
+                      Capacity
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        pattern="\d+"
+                        min={1}
+                        max={queue.global_parallelism_cap}
+                        value={draft.capacity}
+                        onChange={(e) =>
+                          setDrafts((d) => ({
+                            ...d,
+                            [key]: { ...draft, capacity: e.target.value },
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Tag cap
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        pattern="\d+"
+                        min={1}
+                        value={draft.tagCap}
+                        placeholder="inherits queue"
+                        onChange={(e) =>
+                          setDrafts((d) => ({
+                            ...d,
+                            [key]: { ...draft, tagCap: e.target.value },
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Max queued
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        pattern="\d+"
+                        min={0}
+                        value={draft.maxQueued}
+                        placeholder="unbounded"
+                        onChange={(e) =>
+                          setDrafts((d) => ({
+                            ...d,
+                            [key]: { ...draft, maxQueued: e.target.value },
+                          }))
+                        }
+                      />
+                    </label>
+                  </div>
+
+                  <div className="queue-card-footer">
+                    <span
+                      className={
+                        validation
+                          ? "queue-validation error"
+                          : "queue-validation"
+                      }
+                    >
+                      {validation ??
+                        `Global cap ${queue.global_parallelism_cap}`}
+                    </span>
+                    <button
+                      className="btn btn-primary btn-sm"
+                      disabled={!!validation || savingId === key}
+                      onClick={() => saveQueue(queue)}
+                    >
+                      {savingId === key ? "Saving..." : "Save"}
+                    </button>
                   </div>
                 </div>
-
-                <div className="queue-fields">
-                  <label>
-                    Capacity
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      pattern="\d+"
-                      min={1}
-                      max={queue.global_parallelism_cap}
-                      value={draft.capacity}
-                      onChange={(e) =>
-                        setDrafts((d) => ({
-                          ...d,
-                          [key]: { ...draft, capacity: e.target.value },
-                        }))
-                      }
-                    />
-                  </label>
-                  <label>
-                    Tag cap
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      pattern="\d+"
-                      min={1}
-                      value={draft.tagCap}
-                      placeholder="inherits queue"
-                      onChange={(e) =>
-                        setDrafts((d) => ({
-                          ...d,
-                          [key]: { ...draft, tagCap: e.target.value },
-                        }))
-                      }
-                    />
-                  </label>
-                  <label>
-                    Max queued
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      pattern="\d+"
-                      min={0}
-                      value={draft.maxQueued}
-                      placeholder="unbounded"
-                      onChange={(e) =>
-                        setDrafts((d) => ({
-                          ...d,
-                          [key]: { ...draft, maxQueued: e.target.value },
-                        }))
-                      }
-                    />
-                  </label>
-                </div>
-
-                <div className="queue-card-footer">
-                  <span
-                    className={
-                      validation ? "queue-validation error" : "queue-validation"
-                    }
-                  >
-                    {validation ?? `Global cap ${queue.global_parallelism_cap}`}
-                  </span>
-                  <button
-                    className="btn btn-primary btn-sm"
-                    disabled={!!validation || savingId === key}
-                    onClick={() => saveQueue(queue)}
-                  >
-                    {savingId === key ? "Saving..." : "Save"}
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       <section className="queue-section">
@@ -432,17 +472,24 @@ export default function QueueView({ onBack }: QueueViewProps) {
             </span>
             <button
               className="btn btn-ghost btn-sm"
-              disabled={!backfillWorkflowId || !backfillSince || !backfillUntil}
+              disabled={
+                backfillBusy ||
+                !backfillWorkflowId ||
+                !backfillSince ||
+                !backfillUntil
+              }
               onClick={previewBackfill}
             >
-              Preview
+              {backfillBusy ? "Working…" : "Preview"}
             </button>
             <button
               className="btn btn-primary btn-sm"
-              disabled={!backfillPlan || backfillPlan.count === 0}
+              disabled={
+                backfillBusy || !backfillPlan || backfillPlan.count === 0
+              }
               onClick={dispatchBackfillPlan}
             >
-              Dispatch
+              {backfillBusy ? "Dispatching…" : "Dispatch"}
             </button>
           </div>
         </div>
@@ -488,14 +535,16 @@ export default function QueueView({ onBack }: QueueViewProps) {
                   <button
                     className="btn btn-ghost btn-sm"
                     onClick={() => acknowledge(row.id)}
+                    disabled={deadLetterBusyId === row.id}
                   >
-                    Ack
+                    {deadLetterBusyId === row.id ? "…" : "Ack"}
                   </button>
                   <button
                     className="btn btn-primary btn-sm"
                     onClick={() => recover(row.id)}
+                    disabled={deadLetterBusyId === row.id}
                   >
-                    Recover
+                    {deadLetterBusyId === row.id ? "…" : "Recover"}
                   </button>
                 </span>
               </div>
@@ -523,24 +572,28 @@ export default function QueueView({ onBack }: QueueViewProps) {
           </div>
           <div className="queue-card-footer">
             <span className="queue-validation">
-              {retentionPreview
-                ? `${retentionPreview.candidate_runs} candidate run(s), ${retentionPreview.preserved_dead_letter_runs} dead-letter run(s) preserved`
-                : "Retention cleanup never deletes scheduler_dead_letters evidence."}
+              {retentionMessage ??
+                (retentionPreview
+                  ? `${retentionPreview.candidate_runs} candidate run(s), ${retentionPreview.preserved_dead_letter_runs} dead-letter run(s) preserved`
+                  : "Retention cleanup never deletes scheduler_dead_letters evidence.")}
             </span>
             <button
               className="btn btn-ghost btn-sm"
               onClick={() => runRetention(true)}
+              disabled={retentionBusy}
             >
-              Dry Run
+              {retentionBusy ? "Working…" : "Dry Run"}
             </button>
             <button
               className="btn btn-danger btn-sm"
               disabled={
-                !retentionPreview || retentionPreview.candidate_runs === 0
+                retentionBusy ||
+                !retentionPreview ||
+                retentionPreview.candidate_runs === 0
               }
               onClick={() => runRetention(false)}
             >
-              Apply Cleanup
+              {retentionBusy ? "Applying…" : "Apply Cleanup"}
             </button>
           </div>
         </div>
@@ -581,8 +634,9 @@ export default function QueueView({ onBack }: QueueViewProps) {
                     <button
                       className="btn btn-danger btn-sm"
                       onClick={() => cancelRun(run.id)}
+                      disabled={cancelBusyId === run.id}
                     >
-                      Cancel
+                      {cancelBusyId === run.id ? "…" : "Cancel"}
                     </button>
                   )}
                 </span>

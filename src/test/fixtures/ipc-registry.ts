@@ -30,6 +30,7 @@ export type IpcCommand =
   | "check_for_update"
   | "apply_update"
   | "trigger_workflow"
+  | "enqueue_workflow"
   | "rerun_workflow"
   | "plan_backfill"
   | "dispatch_backfill"
@@ -143,6 +144,12 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
     }),
     apply_update: () => undefined,
     trigger_workflow: () => sampleRun.id,
+    enqueue_workflow: () => ({
+      workflow_id: sampleWorkflow.id,
+      status: "queued",
+      queued_run_id: "queue-fixture-1",
+      queue_name: "default",
+    }),
     rerun_workflow: () => "run-rerun-1",
     plan_backfill: (args) => ({
       workflow_id: String(args.workflowId),

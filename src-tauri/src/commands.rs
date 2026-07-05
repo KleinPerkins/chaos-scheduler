@@ -343,6 +343,102 @@ pub fn trigger_workflow(state: State<AppState>, id: String) -> Result<String, St
 }
 
 #[tauri::command]
+pub fn enqueue_workflow(
+    state: State<AppState>,
+    id: String,
+    idempotency_key: Option<String>,
+) -> Result<scheduler::DispatchOutcome, String> {
+    use crate::db::IdempotencyReservation;
+    use scheduler::NonCronDispatchOptions;
+    use sha2::{Digest, Sha256};
+
+    state
+        .service
+        .ensure_workflow_execution_allowed(&id)
+        .map_err(|e| e.to_string())?;
+
+    let trigger_kind = "ui_enqueue";
+    let fingerprint = idempotency_key.as_ref().map(|_| {
+        let mut hasher = Sha256::new();
+        hasher.update(id.as_bytes());
+        hasher.update([0]);
+        hasher.update(trigger_kind.as_bytes());
+        hasher.update([0]);
+        hex::encode(hasher.finalize())
+    });
+
+    if let (Some(key), Some(fp)) = (&idempotency_key, &fingerprint) {
+        match state
+            .db
+            .reserve_idempotency_key(key, &id, fp)
+            .map_err(|e| e.to_string())?
+        {
+            IdempotencyReservation::Reserved => {}
+            IdempotencyReservation::Existing(record) => {
+                if let Some(existing) = record.request_fingerprint.as_deref() {
+                    if existing != fp.as_str() {
+                        return Err(
+                            "idempotency key was already used for a different request".into()
+                        );
+                    }
+                }
+                return Ok(scheduler::DispatchOutcome {
+                    workflow_id: id,
+                    status: "duplicate".to_string(),
+                    run_id: record.run_id,
+                    queued_run_id: record.queued_run_id,
+                    queue_name: String::new(),
+                    trigger_kind: Some(trigger_kind.to_string()),
+                    trigger_payload: None,
+                    reason: Some("idempotent replay".to_string()),
+                });
+            }
+        }
+    }
+
+    let options = NonCronDispatchOptions {
+        notify_on_success: false,
+        notify_on_failure: true,
+        email_on_failure_enabled: false,
+        trigger_kind,
+        trigger_payload: None,
+        upstream_run_id: None,
+        input_json: None,
+        rerun_of_run_id: None,
+        suppress_completion_triggers: false,
+        dedupe: false,
+        app_handle: None,
+    };
+
+    let outcome = match scheduler::dispatch_non_cron_workflow(
+        &state.db,
+        &state.workspace_root,
+        &state.python_path,
+        &id,
+        options,
+    ) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            if let (Some(key), Some(fp)) = (&idempotency_key, &fingerprint) {
+                let _ = state.db.delete_idempotency_reservation(key, fp);
+            }
+            return Err(e);
+        }
+    };
+
+    if let Some(key) = &idempotency_key {
+        let _ = state.db.complete_idempotency_key(
+            key,
+            outcome.run_id.as_deref(),
+            outcome.queued_run_id.as_deref(),
+            &outcome.status,
+        );
+    }
+
+    Ok(outcome)
+}
+
+#[tauri::command]
 pub fn rerun_workflow(
     state: State<AppState>,
     workflow_id: String,
