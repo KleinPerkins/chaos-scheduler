@@ -96,10 +96,12 @@ guard plus an audit log.
 ### Tools
 
 Read: `list_environments`, `list_workflows`, `get_workflow`,
-`list_workflow_runs`, `get_run`, `get_version`, `health_check`.
+`list_workflow_runs`, `get_run`, `get_run_logs`, `get_run_tasks`, `get_run_metrics`,
+`list_queues`, `list_queued_runs`, `get_version`, `health_check`.
 
-Write: `create_environment`, `register_workflow`, `set_workflow_spec`,
-`delete_workflow`, `run_workflow_now`, `enqueue_workflow`, `dispatch_workflow`.
+Write: `create_environment`, `register_workflow`, `update_workflow`,
+`set_workflow_spec`, `delete_workflow`, `run_workflow_now`, `enqueue_workflow`,
+`dispatch_workflow`, `rerun_workflow`.
 
 Each write tool passes through the protected-environment guardrail; all tools
 count against the optional tool-call budget. Dispatch tools forward `idempotency_key`;
@@ -108,7 +110,8 @@ replays return the original `run_id` or `queued_run_id`.
 ### Resources
 
 `chaos://version`, `chaos://environments`, `chaos://workflows`,
-`chaos://workflows/{id}`, `chaos://workflows/{id}/runs`, `chaos://runs/{id}`.
+`chaos://workflows/{id}`, `chaos://workflows/{id}/runs`, `chaos://runs/{id}`,
+`chaos://runs/{id}/logs`, `chaos://queues`, `chaos://queued-runs`.
 Freshness is pull-based (Cursor does not document resource subscriptions).
 
 ### Prompts

@@ -311,4 +311,25 @@ describe("ChaosSchedulerClient", () => {
     expect(calls[0]!.headers?.["idempotency-key"]).toBe("rerun-1");
     if (!isDuplicateDispatch(res)) expect(res.run_id).toBe("r2");
   });
+
+  it("waitForRun throws when timeout elapses before terminal status", async () => {
+    vi.useFakeTimers();
+    const { fetch } = fakeFetch(() => ({
+      status: 200,
+      json: { run: { id: "r1", workflow_id: "w1", status: "running" } },
+    }));
+    const client = new ChaosSchedulerClient({
+      baseUrl: BASE,
+      apiKey: "id.secret",
+      fetch,
+    });
+    const promise = client.waitForRun("r1", {
+      intervalMs: 100,
+      timeoutMs: 250,
+    });
+    const assertion = expect(promise).rejects.toThrow(/timed out after 250ms/);
+    await vi.advanceTimersByTimeAsync(300);
+    await assertion;
+    vi.useRealTimers();
+  });
 });

@@ -941,8 +941,8 @@ async fn list_queued_runs(
 /// Cursor Cloud Agent completion webhook receiver.
 ///
 /// v1 uses SSE + polling as the primary completion channel (Cursor's v1
-/// webhooks are not yet GA); this endpoint is a signature-verifying stub that
-/// acknowledges receipt so the integration can be flipped on when available.
+/// webhooks are not yet GA). This endpoint is an **unsigned** acknowledgement stub
+/// (it does not verify signatures today) so the route can be wired when GA lands.
 async fn cursor_webhook(
     State(_st): State<ApiState>,
     _headers: HeaderMap,

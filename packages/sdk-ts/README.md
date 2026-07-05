@@ -83,7 +83,7 @@ scheduler process is started with
 
 ## Idempotency
 
-`runWorkflow`, `enqueueWorkflow`, and `dispatchWorkflow` accept an
+`runWorkflow`, `enqueueWorkflow`, `dispatchWorkflow`, and `rerunWorkflow` accept an
 `idempotencyKey`. Reusing a key returns the original result as
 `{ status: "duplicate", run_id, queued_run_id }`. Queued dispatches replay with `queued_run_id`; admitted dispatches replay with `run_id`. Use the `isDuplicateDispatch` guard:
 
@@ -145,6 +145,11 @@ app.post(
 The signature scheme (`hex(HMAC_SHA256(secret, raw_body))`) is verified in the
 SDK's test suite against a cross-implementation vector shared with the backend.
 
+> **Case sensitivity:** `verifyWebhookSignature` accepts uppercase hex digests,
+> but the scheduler's **inbound** webhook verifier (`api.rs::verify_inbound_webhook`)
+> compares signatures case-sensitively. Emit lowercase `sha256=<hex>` when calling
+> the scheduler API.
+
 ## API surface
 
 Client methods (all return typed models):
@@ -165,6 +170,13 @@ Client methods (all return typed models):
 | `dispatchWorkflow(id, opts)` | `POST /api/v1/workflows/{id}/dispatch` | write |
 | `listRuns(id)`               | `GET /api/v1/workflows/{id}/runs`      | read  |
 | `getRun(id)`                 | `GET /api/v1/runs/{id}`                | read  |
+| `getRunLogs(id)`             | `GET /api/v1/runs/{id}/logs`           | read  |
+| `getRunTasks(id)`            | `GET /api/v1/runs/{id}/tasks`          | read  |
+| `getRunMetrics(id)`          | `GET /api/v1/runs/{id}/metrics`        | read  |
+| `listQueues()`               | `GET /api/v1/queues`                   | read  |
+| `listQueuedRuns()`           | `GET /api/v1/queued-runs`              | read  |
+| `updateWorkflow(id, input)`  | `PATCH /api/v1/workflows/{id}`         | write |
+| `rerunWorkflow(id, opts)`    | `POST /api/v1/workflows/{id}/rerun`    | write |
 | `waitForRun(runId, opts)`    | polls `GET /api/v1/runs/{id}`          | read  |
 
 Webhook helpers: `computeWebhookSignature`, `webhookSignatureHeader`,

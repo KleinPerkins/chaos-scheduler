@@ -19,17 +19,21 @@ hand-writing HTTP calls.
 ## Tools (prefer these)
 
 - **Read:** `list_environments`, `list_workflows`, `get_workflow`,
-  `list_workflow_runs`, `get_run`, `get_version`, `health_check`.
-- **Write:** `create_environment`, `register_workflow`, `set_workflow_spec`,
-  `delete_workflow`, `run_workflow_now`, `enqueue_workflow`, `dispatch_workflow`.
+  `list_workflow_runs`, `get_run`, `get_run_logs`, `get_run_tasks`,
+  `get_run_metrics`, `list_queues`, `list_queued_runs`, `get_version`,
+  `health_check`.
+- **Write:** `create_environment`, `register_workflow`, `update_workflow`,
+  `set_workflow_spec`, `delete_workflow`, `run_workflow_now`, `enqueue_workflow`,
+  `dispatch_workflow`, `rerun_workflow`.
 
 ## Conventions
 
 - **Prefer `enqueue_workflow`** over `run_workflow_now` when the scheduler should
   manage concurrency/admission; use `run_workflow_now` only for true one-offs.
 - **Always pass an `idempotency_key`** (a fresh UUID per logical action) to
-  `run_workflow_now` / `enqueue_workflow` / `dispatch_workflow`. A reused key
-  returns `{ "status": "duplicate", "run_id": ... }` — treat that as success, not
+  `run_workflow_now` / `enqueue_workflow` / `dispatch_workflow` /
+  `rerun_workflow`. A reused key returns `{ "status": "duplicate", run_id,
+  queued_run_id }` — treat that as success, not
   a new run.
 - **Registration is authoritative:** workflows created via `register_workflow`
   are marked `managed_externally=true` (source-of-truth is external). Only change
@@ -44,7 +48,8 @@ hand-writing HTTP calls.
 
 Read-only state is available as resources for @-referencing:
 `chaos://environments`, `chaos://workflows`, `chaos://workflows/{id}`,
-`chaos://workflows/{id}/runs`, `chaos://runs/{id}`, `chaos://version`.
+`chaos://workflows/{id}/runs`, `chaos://runs/{id}`, `chaos://runs/{id}/logs`,
+`chaos://queues`, `chaos://queued-runs`, `chaos://version`.
 
 ## Prompts
 
@@ -53,6 +58,8 @@ Reusable templates: `triage_failed_run(run_id)`,
 
 ## Failure triage loop
 
-When a run fails: read it with `get_run` (exit code + stderr tail), inspect the
-owning workflow with `get_workflow`, propose a concrete fix, and only re-run with
-a fresh `idempotency_key` if the failure looks transient.
+When a run fails: read it with `get_run` or `get_run_logs` (stderr tail),
+inspect tasks via `get_run_tasks` when steps failed, inspect the owning workflow
+with `get_workflow`, propose a concrete fix, and use `rerun_workflow` (or
+`run_workflow_now` with a fresh `idempotency_key`) only if the failure looks
+transient.
