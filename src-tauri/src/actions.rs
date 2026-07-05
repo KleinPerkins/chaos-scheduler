@@ -11,7 +11,7 @@ use crate::service::Notifier;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -92,11 +92,75 @@ fn is_blocked_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
+    // Close the `::ffff:127.0.0.1` bypass: an IPv4-mapped IPv6 address is really
+    // an IPv4 destination, so apply the IPv4 blocklist.
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return is_blocked_ipv4(mapped);
+    }
     let first = ip.segments()[0];
     ip.is_loopback()
         || ip.is_unspecified()
         || (first & 0xfe00) == 0xfc00
         || (first & 0xffc0) == 0xfe80
+}
+
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_blocked_ipv4(v4),
+        IpAddr::V6(v6) => is_blocked_ipv6(v6),
+    }
+}
+
+/// Injectable DNS seam so SSRF tests can force a resolution result.
+pub type DnsResolver = fn(&str) -> Result<Vec<IpAddr>, String>;
+
+pub fn default_dns_resolver(host: &str) -> Result<Vec<IpAddr>, String> {
+    let addrs: Vec<IpAddr> = format!("{host}:0")
+        .to_socket_addrs()
+        .map_err(|e| format!("dns resolution failed: {e}"))?
+        .map(|addr| addr.ip())
+        .collect();
+    if addrs.is_empty() {
+        return Err("dns resolution returned no addresses".into());
+    }
+    Ok(addrs)
+}
+
+/// Resolve the webhook host, reject if ANY resolved address is blocked, and
+/// return the host plus the single address we will pin the TCP connect to. This
+/// defeats DNS-rebind TOCTOU: the connection cannot race a second lookup back to
+/// a private IP.
+fn resolve_and_pin_webhook_addr(
+    parsed: &reqwest::Url,
+    resolve: DnsResolver,
+) -> Result<(String, SocketAddr), String> {
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "webhook url requires a host".to_string())?;
+    if is_blocked_outbound_host(host) {
+        return Err("webhook url targets a blocked local/private address".into());
+    }
+    let addrs = resolve(host)?;
+    for ip in &addrs {
+        if is_blocked_ip(*ip) {
+            return Err("webhook url resolves to a blocked address".into());
+        }
+    }
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    Ok((host.to_string(), SocketAddr::new(addrs[0], port)))
+}
+
+fn build_pinned_webhook_client(
+    host: &str,
+    addr: SocketAddr,
+    timeout: Duration,
+) -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve(host, addr)
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 fn is_blocked_outbound_host(host: &str) -> bool {
@@ -264,7 +328,21 @@ fn dispatch_webhook(
     ctx: &ActionContext,
     budget: Duration,
 ) -> Result<String, String> {
+    dispatch_webhook_with_resolver(url, secret, max_retries, ctx, budget, default_dns_resolver)
+}
+
+fn dispatch_webhook_with_resolver(
+    url: &str,
+    secret: Option<&str>,
+    max_retries: u32,
+    ctx: &ActionContext,
+    budget: Duration,
+    resolve: DnsResolver,
+) -> Result<String, String> {
     validate_outbound_webhook_url(url)?;
+    let parsed =
+        reqwest::Url::parse(url.trim()).map_err(|e| format!("invalid webhook url: {e}"))?;
+    let (pin_host, pin_addr) = resolve_and_pin_webhook_addr(&parsed, resolve)?;
     let started = Instant::now();
     let body = serde_json::to_vec(&ctx.result_payload).map_err(|e| e.to_string())?;
     let signature = secret.map(|s| sign_payload(s, &body));
@@ -278,10 +356,7 @@ fn dispatch_webhook(
         }
         let remaining = budget.saturating_sub(started.elapsed());
         let timeout = remaining.min(WEBHOOK_REQUEST_TIMEOUT);
-        let client = reqwest::blocking::Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(|e| e.to_string())?;
+        let client = build_pinned_webhook_client(&pin_host, pin_addr, timeout)?;
         let mut req = client
             .post(url)
             .header("content-type", "application/json")
@@ -440,5 +515,40 @@ mod tests {
         assert!(!results[0].success);
         assert!(results[0].message.contains("blocked local/private"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn outbound_webhook_blocks_dns_rebind_to_private() {
+        use crate::service::NoopNotifier;
+
+        let dir = std::env::temp_dir().join(format!("chaos-act-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = ActionContext {
+            db: Arc::new(Database::new(&dir)),
+            notifier: Arc::new(NoopNotifier),
+            workflow_name: "WF".into(),
+            run_id: "run-1".into(),
+            success: false,
+            result_payload: serde_json::json!({"status":"failed","run_id":"run-1"}),
+        };
+        // A public-looking host that resolves to loopback must be rejected before
+        // the connect, even though the literal host passes the string blocklist.
+        let evil_resolver: DnsResolver = |_| Ok(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+        let err = dispatch_webhook_with_resolver(
+            "https://evil.example/hook",
+            Some("secret"),
+            0,
+            &ctx,
+            ACTION_DISPATCH_TOTAL_BUDGET,
+            evil_resolver,
+        )
+        .unwrap_err();
+        assert!(err.contains("blocked address"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn outbound_webhook_blocks_ipv4_mapped_loopback_literal() {
+        assert!(is_blocked_outbound_host("::ffff:127.0.0.1"));
     }
 }
