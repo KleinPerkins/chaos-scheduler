@@ -1404,11 +1404,51 @@ impl Database {
         match conn.execute("VACUUM INTO ?1", params![backup_path]) {
             Ok(_) => {
                 log::info!("Pre-migration backup written to {backup_path}");
+                Self::prune_migration_backups(&self.path);
                 Ok(())
             }
             Err(err) => {
                 log::error!("Pre-migration backup failed: {err}");
                 Err(err)
+            }
+        }
+    }
+
+    /// Retain only the most recent `MIGRATION_BACKUP_KEEP` pre-migration
+    /// sidecars for this DB so repeated upgrades cannot accumulate unbounded
+    /// `.bak` copies. Best-effort: prune failures are logged, never fatal.
+    fn prune_migration_backups(path: &str) {
+        const MIGRATION_BACKUP_KEEP: usize = 3;
+        let p = std::path::Path::new(path);
+        let dir = match p.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+            _ => std::path::PathBuf::from("."),
+        };
+        let Some(file_name) = p.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        let prefix = format!("{file_name}.pre-migrate-");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        let mut sidecars: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let name = name.to_str()?;
+                if name.starts_with(&prefix) && name.ends_with(".bak") {
+                    let mtime = entry.metadata().ok()?.modified().ok()?;
+                    Some((mtime, entry.path()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // Newest first; delete everything past the retention window.
+        sidecars.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, stale) in sidecars.into_iter().skip(MIGRATION_BACKUP_KEEP) {
+            if let Err(err) = std::fs::remove_file(&stale) {
+                log::warn!("Failed to prune old migration backup {stale:?}: {err}");
             }
         }
     }
@@ -4913,6 +4953,152 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migration_fixture_v7_to_v8_adds_execution_metadata_and_stamps_version() {
+        // Tripwire: refresh this fixture (seed schema + asserted columns) the
+        // next time a migration lands so the N-1 -> N path stays covered.
+        assert_eq!(
+            CURRENT_SCHEMA_VERSION, 8,
+            "add a v(N-1)->v(N) fixture when a new migration ships"
+        );
+
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        let db = Database {
+            path: db_path.to_string_lossy().to_string(),
+        };
+
+        // Seed the pre-v8 shape of `runs` (no execution/truncation metadata) and
+        // stamp the DB at v(N-1) so exactly the v8 migration is pending. We drive
+        // `run_migrations` directly to isolate the N-1 -> N transition rather than
+        // rebuilding the entire intermediate schema through `init`.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runs (
+                    id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    exit_code INTEGER,
+                    stdout TEXT,
+                    stderr TEXT,
+                    result_url TEXT,
+                    trigger_kind TEXT,
+                    trigger_payload TEXT,
+                    upstream_run_id TEXT,
+                    input_json TEXT,
+                    rerun_of_run_id TEXT,
+                    status TEXT DEFAULT 'running'
+                );
+                INSERT INTO runs (id, workflow_id, started_at, status)
+                    VALUES ('run-mig', 'wf-mig', '2026-01-01T00:00:00Z', 'running');
+                PRAGMA user_version = 7;",
+            )
+            .unwrap();
+
+            let cols = runs_columns(&conn);
+            assert!(
+                !cols.contains("execution_worker_id") && !cols.contains("process_pid"),
+                "pre-migration fixture must not already carry v8 columns"
+            );
+            let v: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, CURRENT_SCHEMA_VERSION - 1);
+        }
+
+        // Apply exactly the pending v(N-1) -> v(N) migration.
+        let conn = db.conn().unwrap();
+        db.run_migrations(&conn, CURRENT_SCHEMA_VERSION - 1)
+            .unwrap();
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+
+        let cols = runs_columns(&conn);
+        for expected in [
+            "execution_worker_id",
+            "process_pid",
+            "process_pgid",
+            "process_started_at",
+            "stdout_truncated",
+            "stderr_truncated",
+            "task_events_truncated",
+        ] {
+            assert!(
+                cols.contains(expected),
+                "v8 migration should add `{expected}` to runs"
+            );
+        }
+
+        // Existing pre-migration row survives the in-place upgrade.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runs WHERE id = 'run-mig'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn runs_columns(conn: &Connection) -> std::collections::HashSet<String> {
+        let mut stmt = conn.prepare("PRAGMA table_info(runs)").unwrap();
+        let cols = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        cols
+    }
+
+    #[test]
+    fn migration_backup_prune_keeps_last_three() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-bakprune-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        let db_path_str = db_path.to_string_lossy().to_string();
+
+        // Five pre-migration sidecars for THIS db, created oldest -> newest.
+        let mut created = vec![];
+        for i in 1..=5 {
+            let bak = dir.join(format!(
+                "scheduler.db.pre-migrate-v{i}-2026010{i}T000000.bak"
+            ));
+            std::fs::write(&bak, b"backup").unwrap();
+            created.push(bak);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // A sidecar belonging to a DIFFERENT db must never be pruned.
+        let unrelated = dir.join("other.db.pre-migrate-v1-20260101T000000.bak");
+        std::fs::write(&unrelated, b"other").unwrap();
+
+        Database::prune_migration_backups(&db_path_str);
+
+        let remaining: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("scheduler.db.pre-migrate-") && n.ends_with(".bak"))
+            .collect();
+        assert_eq!(
+            remaining.len(),
+            3,
+            "only the 3 newest sidecars survive: {remaining:?}"
+        );
+        // Oldest two pruned; newest three retained.
+        assert!(!created[0].exists() && !created[1].exists());
+        assert!(created[2].exists() && created[3].exists() && created[4].exists());
+        // Unrelated db's sidecar is left intact.
+        assert!(unrelated.exists());
+
         let _ = std::fs::remove_dir_all(dir);
     }
 
