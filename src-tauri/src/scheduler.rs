@@ -574,31 +574,23 @@ fn dependency_decision_for_db(
     DependencyDecision::Ready
 }
 
-fn mark_trigger_context_admitted(
-    db: &Arc<Database>,
-    workflow_id: &str,
+/// Derive the `(trigger_id, fingerprint)` pair that an admission should record
+/// as fired for file-arrival / asset-update triggers, or `None` when the
+/// trigger carries no dedupe fingerprint. Persistence happens atomically inside
+/// [`Database::admit_run_with_context`].
+fn trigger_state_for_admission(
     trigger_kind: Option<&str>,
     trigger_payload: Option<&str>,
-) {
-    let Some(kind) = trigger_kind else {
-        return;
-    };
+) -> Option<(String, String)> {
+    let kind = trigger_kind?;
     if kind != "file_arrival" && kind != "asset_update" {
-        return;
+        return None;
     }
-    let Some(payload) = trigger_payload else {
-        return;
-    };
-    let Ok(value) = serde_json::from_str::<Value>(payload) else {
-        return;
-    };
-    let Some(trigger_id) = value.get("trigger_id").and_then(Value::as_str) else {
-        return;
-    };
-    let Some(fingerprint) = value.get("fingerprint").and_then(Value::as_str) else {
-        return;
-    };
-    let _ = db.set_trigger_state(workflow_id, trigger_id, fingerprint, true);
+    let payload = trigger_payload?;
+    let value = serde_json::from_str::<Value>(payload).ok()?;
+    let trigger_id = value.get("trigger_id").and_then(Value::as_str)?;
+    let fingerprint = value.get("fingerprint").and_then(Value::as_str)?;
+    Some((trigger_id.to_string(), fingerprint.to_string()))
 }
 
 pub struct DueWorkflow {
@@ -1558,27 +1550,18 @@ pub fn execute_workflow_with_context(
         .get_workflow(workflow_id)
         .map_err(|e| format!("Failed to get workflow: {}", e))?;
     let queue_config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.environment);
-    if !has_runtime_capacity(db, &queue_config)? {
-        let _ = db.upsert_queued_run_with_context(
-            &workflow.id,
-            &queue_config.queue,
-            queue_config.priority,
-            trigger_kind,
-            trigger_payload,
-            upstream_run_id,
-            input_json,
-            rerun_of_run_id,
-        );
-        return Err(format!(
-            "Queue {} is at capacity or constrained by global/tag caps",
-            queue_config.queue
-        ));
-    }
     let mutex_keys = mutex_keys(&workflow.id, &queue_config);
+    let trigger_state = trigger_state_for_admission(trigger_kind, trigger_payload);
 
+    // Capacity, mutex, queued claim, run/admitted state, and trigger state are
+    // now decided in one BEGIN IMMEDIATE transaction, so concurrent admitters
+    // cannot both pass the caps or both take a mutex before either commits.
     let run = match db
         .admit_run_with_context(
             &workflow.id,
+            &queue_config.queue,
+            &queue_config.environment,
+            &queue_config.tags,
             trigger_kind,
             trigger_payload,
             upstream_run_id,
@@ -1586,10 +1569,29 @@ pub fn execute_workflow_with_context(
             rerun_of_run_id,
             queued_run_id,
             &mutex_keys,
+            trigger_state
+                .as_ref()
+                .map(|(id, fingerprint)| (id.as_str(), fingerprint.as_str())),
         )
         .map_err(|e| format!("Failed to admit run: {}", e))?
     {
         RunAdmission::Admitted(run) => run,
+        RunAdmission::AtCapacity => {
+            let _ = db.upsert_queued_run_with_context(
+                &workflow.id,
+                &queue_config.queue,
+                queue_config.priority,
+                trigger_kind,
+                trigger_payload,
+                upstream_run_id,
+                input_json,
+                rerun_of_run_id,
+            );
+            return Err(format!(
+                "Queue {} is at capacity or constrained by global/tag caps",
+                queue_config.queue
+            ));
+        }
         RunAdmission::MutexBusy => {
             return Err(format!(
                 "Workflow {} could not acquire mutex locks in queue {}",
@@ -1603,7 +1605,6 @@ pub fn execute_workflow_with_context(
             ));
         }
     };
-    mark_trigger_context_admitted(db, &workflow.id, trigger_kind, trigger_payload);
 
     // Structured workflows (generic step-flow / typed operator) are executed
     // in-scheduler with the scheduler as the sole author of run_tasks /

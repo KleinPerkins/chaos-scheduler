@@ -121,6 +121,9 @@ pub struct Run {
 #[allow(clippy::large_enum_variant)]
 pub enum RunAdmission {
     Admitted(Run),
+    /// Queue, global, or per-tag capacity was exhausted when re-checked inside
+    /// the admission transaction; the caller should enqueue the work.
+    AtCapacity,
     MutexBusy,
     QueuedRunUnavailable,
 }
@@ -1911,6 +1914,9 @@ impl Database {
     pub fn admit_run_with_context(
         &self,
         workflow_id: &str,
+        queue_name: &str,
+        environment: &str,
+        tags: &[String],
         trigger_kind: Option<&str>,
         trigger_payload: Option<&str>,
         upstream_run_id: Option<&str>,
@@ -1918,11 +1924,98 @@ impl Database {
         rerun_of_run_id: Option<&str>,
         queued_run_id: Option<&str>,
         mutex_keys: &[String],
+        trigger_state: Option<(&str, &str)>,
     ) -> rusqlite::Result<RunAdmission> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // Capacity re-check under the held write lock. The scheduler also
+        // pre-checks capacity, but that read races the admission; re-counting
+        // inside this IMMEDIATE transaction is what actually enforces the
+        // queue/global/tag caps against concurrent admitters. Each running
+        // run's queue identity and tags are derived exactly as the queue
+        // metrics path does (canonical environment COALESCE +
+        // `queue_identity_from_config`).
+        let mut running: Vec<(String, String, Vec<String>)> = Vec::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT COALESCE(NULLIF(w.environment, ''), w.corpus, 'source') AS env, w.queue_config
+                 FROM runs r JOIN workflows w ON w.id = r.workflow_id
+                 WHERE r.status = 'running'",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let env: String = row.get(0)?;
+                let queue_config: Option<String> = row.get(1)?;
+                Ok((env, queue_config))
+            })?;
+            for row in rows {
+                let (env, queue_config) = row?;
+                let (queue, env) = queue_identity_from_config(queue_config.as_deref(), &env);
+                let row_tags = queue_tags_from_config(queue_config.as_deref());
+                running.push((queue, env, row_tags));
+            }
+        }
+        let total_running = running.len() as i64;
+        let queue_running = running
+            .iter()
+            .filter(|(queue, env, _)| queue == queue_name && env == environment)
+            .count() as i64;
+
+        let capacity = tx
+            .query_row(
+                "SELECT capacity FROM queues WHERE name = ?1 AND environment = ?2",
+                params![queue_name, environment],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(1)
+            .max(1);
+        if queue_running >= capacity {
+            tx.rollback()?;
+            return Ok(RunAdmission::AtCapacity);
+        }
+
+        let global_cap: i64 = {
+            let raw: String = tx.query_row(
+                "SELECT value FROM scheduler_config WHERE key = 'global_parallelism_cap'",
+                [],
+                |row| row.get(0),
+            )?;
+            raw.parse::<i64>().map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(e))
+            })?
+        };
+        if total_running >= global_cap {
+            tx.rollback()?;
+            return Ok(RunAdmission::AtCapacity);
+        }
+
+        let tag_cap: Option<i64> = tx
+            .query_row(
+                "SELECT tag_cap FROM queues WHERE name = ?1 AND environment = ?2",
+                params![queue_name, environment],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        if let Some(tag_cap) = tag_cap {
+            for tag in tags {
+                let tag_running = running
+                    .iter()
+                    .filter(|(queue, env, row_tags)| {
+                        queue == queue_name
+                            && env == environment
+                            && row_tags.iter().any(|candidate| candidate == tag)
+                    })
+                    .count() as i64;
+                if tag_running >= tag_cap {
+                    tx.rollback()?;
+                    return Ok(RunAdmission::AtCapacity);
+                }
+            }
+        }
 
         for key in mutex_keys {
             let exists: i64 = tx.query_row(
@@ -1969,6 +2062,22 @@ impl Database {
                 params![key, workflow_id, id, now],
             )?;
         }
+
+        // Record the trigger fingerprint as fired in the same transaction so a
+        // crash between run creation and trigger-state persistence cannot refire
+        // the same file-arrival / asset-update trigger.
+        if let Some((trigger_id, fingerprint)) = trigger_state {
+            tx.execute(
+                "INSERT INTO workflow_trigger_state (workflow_id, trigger_id, fingerprint, observed_at, fired_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)
+                 ON CONFLICT(workflow_id, trigger_id) DO UPDATE SET
+                   fingerprint = excluded.fingerprint,
+                   observed_at = excluded.observed_at,
+                   fired_at = COALESCE(excluded.fired_at, workflow_trigger_state.fired_at)",
+                params![workflow_id, trigger_id, fingerprint, now],
+            )?;
+        }
+
         tx.commit()?;
         self.get_run(&id).map(RunAdmission::Admitted)
     }
@@ -4605,6 +4714,25 @@ fn queue_identity_from_config(queue_config: Option<&str>, environment: &str) -> 
     (queue, environment.to_string())
 }
 
+/// Extract the `tags` array from a workflow `queue_config` JSON blob. Mirrors
+/// the tag parsing that `scheduler::parse_queue_config` performs so tag-cap
+/// accounting inside `admit_run_with_context` matches the scheduler's view.
+fn queue_tags_from_config(queue_config: Option<&str>) -> Vec<String> {
+    queue_config
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| {
+            value
+                .get("tags")
+                .and_then(|tags| tags.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|tag| tag.as_str().map(str::to_string))
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5252,6 +5380,9 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let run = match db
             .admit_run_with_context(
                 &workflow.id,
+                "source-default",
+                "source",
+                &[],
                 Some("manual"),
                 None,
                 None,
@@ -5259,6 +5390,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 None,
                 Some(&queued_id),
                 &keys,
+                None,
             )
             .unwrap()
         {
@@ -5298,6 +5430,9 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert!(matches!(
             db.admit_run_with_context(
                 &workflow.id,
+                "source-default",
+                "source",
+                &[],
                 Some("manual"),
                 Some("blocked"),
                 None,
@@ -5305,6 +5440,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 None,
                 Some(&blocked_queue),
                 &keys,
+                None,
             )
             .unwrap(),
             RunAdmission::MutexBusy
@@ -5317,6 +5453,116 @@ SUMMARY_JSON:{\"title\":\"current\"}
             )
             .unwrap();
         assert_eq!(blocked, ("queued".to_string(), None));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn admission_capacity_test_workflow(db: &Database, queue_config: Option<&str>) -> Workflow {
+        db.create_workflow(
+            "Capacity Admission Workflow",
+            None,
+            "scripts/workflows/noop.py",
+            "0 0 * * *",
+            false,
+            true,
+            "UTC",
+            "source",
+            None,
+            None,
+            queue_config,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn admit_run_with_context_enforces_capacity_under_concurrency() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = std::sync::Arc::new(Database::new(&dir));
+        // Capacity 1: only one run may occupy this queue at a time, so the
+        // in-transaction capacity re-check must reject every racing admitter
+        // but one.
+        db.upsert_queue("source-default", "source", 1, None, None)
+            .unwrap();
+        let workflow = admission_capacity_test_workflow(&db, Some(r#"{"queue":"source-default"}"#));
+
+        let threads = 8;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(threads));
+        let mut handles = Vec::new();
+        for _ in 0..threads {
+            let db = std::sync::Arc::clone(&db);
+            let barrier = std::sync::Arc::clone(&barrier);
+            let workflow_id = workflow.id.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                match db
+                    .admit_run_with_context(
+                        &workflow_id,
+                        "source-default",
+                        "source",
+                        &[],
+                        Some("manual"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        &[],
+                        None,
+                    )
+                    .unwrap()
+                {
+                    RunAdmission::Admitted(_) => "admitted",
+                    RunAdmission::AtCapacity => "at_capacity",
+                    RunAdmission::MutexBusy => "mutex",
+                    RunAdmission::QueuedRunUnavailable => "queued_gone",
+                }
+            }));
+        }
+        let mut admitted = 0;
+        let mut at_capacity = 0;
+        for handle in handles {
+            match handle.join().unwrap() {
+                "admitted" => admitted += 1,
+                "at_capacity" => at_capacity += 1,
+                other => panic!("unexpected admission outcome: {other}"),
+            }
+        }
+        assert_eq!(admitted, 1, "exactly one run may hold the single slot");
+        assert_eq!(at_capacity, threads - 1);
+        assert_eq!(db.get_running_count().unwrap(), 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn admit_run_with_context_records_trigger_state_in_transaction() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = admission_capacity_test_workflow(&db, Some(r#"{"queue":"source-default"}"#));
+
+        let outcome = db
+            .admit_run_with_context(
+                &workflow.id,
+                "source-default",
+                "source",
+                &[],
+                Some("file_arrival"),
+                Some(r#"{"trigger_id":"inbox","fingerprint":"abc"}"#),
+                None,
+                None,
+                None,
+                None,
+                &[],
+                Some(("inbox", "abc")),
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunAdmission::Admitted(_)));
+        assert_eq!(
+            db.get_trigger_fingerprint(&workflow.id, "inbox").unwrap(),
+            Some("abc".to_string())
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
