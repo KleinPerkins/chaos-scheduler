@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v0.2.0...mcp-server-v0.3.0) (2026-07-05)
+
+
+### Features
+
+* **api:** add REST workflow patch and rerun endpoints ([#62](https://github.com/KleinPerkins/chaos-scheduler/issues/62)) ([e9632cc](https://github.com/KleinPerkins/chaos-scheduler/commit/e9632cc25e429c672db0f67803e21dd9c1ac09ec))
+* **packages:** add SDK/MCP read methods for runs and queues ([#59](https://github.com/KleinPerkins/chaos-scheduler/issues/59)) ([8898873](https://github.com/KleinPerkins/chaos-scheduler/commit/8898873c6affcf768355cf380cd7fdf66f126ce1))
+
+
+### Bug Fixes
+
+* harden MCP HTTP transport ([#37](https://github.com/KleinPerkins/chaos-scheduler/issues/37)) ([79f22d8](https://github.com/KleinPerkins/chaos-scheduler/commit/79f22d8b051789a5d5fabeaa72a24df37229ee9d))
+* **mcp:** fail-closed protected-env guardrail and shared HTTP budget ([#68](https://github.com/KleinPerkins/chaos-scheduler/issues/68)) ([b82087a](https://github.com/KleinPerkins/chaos-scheduler/commit/b82087afd8376408d099db6c1390db77cc7a34ac))
+* persist queued idempotency outcomes ([#45](https://github.com/KleinPerkins/chaos-scheduler/issues/45)) ([c131c14](https://github.com/KleinPerkins/chaos-scheduler/commit/c131c14d9bf7b0de10effb5f154507c3b84319c3))
+
 ## [0.2.0](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v0.1.0...mcp-server-v0.2.0) (2026-07-04)
 
 
