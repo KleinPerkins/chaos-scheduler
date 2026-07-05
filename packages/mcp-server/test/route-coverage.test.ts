@@ -21,6 +21,8 @@ const TOOL_ROUTE_MATRIX = [
   ["create_environment", "createEnvironment", "POST /api/v1/environments"],
   ["register_workflow", "registerWorkflow", "POST /api/v1/workflows"],
   ["set_workflow_spec", "setWorkflowSpec", "POST /api/v1/workflows/{id}/spec"],
+  ["update_workflow", "updateWorkflow", "PATCH /api/v1/workflows/{id}"],
+  ["rerun_workflow", "rerunWorkflow", "POST /api/v1/workflows/{id}/rerun"],
   ["delete_workflow", "deleteWorkflow", "DELETE /api/v1/workflows/{id}"],
   ["run_workflow_now", "runWorkflow", "POST /api/v1/workflows/{id}/run"],
   [
@@ -70,6 +72,8 @@ describe("SDK/MCP route coverage matrix", () => {
       "POST /api/v1/environments",
       "POST /api/v1/workflows",
       "POST /api/v1/workflows/{id}/spec",
+      "PATCH /api/v1/workflows/{id}",
+      "POST /api/v1/workflows/{id}/rerun",
       "DELETE /api/v1/workflows/{id}",
       "POST /api/v1/workflows/{id}/run",
       "POST /api/v1/workflows/{id}/enqueue",

@@ -18,7 +18,9 @@ import type {
   QueueInfo,
   QueuedRun,
   RegisterWorkflowInput,
+  RerunWorkflowOptions,
   Run,
+  UpdateWorkflowInput,
   RunLogs,
   RunMetric,
   RunTasksResult,
@@ -208,6 +210,42 @@ export class ChaosSchedulerClient {
       },
     );
     return res.workflow;
+  }
+
+  /**
+   * `PATCH /api/v1/workflows/{id}` — update workflow metadata/runtime prefs (scope: write).
+   * API callers may edit externally-managed definitions they registered.
+   */
+  async updateWorkflow(
+    id: string,
+    input: UpdateWorkflowInput,
+  ): Promise<Workflow> {
+    const res = await this.request<{ workflow: Workflow }>(
+      "PATCH",
+      `/api/v1/workflows/${encodeURIComponent(id)}`,
+      { body: input },
+    );
+    return res.workflow;
+  }
+
+  /**
+   * `POST /api/v1/workflows/{id}/rerun` — rerun from a prior run (scope: write).
+   * Supports `idempotencyKey` for safe retries.
+   */
+  async rerunWorkflow(
+    id: string,
+    options: RerunWorkflowOptions = {},
+  ): Promise<DispatchResult> {
+    const body: Record<string, unknown> = {};
+    if (options.sourceRunId) body.source_run_id = options.sourceRunId;
+    if (options.inputOverride !== undefined) {
+      body.input_override = options.inputOverride;
+    }
+    return this.request<DispatchResult>(
+      "POST",
+      `/api/v1/workflows/${encodeURIComponent(id)}/rerun`,
+      { body, idempotencyKey: options.idempotencyKey },
+    );
   }
 
   /** `DELETE /api/v1/workflows/{id}` — deregister a workflow (scope: write). */
