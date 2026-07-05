@@ -1,3 +1,27 @@
+.rd-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 40px;
+  color: var(--error);
+}
+
+.rd-live-indicator {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.rd-analysis-error {
+  width: 100%;
+  margin-top: 8px;
+  color: var(--error);
+  font-size: 13px;
+}
+
 .rd-loading {
   padding: 40px;
   text-align: center;

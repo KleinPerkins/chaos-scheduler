@@ -1,0 +1,37 @@
+.notice-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.notice-banner--info {
+  background: rgba(124, 108, 255, 0.08);
+  border-color: rgba(124, 108, 255, 0.25);
+  color: var(--text-primary);
+}
+
+.notice-banner--success {
+  background: rgba(61, 220, 151, 0.08);
+  border-color: rgba(61, 220, 151, 0.25);
+  color: var(--text-primary);
+}
+
+.notice-banner--error {
+  background: rgba(255, 107, 107, 0.08);
+  border-color: rgba(255, 107, 107, 0.25);
+  color: var(--error);
+}
+
+.notice-banner__message {
+  flex: 1;
+}
+
+.notice-banner__dismiss {
+  flex-shrink: 0;
+}

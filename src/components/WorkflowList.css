@@ -179,7 +179,9 @@
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  transition: color 0.15s, background 0.15s;
+  transition:
+    color 0.15s,
+    background 0.15s;
   border-radius: 4px;
   padding: 2px 4px;
   margin: -2px -4px;
@@ -290,7 +292,9 @@
   background: var(--text-secondary);
   top: 2px;
   left: 2px;
-  transition: transform 0.2s, background 0.2s;
+  transition:
+    transform 0.2s,
+    background 0.2s;
 }
 
 .wf-toggle input:checked + .wf-toggle-track {
@@ -300,4 +304,45 @@
 .wf-toggle input:checked + .wf-toggle-track::after {
   transform: translateX(16px);
   background: white;
+}
+
+.wf-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 40px;
+  color: var(--error);
+}
+
+.wf-card-desc-button {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wf-card-desc-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius);
+}
+
+.wf-card-desc-expanded {
+  -webkit-line-clamp: unset !important;
+  display: block !important;
+}
+
+.wf-card-desc-full {
+  display: block;
+}
+
+.wf-card-desc-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--accent);
 }
