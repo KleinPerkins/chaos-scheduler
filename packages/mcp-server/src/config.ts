@@ -11,7 +11,7 @@ export type McpTransport = "stdio" | "http";
 export interface ChaosMcpConfig {
   /** Base URL of the scheduler REST API. */
   baseUrl: string;
-  /** Default scoped API key (used for stdio and as the HTTP fallback). */
+  /** Default scoped API key (used for stdio; HTTP requires per-request bearer). */
   apiKey?: string;
   /** Selected transport. */
   transport: McpTransport;
@@ -19,6 +19,10 @@ export interface ChaosMcpConfig {
   httpHost: string;
   /** HTTP bind port (http transport only). */
   httpPort: number;
+  /** Permit HTTP transport to bind non-loopback hosts. */
+  allowRemoteHttp: boolean;
+  /** Maximum HTTP MCP request body size in bytes. */
+  httpMaxBodyBytes: number;
   /**
    * Environments treated as protected: write tools targeting them are blocked
    * unless {@link allowProtectedWrites} is set. A guardrail for prod safety.
@@ -55,6 +59,7 @@ const DEFAULTS = {
   baseUrl: "http://127.0.0.1:9618",
   httpHost: "127.0.0.1",
   httpPort: 9700,
+  httpMaxBodyBytes: 1024 * 1024,
   protectedEnvironments: ["prod", "production"],
   requestTimeoutMs: 30_000,
 };
@@ -72,6 +77,11 @@ export function configFromEnv(
       "stdio",
     httpHost: env.CHAOS_SCHEDULER_MCP_HTTP_HOST?.trim() || DEFAULTS.httpHost,
     httpPort: envInt(env.CHAOS_SCHEDULER_MCP_HTTP_PORT, DEFAULTS.httpPort),
+    allowRemoteHttp: envBool(env.CHAOS_SCHEDULER_MCP_ALLOW_REMOTE_HTTP),
+    httpMaxBodyBytes: envInt(
+      env.CHAOS_SCHEDULER_MCP_HTTP_MAX_BODY_BYTES,
+      DEFAULTS.httpMaxBodyBytes,
+    ),
     protectedEnvironments:
       protectedRaw === undefined
         ? DEFAULTS.protectedEnvironments
@@ -107,6 +117,12 @@ export function applyCliOverrides(
         break;
       case "--port":
         cfg.httpPort = envInt(argv[++i], cfg.httpPort);
+        break;
+      case "--allow-remote-http":
+        cfg.allowRemoteHttp = true;
+        break;
+      case "--http-max-body-bytes":
+        cfg.httpMaxBodyBytes = envInt(argv[++i], cfg.httpMaxBodyBytes);
         break;
       case "--url":
         cfg.baseUrl = argv[++i] ?? cfg.baseUrl;
