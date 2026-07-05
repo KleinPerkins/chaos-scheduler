@@ -118,6 +118,17 @@ pub struct Run {
     pub rerun_of_run_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RunExecutionRecord {
+    pub id: String,
+    pub workflow_id: String,
+    pub workflow_name: Option<String>,
+    pub status: String,
+    pub process_pid: Option<i64>,
+    pub process_pgid: Option<i64>,
+    pub process_started_at: Option<String>,
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum RunAdmission {
     Admitted(Run),
@@ -622,7 +633,7 @@ pub enum IdempotencyReservation {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 7;
+pub const CURRENT_SCHEMA_VERSION: i64 = 8;
 
 pub struct Database {
     path: String,
@@ -698,7 +709,14 @@ impl Database {
                 upstream_run_id TEXT,
                 input_json TEXT,
                 rerun_of_run_id TEXT,
-                status TEXT DEFAULT 'running'
+                status TEXT DEFAULT 'running',
+                execution_worker_id TEXT,
+                process_pid INTEGER,
+                process_pgid INTEGER,
+                process_started_at TEXT,
+                stdout_truncated INTEGER NOT NULL DEFAULT 0,
+                stderr_truncated INTEGER NOT NULL DEFAULT 0,
+                task_events_truncated INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS workflow_trigger_state (
                 workflow_id TEXT NOT NULL,
@@ -1053,7 +1071,27 @@ impl Database {
             (5, Self::migrate_v5_queue_environment),
             (6, Self::migrate_v6_run_retention_fk_actions),
             (7, Self::migrate_v7_idempotency_contract),
+            (8, Self::migrate_v8_execution_metadata),
         ]
+    }
+
+    /// v8: persist worker/process ownership metadata for timeout, shutdown, and
+    /// restart recovery without guessing from shared logs.
+    fn migrate_v8_execution_metadata(conn: &Connection) -> rusqlite::Result<()> {
+        let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN execution_worker_id TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN process_pid INTEGER;");
+        let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN process_pgid INTEGER;");
+        let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN process_started_at TEXT;");
+        let _ = conn.execute_batch(
+            "ALTER TABLE runs ADD COLUMN stdout_truncated INTEGER NOT NULL DEFAULT 0;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE runs ADD COLUMN stderr_truncated INTEGER NOT NULL DEFAULT 0;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE runs ADD COLUMN task_events_truncated INTEGER NOT NULL DEFAULT 0;",
+        );
+        Ok(())
     }
 
     /// v6: make retention-safe `runs` foreign-key behavior explicit for queue
@@ -1943,7 +1981,7 @@ impl Database {
             let mut stmt = tx.prepare(
                 "SELECT COALESCE(NULLIF(w.environment, ''), w.corpus, 'source') AS env, w.queue_config
                  FROM runs r JOIN workflows w ON w.id = r.workflow_id
-                 WHERE r.status = 'running'",
+                 WHERE r.status IN ('admitted', 'running')",
             )?;
             let rows = stmt.query_map([], |row| {
                 let env: String = row.get(0)?;
@@ -2031,7 +2069,7 @@ impl Database {
 
         tx.execute(
             "INSERT INTO runs (id, workflow_id, started_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id)
-             VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8)",
+             VALUES (?1, ?2, ?3, 'admitted', ?4, ?5, ?6, ?7, ?8)",
             params![
                 id,
                 workflow_id,
@@ -2082,6 +2120,30 @@ impl Database {
         self.get_run(&id).map(RunAdmission::Admitted)
     }
 
+    pub fn mark_run_started(&self, id: &str, worker_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE runs SET status = 'running', execution_worker_id = ?2 WHERE id = ?1 AND status IN ('admitted', 'running')",
+            params![id, worker_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_run_process(
+        &self,
+        id: &str,
+        pid: i64,
+        pgid: i64,
+        process_started_at: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE runs SET process_pid = ?2, process_pgid = ?3, process_started_at = ?4 WHERE id = ?1",
+            params![id, pid, pgid, process_started_at],
+        )?;
+        Ok(())
+    }
+
     pub fn finish_run(
         &self,
         id: &str,
@@ -2090,8 +2152,20 @@ impl Database {
         stderr: &str,
         result_url: Option<&str>,
     ) -> rusqlite::Result<()> {
-        let now = chrono::Utc::now().to_rfc3339();
         let status = if exit_code == 0 { "success" } else { "failed" };
+        self.finish_run_with_status_details(id, Some(exit_code), status, stdout, stderr, result_url)
+    }
+
+    pub fn finish_run_with_status_details(
+        &self,
+        id: &str,
+        exit_code: Option<i32>,
+        status: &str,
+        stdout: &str,
+        stderr: &str,
+        result_url: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         tx.execute(
@@ -2118,23 +2192,7 @@ impl Database {
         stdout: &str,
         stderr: &str,
     ) -> rusqlite::Result<()> {
-        let now = chrono::Utc::now().to_rfc3339();
-        let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
-        tx.execute(
-            "UPDATE runs SET finished_at = ?2, stdout = ?3, stderr = ?4, status = ?5 WHERE id = ?1",
-            params![id, now, stdout, stderr, status],
-        )?;
-        tx.execute(
-            "UPDATE queued_runs SET status = ?2, finished_at = ?3 WHERE run_id = ?1",
-            params![id, status, now],
-        )?;
-        tx.execute(
-            "DELETE FROM workflow_mutex_locks WHERE run_id = ?1",
-            params![id],
-        )?;
-        tx.commit()?;
-        Ok(())
+        self.finish_run_with_status_details(id, None, status, stdout, stderr, None)
     }
 }
 
@@ -3034,7 +3092,7 @@ impl Database {
         conn.query_row(
             "SELECT
                 COUNT(DISTINCT CASE WHEN w.enabled = 1 THEN w.id END) AS active_workflows,
-                SUM(CASE WHEN r.status = 'running' THEN 1 ELSE 0 END) AS running_count,
+                SUM(CASE WHEN r.status IN ('admitted', 'running') THEN 1 ELSE 0 END) AS running_count,
                 (SELECT COUNT(*)
                    FROM queued_runs q JOIN workflows qw ON qw.id = q.workflow_id
                   WHERE q.status IN ('queued', 'admitted')
@@ -3754,7 +3812,7 @@ impl Database {
     pub fn get_running_count(&self) -> rusqlite::Result<usize> {
         let conn = self.conn()?;
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM runs WHERE status = 'running'",
+            "SELECT COUNT(*) FROM runs WHERE status IN ('admitted', 'running')",
             [],
             |row| row.get(0),
         )?;
@@ -4426,9 +4484,31 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis, r.trigger_kind, r.trigger_payload, r.upstream_run_id, r.input_json, r.rerun_of_run_id
-             FROM runs r LEFT JOIN workflows w ON r.workflow_id = w.id WHERE r.status = 'running' ORDER BY r.started_at DESC"
+             FROM runs r LEFT JOIN workflows w ON r.workflow_id = w.id WHERE r.status IN ('admitted', 'running') ORDER BY r.started_at DESC"
         )?;
         let rows = stmt.query_map([], |row| Ok(run_from_row(row)))?;
+        rows.collect()
+    }
+
+    pub fn get_active_execution_runs(&self) -> rusqlite::Result<Vec<RunExecutionRecord>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.workflow_id, w.name, r.status, r.process_pid, r.process_pgid, r.process_started_at
+             FROM runs r LEFT JOIN workflows w ON r.workflow_id = w.id
+             WHERE r.status IN ('admitted', 'running')
+             ORDER BY r.started_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(RunExecutionRecord {
+                id: row.get(0)?,
+                workflow_id: row.get(1)?,
+                workflow_name: row.get(2)?,
+                status: row.get(3)?,
+                process_pid: row.get(4)?,
+                process_pgid: row.get(5)?,
+                process_started_at: row.get(6)?,
+            })
+        })?;
         rows.collect()
     }
 

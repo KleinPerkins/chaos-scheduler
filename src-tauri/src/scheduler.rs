@@ -7,16 +7,16 @@ use serde_json::Value;
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::Read;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::io::FromRawFd;
 #[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static SLA_NOTIFICATION_CACHE: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
@@ -25,6 +25,13 @@ pub const SCHEDULER_BUNDLE_ID: &str = crate::branding::BUNDLE_ID;
 pub const CANONICAL_EXECUTABLE_PATH: &str = crate::branding::CANONICAL_EXECUTABLE_PATH;
 
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_WORKER_COUNT: usize = 2;
+const WORKER_QUEUE_MULTIPLIER: usize = 2;
+const DEFAULT_RUN_TIMEOUT_SECONDS: u64 = 15 * 60;
+const PROCESS_SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+const OUTPUT_CAPTURE_LIMIT_BYTES: usize = 1024 * 1024;
+const TASK_EVENT_CAPTURE_LIMIT_BYTES: usize = 256 * 1024;
+const BACKGROUND_MONITOR_MAX_POLLS: usize = 8_640; // 24h at 10s/poll.
 
 #[derive(Clone)]
 struct ResourceSampleMetadata {
@@ -579,6 +586,7 @@ fn trigger_state_for_admission(
     Some((trigger_id.to_string(), fingerprint.to_string()))
 }
 
+#[derive(Clone)]
 pub struct DueWorkflow {
     pub id: String,
     pub trigger_kind: Option<String>,
@@ -589,6 +597,17 @@ pub struct DueWorkflow {
     pub upstream_run_id: Option<String>,
     pub input_json: Option<String>,
     pub rerun_of_run_id: Option<String>,
+}
+
+fn due_workflow_pending_key(workflow: &DueWorkflow) -> String {
+    format!(
+        "{}|{}|{}|{}|{}",
+        workflow.id,
+        workflow.queued_run_id.as_deref().unwrap_or(""),
+        workflow.trigger_kind.as_deref().unwrap_or(""),
+        workflow.trigger_payload.as_deref().unwrap_or(""),
+        workflow.upstream_run_id.as_deref().unwrap_or("")
+    )
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1471,6 +1490,12 @@ pub fn execute_workflow_with_context(
             ));
         }
     };
+    let worker_id = std::thread::current()
+        .name()
+        .unwrap_or("scheduler-direct")
+        .to_string();
+    db.mark_run_started(&run.id, &worker_id)
+        .map_err(|e| format!("Failed to mark run started: {}", e))?;
 
     // Structured workflows (generic step-flow / typed operator) are executed
     // in-scheduler with the scheduler as the sole author of run_tasks /
@@ -1543,13 +1568,18 @@ pub fn execute_workflow_with_context(
             input_json,
         ),
         Some(sample_metadata.clone()),
+        run_timeout(),
     );
 
     match output {
-        Ok((output, task_events_raw)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Ok(output) => {
+            let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            append_capture_notice(&mut stdout, "stdout", output.stdout_truncated);
+            append_capture_notice(&mut stderr, "stderr", output.stderr_truncated);
+            append_capture_notice(&mut stderr, "task events", output.task_events_truncated);
             let exit_code = output.status.code().unwrap_or(-1);
+            let task_events_raw = output.task_events_raw;
             let stdout = stdout_with_task_events(stdout, &task_events_raw);
             persist_task_events(db, &run.id, &workflow.id, &task_events_raw);
             let child_summary = dispatch_child_workflow_requests(
@@ -1614,12 +1644,25 @@ pub fn execute_workflow_with_context(
                 });
             }
 
-            let final_exit_code = if exit_code == 0 && child_summary.failure_count > 0 {
+            let final_exit_code = if output.timed_out || output.cancelled {
+                -1
+            } else if exit_code == 0 && child_summary.failure_count > 0 {
                 1
             } else {
                 exit_code
             };
-            let stderr = if child_summary.failure_count > 0 {
+            let stderr = if output.timed_out || output.cancelled {
+                let mut combined = stderr;
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(if output.timed_out {
+                    "Workflow timed out and its process group was terminated"
+                } else {
+                    "Workflow was cancelled during scheduler shutdown"
+                });
+                combined
+            } else if child_summary.failure_count > 0 {
                 let mut combined = stderr;
                 if !combined.is_empty() {
                     combined.push('\n');
@@ -1634,9 +1677,19 @@ pub fn execute_workflow_with_context(
                 stderr
             };
 
-            db.finish_run(
+            let final_status = if output.timed_out {
+                "timed_out"
+            } else if output.cancelled {
+                "cancelled"
+            } else if final_exit_code == 0 {
+                "success"
+            } else {
+                "failed"
+            };
+            db.finish_run_with_status_details(
                 &run.id,
-                final_exit_code,
+                Some(final_exit_code),
+                final_status,
                 &stdout,
                 &stderr,
                 result_url.as_deref(),
@@ -1912,18 +1965,22 @@ fn build_workflow_command(
     scheduler_db_path: &str,
     input_json: Option<&str>,
 ) -> Command {
+    let script_path = script_path.trim();
     let is_shell_cmd = script_path.contains('=') || script_path.contains("/bin/python");
 
-    let mut cmd = if is_shell_cmd {
+    let mut cmd = if script_path.is_empty() {
+        Command::new("false")
+    } else if is_shell_cmd {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(script_path);
         cmd
     } else {
         let parts: Vec<&str> = script_path.split_whitespace().collect();
-        let resolved = if parts[0].starts_with('/') {
-            parts[0].to_string()
+        let script = parts.first().copied().unwrap_or_default();
+        let resolved = if script.starts_with('/') {
+            script.to_string()
         } else {
-            format!("{}/{}", chaos_labs_root, parts[0])
+            format!("{}/{}", chaos_labs_root, script)
         };
         let mut cmd = Command::new(python_path);
         cmd.arg(&resolved);
@@ -1986,11 +2043,112 @@ fn apply_workflow_env(
     }
 }
 
+#[derive(Debug)]
+struct WorkflowCommandOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    task_events_raw: String,
+    timed_out: bool,
+    cancelled: bool,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    task_events_truncated: bool,
+}
+
+fn run_timeout() -> Duration {
+    let secs = std::env::var("CHAOS_SCHEDULER_RUN_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DEFAULT_RUN_TIMEOUT_SECONDS);
+    Duration::from_secs(secs)
+}
+
+fn append_capture_notice(output: &mut String, stream: &str, truncated: bool) {
+    if !truncated {
+        return;
+    }
+    if !output.ends_with('\n') && !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(&format!(
+        "[chaos-scheduler] {stream} truncated at capture limit\n"
+    ));
+}
+
+fn read_capped<R: Read>(mut reader: R, limit: usize) -> (Vec<u8>, bool) {
+    let mut captured = Vec::with_capacity(limit.min(8192));
+    let mut truncated = false;
+    let mut buf = [0_u8; 8192];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let remaining = limit.saturating_sub(captured.len());
+                if remaining > 0 {
+                    let keep = remaining.min(n);
+                    captured.extend_from_slice(&buf[..keep]);
+                    truncated |= keep < n;
+                } else {
+                    truncated = true;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    (captured, truncated)
+}
+
+#[cfg(unix)]
+fn process_start_time_fingerprint(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: i64) -> bool {
+    pid > 0 && unsafe { libc::kill(pid as i32, 0) } == 0
+}
+
+#[cfg(unix)]
+fn process_group_is_alive(pgid: i64) -> bool {
+    pgid > 0 && unsafe { libc::kill(-(pgid as i32), 0) } == 0
+}
+
+#[cfg(unix)]
+fn terminate_process_group(pgid: i64, grace: Duration) {
+    if pgid <= 0 {
+        return;
+    }
+    unsafe {
+        libc::kill(-(pgid as i32), libc::SIGTERM);
+    }
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        if !process_group_is_alive(pgid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    unsafe {
+        libc::kill(-(pgid as i32), libc::SIGKILL);
+    }
+}
+
 #[cfg(unix)]
 fn run_workflow_command(
     mut cmd: Command,
     sample_metadata: Option<ResourceSampleMetadata>,
-) -> std::io::Result<(Output, String)> {
+    timeout: Duration,
+) -> std::io::Result<WorkflowCommandOutput> {
     let mut fds = [0; 2];
     let pipe_result = unsafe { libc::pipe(fds.as_mut_ptr()) };
     if pipe_result == -1 {
@@ -2005,6 +2163,9 @@ fn run_workflow_command(
         .env("CHAOS_LABS_TASK_CHANNEL_FD", "3");
     unsafe {
         cmd.pre_exec(move || {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
             if libc::dup2(write_fd, 3) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -2022,7 +2183,7 @@ fn run_workflow_command(
     unsafe {
         libc::close(write_fd);
     }
-    let child = match child {
+    let mut child = match child {
         Ok(child) => child,
         Err(e) => {
             unsafe {
@@ -2032,26 +2193,93 @@ fn run_workflow_command(
         }
     };
 
-    let sampler = sample_metadata.map(|metadata| spawn_resource_sampler(metadata, child.id()));
+    let pid = child.id();
+    let pgid = pid as i64;
+    if let Some(metadata) = sample_metadata.as_ref() {
+        let started_at = process_start_time_fingerprint(pid);
+        let _ = metadata.db.record_run_process(
+            &metadata.run_id,
+            pid as i64,
+            pgid,
+            started_at.as_deref(),
+        );
+    }
+
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let stdout_reader = std::thread::spawn(move || read_capped(stdout, OUTPUT_CAPTURE_LIMIT_BYTES));
+    let stderr_reader = std::thread::spawn(move || read_capped(stderr, OUTPUT_CAPTURE_LIMIT_BYTES));
     let task_reader = std::thread::spawn(move || {
-        let mut file = unsafe { std::fs::File::from_raw_fd(read_fd) };
-        let mut task_events = String::new();
-        let _ = file.read_to_string(&mut task_events);
-        task_events
+        let file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+        read_capped(file, TASK_EVENT_CAPTURE_LIMIT_BYTES)
     });
-    let output_result = child.wait_with_output();
+
+    let sampler = sample_metadata.map(|metadata| spawn_resource_sampler(metadata, pid));
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let mut cancelled = false;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            cancelled = true;
+            terminate_process_group(pgid, PROCESS_SHUTDOWN_GRACE);
+            break child
+                .wait()
+                .unwrap_or_else(|_| ExitStatus::from_raw(libc::SIGKILL));
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            terminate_process_group(pgid, PROCESS_SHUTDOWN_GRACE);
+            break child
+                .wait()
+                .unwrap_or_else(|_| ExitStatus::from_raw(libc::SIGKILL));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
     stop_resource_sampler(sampler);
-    let output = output_result?;
-    let task_events = task_reader.join().unwrap_or_default();
-    Ok((output, task_events))
+    let (stdout, stdout_truncated) = stdout_reader.join().unwrap_or_default();
+    let (stderr, stderr_truncated) = stderr_reader.join().unwrap_or_default();
+    let (task_events, task_events_truncated) = task_reader.join().unwrap_or_default();
+    let task_events_raw = String::from_utf8_lossy(&task_events).to_string();
+
+    Ok(WorkflowCommandOutput {
+        status,
+        stdout,
+        stderr,
+        task_events_raw,
+        timed_out,
+        cancelled,
+        stdout_truncated,
+        stderr_truncated,
+        task_events_truncated,
+    })
 }
 
 #[cfg(not(unix))]
 fn run_workflow_command(
     mut cmd: Command,
     _sample_metadata: Option<ResourceSampleMetadata>,
-) -> std::io::Result<(Output, String)> {
-    cmd.output().map(|output| (output, String::new()))
+    _timeout: Duration,
+) -> std::io::Result<WorkflowCommandOutput> {
+    let output = cmd.output()?;
+    let (stdout, stdout_truncated) =
+        read_capped(output.stdout.as_slice(), OUTPUT_CAPTURE_LIMIT_BYTES);
+    let (stderr, stderr_truncated) =
+        read_capped(output.stderr.as_slice(), OUTPUT_CAPTURE_LIMIT_BYTES);
+    Ok(WorkflowCommandOutput {
+        status: output.status,
+        stdout,
+        stderr,
+        task_events_raw: String::new(),
+        timed_out: false,
+        cancelled: false,
+        stdout_truncated,
+        stderr_truncated,
+        task_events_truncated: false,
+    })
 }
 
 fn spawn_resource_sampler(
@@ -2546,8 +2774,21 @@ fn monitor_background_pid(
     );
     let sampler = spawn_resource_sampler(sample_metadata, pid);
 
-    loop {
+    for _ in 0..BACKGROUND_MONITOR_MAX_POLLS {
         std::thread::sleep(Duration::from_secs(10));
+
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            let _ = db.finish_run_with_status_details(
+                run_id,
+                None,
+                "cancelled",
+                "",
+                "Background monitor cancelled during scheduler shutdown",
+                None,
+            );
+            stop_resource_sampler(Some(sampler));
+            return;
+        }
 
         let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
         if !alive {
@@ -2716,12 +2957,15 @@ fn infer_exit_code_from_current_output(stdout: &str) -> i32 {
     }
 }
 
-/// On startup, finalize any runs stuck in "running" from a previous session.
-/// PID re-attachment is unreliable across restarts (the PID file is
-/// workflow-agnostic), so orphaned runs are always finalized. The scheduler
-/// will re-trigger any missed workflows on the next tick via the backward scan.
-fn recover_orphaned_runs(db: &Database, chaos_labs_root: &str) {
-    let running = match db.get_running_runs() {
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
+/// On startup, close admitted/running records left by a previous process without
+/// inferring success from shared logs. If a persisted PID/start-time proves that
+/// a child survived the app, terminate its process group and mark the run stale.
+fn recover_orphaned_runs(db: &Database, _chaos_labs_root: &str) {
+    let active = match db.get_active_execution_runs() {
         Ok(r) => r,
         Err(e) => {
             log::warn!("Failed to check for orphaned runs: {}", e);
@@ -2729,85 +2973,152 @@ fn recover_orphaned_runs(db: &Database, chaos_labs_root: &str) {
         }
     };
 
-    if running.is_empty() {
+    if active.is_empty() {
         return;
     }
 
     log::info!(
-        "Found {} orphaned running run(s), recovering...",
-        running.len()
+        "Found {} active run(s) from a previous scheduler session",
+        active.len()
     );
 
-    let known_logs = [
-        format!("{}/data/context-capture/capture_bg.log", chaos_labs_root),
-        format!("{}/data/context-refresh/refresh.log", chaos_labs_root),
-    ];
-
-    for run in &running {
+    for run in &active {
         let wf_name = run.workflow_name.as_deref().unwrap_or("unknown");
-
-        let mut best_stdout = String::new();
-        let mut best_log_path = String::new();
-        for path in &known_logs {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                if !content.is_empty() && content.len() > best_stdout.len() {
-                    best_stdout = content;
-                    best_log_path = path.clone();
+        let (status, stderr) = if run.status == "admitted" {
+            (
+                "stale",
+                "Scheduler restarted before a worker claimed this admitted run".to_string(),
+            )
+        } else if let Some(pid) = run.process_pid {
+            let live = process_is_alive(pid);
+            let start_matches = run
+                .process_started_at
+                .as_deref()
+                .and_then(|expected| {
+                    process_start_time_fingerprint(pid as u32).map(|actual| actual == expected)
+                })
+                .unwrap_or(false);
+            if live && start_matches {
+                if let Some(pgid) = run.process_pgid {
+                    terminate_process_group(pgid, PROCESS_SHUTDOWN_GRACE);
                 }
+                (
+                    "stale",
+                    format!(
+                        "Scheduler restarted; verified orphan PID {pid} for workflow {} and terminated its process group",
+                        run.workflow_id
+                    ),
+                )
+            } else {
+                (
+                    "stale",
+                    format!(
+                        "Scheduler restarted; active run had {} process metadata for PID {pid}",
+                        if live { "mismatched" } else { "dead" }
+                    ),
+                )
             }
-        }
-
-        let status_dirs = [
-            format!("{}/data/context-capture", chaos_labs_root),
-            format!("{}/data/context-refresh", chaos_labs_root),
-        ];
-        let run_status = status_dirs
-            .iter()
-            .find_map(|dir| read_run_scoped_exit_status_from_dir(dir, &run.id));
-
-        let result_url = run_status
-            .as_ref()
-            .and_then(|status| {
-                status
-                    .result_url
-                    .clone()
-                    .or_else(|| status.report_path.as_ref().map(|p| format!("file://{}", p)))
-            })
-            .or_else(|| extract_result_url(&best_stdout))
-            .or_else(|| {
-                if best_log_path.is_empty() {
-                    None
-                } else {
-                    Some(format!("file://{}", best_log_path))
-                }
-            });
-
-        let exit_code = run_status
-            .as_ref()
-            .and_then(|status| status.exit_code)
-            .unwrap_or_else(|| {
-                if best_stdout.is_empty() {
-                    -1
-                } else if best_stdout.contains("Traceback") || best_stdout.contains("] ERROR:") {
-                    1
-                } else {
-                    0
-                }
-            });
-
-        let status_label = match exit_code {
-            0 => "success",
-            -1 => "unknown (no output)",
-            _ => "failed",
+        } else {
+            (
+                "stale",
+                "Scheduler restarted with no process metadata to reattach safely".to_string(),
+            )
         };
-        let _ = db.finish_run(&run.id, exit_code, &best_stdout, "", result_url.as_deref());
+        let _ = db.finish_run_with_status_details(&run.id, None, status, "", &stderr, None);
         log::info!(
-            "Recovered orphaned run {} ({}) — finalized as {}",
-            &run.id[..8],
+            "Recovered active run {} ({}) as {}",
+            short_id(&run.id),
             wf_name,
-            status_label
+            status
         );
     }
+}
+
+struct PendingWorkflowGuard {
+    pending: Arc<Mutex<HashSet<String>>>,
+    key: String,
+}
+
+impl PendingWorkflowGuard {
+    fn new(pending: Arc<Mutex<HashSet<String>>>, key: String) -> Self {
+        Self { pending, key }
+    }
+}
+
+impl Drop for PendingWorkflowGuard {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.key);
+        }
+    }
+}
+
+type SchedulerJob = Box<dyn FnOnce() + Send + 'static>;
+
+enum WorkerMessage {
+    Job(SchedulerJob),
+    Shutdown,
+}
+
+struct SchedulerWorkerPool {
+    tx: mpsc::SyncSender<WorkerMessage>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl SchedulerWorkerPool {
+    fn new(worker_count: usize, queue_capacity: usize) -> Self {
+        let (tx, rx) = mpsc::sync_channel(queue_capacity.max(worker_count));
+        let rx = Arc::new(Mutex::new(rx));
+        let mut handles = Vec::with_capacity(worker_count);
+        for idx in 0..worker_count {
+            let rx = Arc::clone(&rx);
+            let handle = std::thread::Builder::new()
+                .name(format!("scheduler-worker-{idx}"))
+                .spawn(move || loop {
+                    let message = match rx.lock() {
+                        Ok(guard) => guard.recv(),
+                        Err(_) => return,
+                    };
+                    match message {
+                        Ok(WorkerMessage::Job(job)) => {
+                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err()
+                            {
+                                log::error!("scheduler worker {idx} isolated a panicking job");
+                            }
+                        }
+                        Ok(WorkerMessage::Shutdown) | Err(_) => break,
+                    }
+                })
+                .expect("failed to spawn scheduler worker");
+            handles.push(handle);
+        }
+        Self { tx, handles }
+    }
+
+    fn submit(&self, job: SchedulerJob) -> bool {
+        match self.tx.try_send(WorkerMessage::Job(job)) {
+            Ok(()) => true,
+            Err(mpsc::TrySendError::Full(_)) => false,
+            Err(mpsc::TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    fn shutdown(self) {
+        for _ in &self.handles {
+            let _ = self.tx.send(WorkerMessage::Shutdown);
+        }
+        for handle in self.handles {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn scheduler_worker_count() -> usize {
+    std::env::var("CHAOS_SCHEDULER_WORKER_COUNT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or(DEFAULT_WORKER_COUNT)
 }
 
 pub fn start_scheduler_loop(
@@ -2819,13 +3130,19 @@ pub fn start_scheduler_loop(
 ) {
     std::thread::spawn(move || {
         recover_orphaned_runs(&db, &chaos_labs_root);
+        let worker_count = scheduler_worker_count();
+        let worker_pool = SchedulerWorkerPool::new(
+            worker_count,
+            worker_count.saturating_mul(WORKER_QUEUE_MULTIPLIER).max(1),
+        );
+        let pending_workflows = Arc::new(Mutex::new(HashSet::<String>::new()));
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
             .expect("Failed to create scheduler runtime");
 
-        rt.block_on(async move {
+        rt.block_on(async {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
                 interval.tick().await;
@@ -2835,72 +3152,99 @@ pub fn start_scheduler_loop(
                     break;
                 }
 
-                // Phase 1 (locked): evaluate cron, find due workflows, read prefs
                 let (due, notify_success, notify_failure, email_enabled) = {
-                    let sched = scheduler.lock().unwrap();
+                    let sched = match scheduler.lock() {
+                        Ok(sched) => sched,
+                        Err(poisoned) => {
+                            log::error!("Scheduler mutex was poisoned; continuing with recovered state");
+                            poisoned.into_inner()
+                        }
+                    };
                     let due = sched.find_due_workflows(&chaos_labs_root);
                     let ns = sched.notify_on_success.load(Ordering::Relaxed);
                     let nf = sched.notify_on_failure.load(Ordering::Relaxed);
                     let ef = sched.should_email_on_failure();
                     (due, ns, nf, ef)
                 };
-                // Lock released — all subsequent work is lock-free
 
-                // Phase 2 (unlocked): execute workflows
-                let mut results = vec![];
-                for wf in &due {
-                    match execute_workflow_with_context(
-                        &db,
-                        &chaos_labs_root,
-                        &python_path,
-                        &wf.id,
-                        notify_success,
-                        notify_failure,
-                        email_enabled,
-                        wf.trigger_kind.as_deref(),
-                        wf.trigger_payload.as_deref(),
-                        wf.upstream_run_id.as_deref(),
-                        wf.input_json.as_deref(),
-                        wf.rerun_of_run_id.as_deref(),
-                        wf.queued_run_id.as_deref(),
-                        Some(app_handle.clone()),
-                    ) {
-                        Ok(result) => {
-                            if result.completed {
-                                trigger_on_completion(
-                                    &db,
-                                    &chaos_labs_root,
-                                    &python_path,
-                                    &wf.id,
-                                    &result.run_id,
-                                    result.success,
-                                    notify_success,
-                                    notify_failure,
-                                    email_enabled,
-                                );
-                            }
-                            results.push(result)
-                        }
-                        Err(e) => log::error!("Workflow {} failed: {}", wf.id, e),
+                for wf in due {
+                    let pending_key = due_workflow_pending_key(&wf);
+                    let should_submit = match pending_workflows.lock() {
+                        Ok(mut pending) => pending.insert(pending_key.clone()),
+                        Err(_) => false,
+                    };
+                    if !should_submit {
+                        continue;
                     }
-                }
 
-                for result in &results {
-                    // Spec workflows route completion through the action
-                    // dispatcher (on_success/on_failure incl. email/webhook/
-                    // desktop/chain); legacy workflows keep the ad-hoc path.
-                    if !dispatch_completion_actions(&db, Some(&app_handle), result) {
-                        if result.should_notify {
-                            send_notification(&app_handle, result);
+                    let db = Arc::clone(&db);
+                    let root = chaos_labs_root.clone();
+                    let python = python_path.clone();
+                    let app = app_handle.clone();
+                    let pending = Arc::clone(&pending_workflows);
+                    let pending_key_for_guard = pending_key.clone();
+                    let pending_key_for_submit = pending_key.clone();
+                    let workflow_id = wf.id.clone();
+                    let workflow_id_for_log = workflow_id.clone();
+                    let job = Box::new(move || {
+                        let _pending_guard = PendingWorkflowGuard::new(pending, pending_key_for_guard);
+                        match execute_workflow_with_context(
+                            &db,
+                            &root,
+                            &python,
+                            &workflow_id,
+                            notify_success,
+                            notify_failure,
+                            email_enabled,
+                            wf.trigger_kind.as_deref(),
+                            wf.trigger_payload.as_deref(),
+                            wf.upstream_run_id.as_deref(),
+                            wf.input_json.as_deref(),
+                            wf.rerun_of_run_id.as_deref(),
+                            wf.queued_run_id.as_deref(),
+                            Some(app.clone()),
+                        ) {
+                            Ok(result) => {
+                                if result.completed {
+                                    trigger_on_completion(
+                                        &db,
+                                        &root,
+                                        &python,
+                                        &workflow_id,
+                                        &result.run_id,
+                                        result.success,
+                                        notify_success,
+                                        notify_failure,
+                                        email_enabled,
+                                    );
+                                }
+                                if !dispatch_completion_actions(&db, Some(&app), &result) {
+                                    if result.should_notify {
+                                        send_notification(&app, &result);
+                                    }
+                                    if email_enabled && !result.success && result.email_on_failure {
+                                        send_failure_email(&db, &root, &result);
+                                    }
+                                }
+                            }
+                            Err(e) => log::error!("Workflow {} failed: {}", workflow_id, e),
                         }
-                        if email_enabled && !result.success && result.email_on_failure {
-                            send_failure_email(&db, &chaos_labs_root, result);
+                    });
+                    if !worker_pool.submit(job) {
+                        if let Ok(mut pending) = pending_workflows.lock() {
+                            pending.remove(&pending_key_for_submit);
                         }
+                        log::warn!(
+                            "Scheduler worker queue is full; workflow {} will be retried on a later tick",
+                            workflow_id_for_log
+                        );
                     }
                 }
                 send_sla_notifications(&app_handle, &db);
             }
         });
+
+        worker_pool.shutdown();
     });
 }
 
@@ -3268,6 +3612,120 @@ mod tests {
         db.set_workflow_spec(&wf.id, "generic", Some(spec_json))
             .unwrap();
         wf.id
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn worker_pool_isolates_panicking_jobs() {
+        let pool = SchedulerWorkerPool::new(1, 2);
+        let (tx, rx) = mpsc::channel();
+        assert!(pool.submit(Box::new(|| panic!("intentional worker panic"))));
+        assert!(pool.submit(Box::new(move || tx.send(()).unwrap())));
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("worker should keep accepting jobs after a panic");
+        pool.shutdown();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_command_timeout_kills_process_group() {
+        SHUTDOWN.store(false, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("chaos-timeout-kill-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let child_pid_path = dir.join("child.pid");
+        let script = format!(
+            "(sleep 30) & echo $! > {}; wait",
+            child_pid_path.to_string_lossy()
+        );
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(script);
+
+        let output = run_workflow_command(cmd, None, Duration::from_millis(200)).unwrap();
+        assert!(output.timed_out, "command should report a timeout");
+        std::thread::sleep(Duration::from_millis(250));
+        let child_pid: i64 = std::fs::read_to_string(&child_pid_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            !process_is_alive(child_pid),
+            "timeout should kill descendants in the child process group"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_command_caps_stdout_stderr_and_fd3() {
+        SHUTDOWN.store(false, Ordering::Relaxed);
+        let script = format!(
+            "import os,sys; sys.stdout.write('o' * {}); sys.stderr.write('e' * {}); os.write(3, b't' * {})",
+            OUTPUT_CAPTURE_LIMIT_BYTES + 1024,
+            OUTPUT_CAPTURE_LIMIT_BYTES + 2048,
+            TASK_EVENT_CAPTURE_LIMIT_BYTES + 512,
+        );
+        let mut cmd = Command::new("python3");
+        cmd.arg("-c").arg(script);
+
+        let output = run_workflow_command(cmd, None, Duration::from_secs(5)).unwrap();
+        assert_eq!(output.stdout.len(), OUTPUT_CAPTURE_LIMIT_BYTES);
+        assert_eq!(output.stderr.len(), OUTPUT_CAPTURE_LIMIT_BYTES);
+        assert_eq!(output.task_events_raw.len(), TASK_EVENT_CAPTURE_LIMIT_BYTES);
+        assert!(output.stdout_truncated);
+        assert!(output.stderr_truncated);
+        assert!(output.task_events_truncated);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn orphan_recovery_marks_unclaimed_admitted_runs_stale() {
+        let (db, dir) = structured_test_db();
+        let wf = db
+            .create_workflow(
+                "Orphan Candidate",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let admitted = db
+            .admit_run_with_context(
+                &wf.id,
+                "source-default",
+                "source",
+                &[],
+                Some("manual"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                None,
+            )
+            .unwrap();
+        let run_id = match admitted {
+            RunAdmission::Admitted(run) => run.id,
+            _ => panic!("run should admit"),
+        };
+
+        recover_orphaned_runs(&db, dir.to_str().unwrap());
+        let recovered = db.get_run(&run_id).unwrap();
+        assert_eq!(recovered.status, "stale");
+        assert!(recovered
+            .stderr
+            .as_deref()
+            .unwrap_or_default()
+            .contains("before a worker claimed"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
