@@ -276,6 +276,7 @@ pub fn run() {
                             .collect()
                     })
                     .unwrap_or_default(),
+                webhook_replays: Arc::new(Mutex::new(std::collections::HashMap::new())),
             };
             api::start_api_server(api_state, api_addr);
 

@@ -11,6 +11,7 @@ use crate::service::Notifier;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -48,15 +49,7 @@ pub enum ActionSpec {
 impl ActionSpec {
     pub fn validate(&self) -> Result<(), String> {
         match self {
-            ActionSpec::Webhook { url, .. } => {
-                if url.trim().is_empty() {
-                    return Err("webhook action requires a url".into());
-                }
-                if !(url.starts_with("http://") || url.starts_with("https://")) {
-                    return Err("webhook url must be http(s)".into());
-                }
-                Ok(())
-            }
+            ActionSpec::Webhook { url, .. } => validate_outbound_webhook_url(url),
             ActionSpec::RunWorkflow { workflow_id, .. } => {
                 if workflow_id.trim().is_empty() {
                     return Err("run_workflow action requires a workflow_id".into());
@@ -75,6 +68,57 @@ impl ActionSpec {
             ActionSpec::DesktopNotification { .. } => "desktop_notification",
         }
     }
+}
+
+fn is_blocked_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_unspecified()
+        || octets[0] == 0
+        || octets[0] == 10
+        || octets[0] == 127
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        || (octets[0] == 169 && octets[1] == 254)
+        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 168)
+}
+
+fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
+    let first = ip.segments()[0];
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || (first & 0xfe00) == 0xfc00
+        || (first & 0xffc0) == 0xfe80
+}
+
+fn is_blocked_outbound_host(host: &str) -> bool {
+    let lower = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        return true;
+    }
+    match lower.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => is_blocked_ipv4(ip),
+        Ok(IpAddr::V6(ip)) => is_blocked_ipv6(ip),
+        Err(_) => false,
+    }
+}
+
+fn validate_outbound_webhook_url(url: &str) -> Result<(), String> {
+    let parsed =
+        reqwest::Url::parse(url.trim()).map_err(|e| format!("invalid webhook url: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("webhook url must be http(s)".into());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "webhook url requires a host".to_string())?;
+    if is_blocked_outbound_host(host) {
+        return Err("webhook url targets a blocked local/private address".into());
+    }
+    Ok(())
 }
 
 /// Compute the hex HMAC-SHA256 signature of a payload with the given secret.
@@ -189,6 +233,7 @@ fn dispatch_webhook(
     max_retries: u32,
     ctx: &ActionContext,
 ) -> Result<String, String> {
+    validate_outbound_webhook_url(url)?;
     let body = serde_json::to_vec(&ctx.result_payload).map_err(|e| e.to_string())?;
     let signature = secret.map(|s| sign_payload(s, &body));
 
@@ -254,13 +299,22 @@ mod tests {
     }
 
     #[test]
-    fn webhook_requires_http_url() {
-        let a = ActionSpec::Webhook {
-            url: "ftp://x".into(),
-            secret: None,
-            max_retries: 0,
-        };
-        assert!(a.validate().is_err());
+    fn webhook_requires_http_url_and_public_target() {
+        for url in [
+            "ftp://x",
+            "http://127.0.0.1/hook",
+            "http://localhost/hook",
+            "http://169.254.169.254/latest/meta-data",
+            "http://10.0.0.5/hook",
+            "http://[::1]/hook",
+        ] {
+            let action = ActionSpec::Webhook {
+                url: url.into(),
+                secret: None,
+                max_retries: 0,
+            };
+            assert!(action.validate().is_err(), "{url} should be blocked");
+        }
         let ok = ActionSpec::Webhook {
             url: "https://example.com/hook".into(),
             secret: Some("s".into()),
@@ -278,23 +332,8 @@ mod tests {
     }
 
     #[test]
-    fn outbound_webhook_delivers_signed_payload() {
+    fn outbound_webhook_blocks_loopback_targets_before_send() {
         use crate::service::NoopNotifier;
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = vec![0u8; 8192];
-            let n = stream.read(&mut buf).unwrap();
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                .unwrap();
-            request
-        });
 
         let dir = std::env::temp_dir().join(format!("chaos-act-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -308,30 +347,14 @@ mod tests {
             result_payload: serde_json::json!({"status":"failed","run_id":"run-1"}),
         };
         let action = ActionSpec::Webhook {
-            url: format!("http://{addr}/hook"),
+            url: "http://127.0.0.1:9/hook".into(),
             secret: Some("s3cr3t".into()),
             max_retries: 0,
         };
         let results = dispatch_actions(std::slice::from_ref(&action), &ctx);
         assert_eq!(results.len(), 1);
-        assert!(
-            results[0].success,
-            "delivery should succeed: {}",
-            results[0].message
-        );
-
-        let request = server.join().unwrap();
-        let lower = request.to_lowercase();
-        assert!(lower.contains("x-chaos-signature: sha256="));
-        assert!(lower.contains("x-chaos-event: run.failed"));
-        // The signature must match the HMAC of the exact JSON body sent.
-        let body = serde_json::to_vec(&ctx.result_payload).unwrap();
-        let expected = sign_payload("s3cr3t", &body);
-        assert!(
-            request.contains(&expected),
-            "signature header must match body HMAC"
-        );
-
+        assert!(!results[0].success);
+        assert!(results[0].message.contains("blocked local/private"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
