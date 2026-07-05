@@ -560,31 +560,24 @@ fn dependency_decision_for_db(
     DependencyDecision::Ready
 }
 
-fn mark_trigger_context_admitted(
-    db: &Arc<Database>,
-    workflow_id: &str,
+/// Derive the `(trigger_id, fingerprint)` pair that an admission should record
+/// as fired for file-arrival / asset-update triggers. Returns `None` when the
+/// trigger has no dedupe fingerprint, in which case `admit_run` skips the
+/// trigger-state write. The actual persistence happens atomically inside
+/// [`Database::admit_run`].
+fn trigger_state_for_admission(
     trigger_kind: Option<&str>,
     trigger_payload: Option<&str>,
-) {
-    let Some(kind) = trigger_kind else {
-        return;
-    };
+) -> Option<(String, String)> {
+    let kind = trigger_kind?;
     if kind != "file_arrival" && kind != "asset_update" {
-        return;
+        return None;
     }
-    let Some(payload) = trigger_payload else {
-        return;
-    };
-    let Ok(value) = serde_json::from_str::<Value>(payload) else {
-        return;
-    };
-    let Some(trigger_id) = value.get("trigger_id").and_then(Value::as_str) else {
-        return;
-    };
-    let Some(fingerprint) = value.get("fingerprint").and_then(Value::as_str) else {
-        return;
-    };
-    let _ = db.set_trigger_state(workflow_id, trigger_id, fingerprint, true);
+    let payload = trigger_payload?;
+    let value = serde_json::from_str::<Value>(payload).ok()?;
+    let trigger_id = value.get("trigger_id").and_then(Value::as_str)?;
+    let fingerprint = value.get("fingerprint").and_then(Value::as_str)?;
+    Some((trigger_id.to_string(), fingerprint.to_string()))
 }
 
 pub struct DueWorkflow {
@@ -1424,56 +1417,61 @@ pub fn execute_workflow_with_context(
         .get_workflow(workflow_id)
         .map_err(|e| format!("Failed to get workflow: {}", e))?;
     let queue_config = parse_queue_config(workflow.queue_config.as_deref(), &workflow.environment);
-    if !has_runtime_capacity(db, &queue_config)? {
-        let _ = db.upsert_queued_run_with_context(
+    let mutex_keys = mutex_keys(&workflow.id, &queue_config);
+    let trigger_state = trigger_state_for_admission(trigger_kind, trigger_payload);
+
+    // Single atomic admission: capacity re-check, queued claim, run creation,
+    // mutex acquisition, and trigger-state are one BEGIN IMMEDIATE transaction,
+    // so concurrent admitters cannot both pass the caps or both take a mutex.
+    let admission = db
+        .admit_run(
             &workflow.id,
             &queue_config.queue,
-            queue_config.priority,
+            &queue_config.environment,
+            &queue_config.tags,
+            &mutex_keys,
             trigger_kind,
             trigger_payload,
             upstream_run_id,
             input_json,
             rerun_of_run_id,
-        );
-        return Err(format!(
-            "Queue {} is at capacity or constrained by global/tag caps",
-            queue_config.queue
-        ));
-    }
-    let mutex_keys = mutex_keys(&workflow.id, &queue_config);
-
-    let run = db
-        .create_run_with_context(
-            &workflow.id,
-            trigger_kind,
-            trigger_payload,
-            upstream_run_id,
-            input_json,
-            rerun_of_run_id,
+            queued_run_id,
+            trigger_state
+                .as_ref()
+                .map(|(id, fingerprint)| (id.as_str(), fingerprint.as_str())),
         )
-        .map_err(|e| format!("Failed to create run record: {}", e))?;
-    if let Some(queued_run_id) = queued_run_id {
-        let updated = db
-            .mark_queued_run_admitted_by_id(queued_run_id, &run.id)
-            .map_err(|e| format!("Failed to admit queued run: {}", e))?;
-        if updated == 0 {
-            let reason = format!("Queued run {} is no longer available", queued_run_id);
-            let _ = db.finish_run_with_status(&run.id, "cancelled", "", &reason);
-            return Err(reason);
+        .map_err(|e| format!("Failed to admit run: {}", e))?;
+    let run = match admission {
+        crate::db::AdmissionOutcome::Admitted(run) => *run,
+        crate::db::AdmissionOutcome::AtCapacity => {
+            let _ = db.upsert_queued_run_with_context(
+                &workflow.id,
+                &queue_config.queue,
+                queue_config.priority,
+                trigger_kind,
+                trigger_payload,
+                upstream_run_id,
+                input_json,
+                rerun_of_run_id,
+            );
+            return Err(format!(
+                "Queue {} is at capacity or constrained by global/tag caps",
+                queue_config.queue
+            ));
         }
-    }
-    let acquired = db
-        .acquire_mutex_locks(&workflow.id, &run.id, &mutex_keys)
-        .map_err(|e| format!("Failed to acquire mutex locks: {}", e))?;
-    if !acquired {
-        let reason = format!(
-            "Workflow {} could not acquire mutex locks in queue {}",
-            workflow.id, queue_config.queue
-        );
-        let _ = db.finish_run_with_status(&run.id, "cancelled", "", &reason);
-        return Err(reason);
-    }
-    mark_trigger_context_admitted(db, &workflow.id, trigger_kind, trigger_payload);
+        crate::db::AdmissionOutcome::MutexUnavailable => {
+            return Err(format!(
+                "Workflow {} could not acquire mutex locks in queue {}",
+                workflow.id, queue_config.queue
+            ));
+        }
+        crate::db::AdmissionOutcome::QueuedRunUnavailable => {
+            return Err(format!(
+                "Queued run {} is no longer available",
+                queued_run_id.unwrap_or("")
+            ));
+        }
+    };
 
     // Structured workflows (generic step-flow / typed operator) are executed
     // in-scheduler with the scheduler as the sole author of run_tasks /
