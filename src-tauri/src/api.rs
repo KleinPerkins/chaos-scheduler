@@ -472,7 +472,15 @@ async fn register_workflow(
     // API-registered workflows are externally-managed by definition.
     let mut wf = st.service.create_workflow(draft, true)?;
     if let Some(spec) = body.spec {
-        wf = st.service.set_workflow_spec(&wf.id, &spec, true)?;
+        match st.service.set_workflow_spec(&wf.id, &spec, true) {
+            Ok(updated) => wf = updated,
+            Err(e) => {
+                // Roll back the partially-created workflow so an invalid spec
+                // never leaves a spec-less workflow behind.
+                let _ = st.service.delete_workflow(&wf.id, true);
+                return Err(e.into());
+            }
+        }
     }
     Ok(Json(json!({ "workflow": wf })))
 }
@@ -530,6 +538,23 @@ fn duplicate_dispatch_value(record: &crate::db::IdempotencyRecord) -> Value {
         "run_id": record.run_id.as_deref(),
         "queued_run_id": record.queued_run_id.as_deref(),
     })
+}
+
+/// Map a free-form dispatch error to an accurate HTTP status. Not-found and
+/// governance cases are already handled up-front by
+/// `ensure_workflow_execution_allowed`; here we separate client conflicts
+/// (disabled / already-existing) and internal persistence failures from plain
+/// bad requests.
+fn map_dispatch_error(message: &str) -> ApiError {
+    let lower = message.to_ascii_lowercase();
+    let status = if lower.contains("is disabled") || lower.contains("already") {
+        StatusCode::CONFLICT
+    } else if lower.starts_with("failed to") {
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    ApiError::new(status, message.to_string())
 }
 
 fn dispatch_with_idempotency(
@@ -592,7 +617,7 @@ fn dispatch_with_idempotency(
             if let (Some(key), Some(fingerprint)) = (&idem, &fingerprint) {
                 let _ = st.db.delete_idempotency_reservation(key, fingerprint);
             }
-            return Err(ApiError::new(StatusCode::BAD_REQUEST, e));
+            return Err(map_dispatch_error(&e));
         }
     };
     if let Some(key) = &idem {
@@ -1155,6 +1180,61 @@ mod tests {
         let (status, value) = body_json(resp).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(value["workflows"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn map_dispatch_error_assigns_accurate_status() {
+        assert_eq!(
+            map_dispatch_error("Workflow abc is disabled").status,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            map_dispatch_error("matching run already exists").status,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            map_dispatch_error("Failed to queue workflow: db locked").status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            map_dispatch_error("bad trigger payload").status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn register_workflow_rolls_back_on_invalid_spec() {
+        let (state, token) = test_state();
+        let db = state.db.clone();
+        let app = router(state);
+        // A typed spec referencing an unknown operator passes structural
+        // validation but fails operator validation inside set_workflow_spec.
+        let body = json!({
+            "name": "Rollback WF",
+            "script_path": "scripts/x.py",
+            "cron_schedule": "0 0 * * *",
+            "environment": "instance",
+            "spec": { "kind": "typed", "typed": { "operator_type": "does_not_exist" } }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workflows")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, _value) = body_json(resp).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // The partially-created workflow must not survive the failed spec set.
+        assert!(
+            db.list_workflows().unwrap().is_empty(),
+            "invalid-spec registration must not leave an orphan workflow"
+        );
     }
 
     #[tokio::test]
