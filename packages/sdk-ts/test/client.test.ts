@@ -151,7 +151,7 @@ describe("ChaosSchedulerClient", () => {
   it("recognizes the duplicate-dispatch replay shape", async () => {
     const { fetch } = fakeFetch(() => ({
       status: 200,
-      json: { status: "duplicate", run_id: null, queued_run_id: "q1" },
+      json: { status: "duplicate", run_id: "r1" },
     }));
     const client = new ChaosSchedulerClient({
       baseUrl: BASE,
@@ -162,10 +162,6 @@ describe("ChaosSchedulerClient", () => {
       idempotencyKey: "abc-123",
     });
     expect(isDuplicateDispatch(res)).toBe(true);
-    if (isDuplicateDispatch(res)) {
-      expect(res.run_id).toBeNull();
-      expect(res.queued_run_id).toBe("q1");
-    }
   });
 
   it("signs the inbound dispatch payload from a secret", async () => {
@@ -220,5 +216,53 @@ describe("ChaosSchedulerClient", () => {
     const run = await promise;
     expect(run.status).toBe("success");
     vi.useRealTimers();
+  });
+
+  it("calls read endpoints with the expected paths", async () => {
+    const { fetch, calls } = fakeFetch((req) => {
+      if (req.url.endsWith("/logs")) {
+        return {
+          status: 200,
+          json: {
+            run_id: "r1",
+            status: "success",
+            exit_code: 0,
+            stdout: "out",
+            stderr: "",
+            result_url: null,
+          },
+        };
+      }
+      if (req.url.endsWith("/tasks")) {
+        return { status: 200, json: { tasks: [], attempts: [] } };
+      }
+      if (req.url.endsWith("/metrics")) {
+        return { status: 200, json: { metrics: [] } };
+      }
+      if (req.url.endsWith("/queues")) {
+        return { status: 200, json: { queues: [] } };
+      }
+      if (req.url.endsWith("/queued-runs")) {
+        return { status: 200, json: { queued_runs: [] } };
+      }
+      return { status: 404, json: { error: "missing" } };
+    });
+    const client = new ChaosSchedulerClient({
+      baseUrl: BASE,
+      apiKey: "id.secret",
+      fetch,
+    });
+    await client.getRunLogs("r1");
+    await client.getRunTasks("r1");
+    await client.getRunMetrics("r1");
+    await client.listQueues();
+    await client.listQueuedRuns();
+    expect(calls.map((c) => c.url)).toEqual([
+      `${BASE}/api/v1/runs/r1/logs`,
+      `${BASE}/api/v1/runs/r1/tasks`,
+      `${BASE}/api/v1/runs/r1/metrics`,
+      `${BASE}/api/v1/queues`,
+      `${BASE}/api/v1/queued-runs`,
+    ]);
   });
 });

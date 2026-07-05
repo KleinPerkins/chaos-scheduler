@@ -141,7 +141,7 @@ export interface Run {
  *
  * `status` is one of the backend's dispatch statuses (e.g. `admitted`,
  * `queued`, `skipped`). When an `Idempotency-Key` matches a previous request,
- * the API instead returns `{ status: "duplicate", run_id, queued_run_id }` — see
+ * the API instead returns `{ status: "duplicate", run_id }` — see
  * {@link DispatchResult}.
  */
 export interface DispatchOutcome {
@@ -159,7 +159,6 @@ export interface DispatchOutcome {
 export interface DuplicateDispatch {
   status: "duplicate";
   run_id: string | null;
-  queued_run_id: string | null;
 }
 
 /** Union of the two shapes a run/enqueue/dispatch call can return. */
@@ -200,6 +199,99 @@ export interface RegisterWorkflowInput {
   spec?: WorkflowSpec;
 }
 
+/** Run log payload (`api.rs::get_run_logs`). */
+export interface RunLogs {
+  run_id: string;
+  status: string;
+  exit_code: number | null;
+  stdout: string | null;
+  stderr: string | null;
+  result_url: string | null;
+}
+
+/** Per-step task row (`db.rs::RunTask`). */
+export interface RunTask {
+  id: string;
+  run_id: string;
+  attempt_id: string | null;
+  task_id: string;
+  status: string;
+  started_at: string | null;
+  finished_at: string | null;
+  attempt_number: number;
+  parent_task_id: string | null;
+  error_type: string | null;
+  error_message: string | null;
+  details?: unknown;
+}
+
+/** Retry attempt row (`db.rs::RunAttempt`). */
+export interface RunAttempt {
+  id: string;
+  run_id: string;
+  task_id: string;
+  attempt_number: number;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  exit_code: number | null;
+  retry_reason: string | null;
+  error_type: string | null;
+  error_message: string | null;
+  trigger_kind: string | null;
+}
+
+/** `GET /runs/{id}/tasks` envelope. */
+export interface RunTasksResult {
+  tasks: RunTask[];
+  attempts: RunAttempt[];
+}
+
+/** Emitted metric sample (`db.rs::RunMetric`). */
+export interface RunMetric {
+  id: string;
+  run_id: string;
+  task_id: string | null;
+  metric_name: string;
+  metric_value: number;
+  metric_unit: string | null;
+  emitted_at: string;
+  labels?: unknown;
+}
+
+/** Queue capacity snapshot (`db.rs::QueueInfo`). */
+export interface QueueInfo {
+  name: string;
+  environment: string;
+  capacity: number;
+  tag_cap: number | null;
+  max_queued: number | null;
+  active_count: number;
+  queued_count: number;
+  global_parallelism_cap: number;
+  updated_at: string;
+}
+
+/** Durable queued-run row (`db.rs::QueuedRun`). */
+export interface QueuedRun {
+  id: string;
+  run_id: string | null;
+  workflow_id: string;
+  workflow_name: string | null;
+  queue_name: string;
+  environment: string;
+  priority: number;
+  status: string;
+  queued_at: string;
+  admitted_at: string | null;
+  finished_at: string | null;
+  trigger_kind: string | null;
+  trigger_payload: string | null;
+  upstream_run_id: string | null;
+  input_json: string | null;
+  rerun_of_run_id: string | null;
+}
+
 /** Input for creating an environment (`api.rs::CreateEnvironmentBody`). */
 export interface CreateEnvironmentInput {
   name: string;
@@ -210,10 +302,5 @@ export interface CreateEnvironmentInput {
   default_max_queued?: number;
 }
 
-/**
- * Scopes recognized by the backend API-key model (`service.rs`).
- *
- * `write` and `admin` keys can register/run local workflows and should be
- * treated as local-code-execution credentials.
- */
+/** Scopes recognized by the backend API-key model (`service.rs`). */
 export type ApiScope = "read" | "write" | "admin";
