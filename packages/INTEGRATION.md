@@ -59,7 +59,7 @@ import { isDuplicateDispatch } from "@chaos-scheduler/sdk";
 
 const key = crypto.randomUUID();
 const res = await client.enqueueWorkflow(wf.id, { idempotencyKey: key });
-// Retrying with the SAME key returns { status: "duplicate", run_id } — safe.
+// Retrying with the SAME key returns { status: "duplicate", run_id, queued_run_id } — safe.
 if (!isDuplicateDispatch(res) && res.run_id) {
   const run = await client.waitForRun(res.run_id);
   console.log(run.status, run.exit_code);

@@ -85,14 +85,14 @@ scheduler process is started with
 
 `runWorkflow`, `enqueueWorkflow`, and `dispatchWorkflow` accept an
 `idempotencyKey`. Reusing a key returns the original result as
-`{ status: "duplicate", run_id }`. Use the `isDuplicateDispatch` guard:
+`{ status: "duplicate", run_id, queued_run_id }`. Queued dispatches replay with `queued_run_id`; admitted dispatches replay with `run_id`. Use the `isDuplicateDispatch` guard:
 
 ```ts
 import { isDuplicateDispatch } from "@chaos-scheduler/sdk";
 
 const res = await client.runWorkflow(id, { idempotencyKey: key });
 if (isDuplicateDispatch(res)) {
-  // replay: res.run_id points at the run created by the first request
+  // replay: res.run_id or res.queued_run_id points at the first request
 } else {
   // fresh dispatch: res.status is admitted/queued/skipped, res.run_id is new
 }

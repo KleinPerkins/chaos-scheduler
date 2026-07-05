@@ -7,7 +7,7 @@
  *   - Errors: non-2xx render as `{ "error": "<message>" }`.
  *   - Response envelopes: `{ environments }`, `{ workflows }`, `{ workflow }`,
  *     `{ runs }`, `{ run }`, `{ deleted }`; dispatch returns a bare
- *     `DispatchOutcome` (or `{ status: "duplicate", run_id }` on replay).
+ *     `DispatchOutcome` (or `{ status: "duplicate", run_id, queued_run_id }` on replay).
  */
 
 import { ChaosApiError } from "./errors.js";
@@ -228,7 +228,7 @@ export class ChaosSchedulerClient {
   /**
    * `POST /api/v1/workflows/{id}/run` — dispatch a run now (scope: write).
    * Supply `idempotencyKey` for safe retries; a reused key returns
-   * `{ status: "duplicate", run_id }`.
+   * `{ status: "duplicate", run_id, queued_run_id }`.
    */
   async runWorkflow(
     id: string,

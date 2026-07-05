@@ -585,12 +585,24 @@ pub struct ApiKeyInfo {
     pub revoked: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct IdempotencyRecord {
+    pub run_id: Option<String>,
+    pub queued_run_id: Option<String>,
+    pub request_fingerprint: Option<String>,
+}
+
+pub enum IdempotencyReservation {
+    Reserved,
+    Existing(IdempotencyRecord),
+}
+
 /// The schema version this binary understands. Bump this (and add a numbered
 /// migration in [`Database::run_migrations`]) whenever a schema change lands.
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 6;
+pub const CURRENT_SCHEMA_VERSION: i64 = 7;
 
 pub struct Database {
     path: String,
@@ -880,9 +892,14 @@ impl Database {
             CREATE TABLE IF NOT EXISTS scheduler_idempotency_keys (
                 key TEXT PRIMARY KEY,
                 run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+                queued_run_id TEXT REFERENCES queued_runs(id) ON DELETE SET NULL,
+                workflow_id TEXT REFERENCES workflows(id) ON DELETE SET NULL,
+                request_fingerprint TEXT,
+                status TEXT NOT NULL DEFAULT 'reserved',
                 task_id TEXT,
                 attempt_id TEXT REFERENCES run_attempts(id) ON DELETE SET NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS scheduler_checkpoints (
                 id TEXT PRIMARY KEY,
@@ -1015,6 +1032,7 @@ impl Database {
             (4, Self::migrate_v4_api_keys),
             (5, Self::migrate_v5_queue_environment),
             (6, Self::migrate_v6_run_retention_fk_actions),
+            (7, Self::migrate_v7_idempotency_contract),
         ]
     }
 
@@ -1093,6 +1111,41 @@ impl Database {
             DROP TABLE workflow_mutex_locks;
             ALTER TABLE workflow_mutex_locks_v6 RENAME TO workflow_mutex_locks;
             CREATE INDEX IF NOT EXISTS idx_workflow_mutex_locks_workflow ON workflow_mutex_locks(workflow_id);",
+        )?;
+        Ok(())
+    }
+
+    /// v7: extend idempotency records so queued dispatches can replay the
+    /// original queued_run_id and mismatched key reuse can be rejected.
+    fn migrate_v7_idempotency_contract(conn: &Connection) -> rusqlite::Result<()> {
+        let _ = conn.execute_batch(
+            "ALTER TABLE scheduler_idempotency_keys ADD COLUMN queued_run_id TEXT REFERENCES queued_runs(id) ON DELETE SET NULL;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE scheduler_idempotency_keys ADD COLUMN workflow_id TEXT REFERENCES workflows(id) ON DELETE SET NULL;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE scheduler_idempotency_keys ADD COLUMN request_fingerprint TEXT;",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE scheduler_idempotency_keys ADD COLUMN status TEXT NOT NULL DEFAULT 'reserved';",
+        );
+        let _ = conn
+            .execute_batch("ALTER TABLE scheduler_idempotency_keys ADD COLUMN updated_at TEXT;");
+        conn.execute_batch(
+            "UPDATE scheduler_idempotency_keys
+                SET workflow_id = (SELECT workflow_id FROM runs r WHERE r.id = scheduler_idempotency_keys.run_id)
+              WHERE workflow_id IS NULL AND run_id IS NOT NULL;
+             UPDATE scheduler_idempotency_keys
+                SET status = CASE
+                    WHEN queued_run_id IS NOT NULL THEN 'queued'
+                    WHEN run_id IS NOT NULL THEN 'admitted'
+                    ELSE COALESCE(NULLIF(status, ''), 'reserved')
+                END,
+                    updated_at = COALESCE(updated_at, created_at, datetime('now'))
+              WHERE updated_at IS NULL OR updated_at = '';
+             CREATE INDEX IF NOT EXISTS idx_idempotency_queued_run ON scheduler_idempotency_keys(queued_run_id);
+             CREATE INDEX IF NOT EXISTS idx_idempotency_workflow ON scheduler_idempotency_keys(workflow_id);",
         )?;
         Ok(())
     }
@@ -1595,16 +1648,80 @@ impl Database {
         Ok(())
     }
 
-    /// Look up the run id previously recorded for an idempotency key, if any.
-    pub fn get_idempotency_run_id(&self, key: &str) -> rusqlite::Result<Option<String>> {
+    pub fn get_idempotency_record(&self, key: &str) -> rusqlite::Result<Option<IdempotencyRecord>> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT run_id FROM scheduler_idempotency_keys WHERE key = ?1",
+            "SELECT run_id, queued_run_id, request_fingerprint
+             FROM scheduler_idempotency_keys WHERE key = ?1",
             params![key],
-            |row| row.get::<_, Option<String>>(0),
+            |row| {
+                Ok(IdempotencyRecord {
+                    run_id: row.get(0)?,
+                    queued_run_id: row.get(1)?,
+                    request_fingerprint: row.get(2)?,
+                })
+            },
         )
         .optional()
-        .map(|opt| opt.flatten())
+    }
+
+    pub fn reserve_idempotency_key(
+        &self,
+        key: &str,
+        workflow_id: &str,
+        request_fingerprint: &str,
+    ) -> rusqlite::Result<IdempotencyReservation> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO scheduler_idempotency_keys
+                (key, workflow_id, request_fingerprint, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'reserved', ?4, ?4)",
+            params![key, workflow_id, request_fingerprint, now],
+        )?;
+        if inserted == 1 {
+            Ok(IdempotencyReservation::Reserved)
+        } else {
+            Ok(IdempotencyReservation::Existing(
+                self.get_idempotency_record(key)?
+                    .expect("idempotency key exists"),
+            ))
+        }
+    }
+
+    pub fn complete_idempotency_key(
+        &self,
+        key: &str,
+        run_id: Option<&str>,
+        queued_run_id: Option<&str>,
+        status: &str,
+    ) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE scheduler_idempotency_keys
+                SET run_id = ?2, queued_run_id = ?3, status = ?4, updated_at = ?5
+              WHERE key = ?1",
+            params![key, run_id, queued_run_id, status, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_idempotency_reservation(
+        &self,
+        key: &str,
+        request_fingerprint: &str,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM scheduler_idempotency_keys
+              WHERE key = ?1
+                AND request_fingerprint = ?2
+                AND run_id IS NULL
+                AND queued_run_id IS NULL
+                AND status = 'reserved'",
+            params![key, request_fingerprint],
+        )
     }
 
     fn row_to_environment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Environment> {
@@ -2257,8 +2374,11 @@ impl Database {
         let created_at = chrono::Utc::now().to_rfc3339();
         let conn = self.conn()?;
         let inserted = conn.execute(
-            "INSERT OR IGNORE INTO scheduler_idempotency_keys (key, run_id, task_id, attempt_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR IGNORE INTO scheduler_idempotency_keys
+                (key, run_id, workflow_id, status, task_id, attempt_id, created_at, updated_at)
+             VALUES (?1, ?2, (SELECT workflow_id FROM runs WHERE id = ?2),
+                     CASE WHEN ?2 IS NULL THEN 'reserved' ELSE 'admitted' END,
+                     ?3, ?4, ?5, ?5)",
             params![key, run_id, task_id, attempt_id, created_at],
         )?;
         Ok(inserted == 1)
@@ -4724,6 +4844,108 @@ mod tests {
             )
             .unwrap();
         assert_eq!(lock_count, 0);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migration_v7_backfills_and_records_queued_idempotency() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "PRAGMA foreign_keys = ON;
+                CREATE TABLE workflows (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
+                    script_path TEXT NOT NULL, cron_schedule TEXT NOT NULL,
+                    enabled INTEGER DEFAULT 1, corpus TEXT NOT NULL DEFAULT 'source',
+                    created_at TEXT, updated_at TEXT
+                );
+                CREATE TABLE runs (
+                    id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id),
+                    started_at TEXT NOT NULL, finished_at TEXT, exit_code INTEGER,
+                    stdout TEXT, stderr TEXT, result_url TEXT, status TEXT DEFAULT 'running'
+                );
+                CREATE TABLE queued_runs (
+                    id TEXT PRIMARY KEY, run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+                    workflow_id TEXT NOT NULL REFERENCES workflows(id), queue_name TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued',
+                    queued_at TEXT NOT NULL, admitted_at TEXT, finished_at TEXT,
+                    trigger_kind TEXT, trigger_payload TEXT, upstream_run_id TEXT,
+                    input_json TEXT, rerun_of_run_id TEXT
+                );
+                CREATE TABLE queues (
+                    name TEXT NOT NULL, environment TEXT NOT NULL,
+                    capacity INTEGER NOT NULL DEFAULT 1, tag_cap INTEGER, max_queued INTEGER,
+                    created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+                    PRIMARY KEY (name, environment)
+                );
+                CREATE TABLE workflow_mutex_locks (
+                    mutex_key TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id),
+                    run_id TEXT REFERENCES runs(id) ON DELETE CASCADE, acquired_at TEXT NOT NULL
+                );
+                CREATE TABLE scheduler_idempotency_keys (
+                    key TEXT PRIMARY KEY,
+                    run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+                    task_id TEXT,
+                    attempt_id TEXT,
+                    created_at TEXT NOT NULL
+                );
+                INSERT INTO workflows (id, name, script_path, cron_schedule, created_at, updated_at)
+                    VALUES ('wf-idem', 'Idem', 's.py', '0 0 * * *', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO runs (id, workflow_id, started_at, status)
+                    VALUES ('run-idem', 'wf-idem', '2026-01-01T00:00:00Z', 'success');
+                INSERT INTO queued_runs (id, workflow_id, queue_name, status, queued_at)
+                    VALUES ('queue-idem', 'wf-idem', 'source-default', 'queued', '2026-01-01T00:00:00Z');
+                INSERT INTO scheduler_idempotency_keys (key, run_id, created_at)
+                    VALUES ('legacy-key', 'run-idem', '2026-01-01T00:00:00Z');
+                PRAGMA user_version = 6;",
+            )
+            .unwrap();
+        }
+
+        let db = Database::new(&dir);
+        let conn = db.conn().unwrap();
+        let cols: std::collections::HashSet<String> = conn
+            .prepare("PRAGMA table_info(scheduler_idempotency_keys)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for col in [
+            "queued_run_id",
+            "workflow_id",
+            "request_fingerprint",
+            "status",
+            "updated_at",
+        ] {
+            assert!(cols.contains(col), "missing idempotency column {col}");
+        }
+        let legacy: (Option<String>, String) = conn
+            .query_row(
+                "SELECT workflow_id, status FROM scheduler_idempotency_keys WHERE key = 'legacy-key'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            legacy,
+            (Some("wf-idem".to_string()), "admitted".to_string())
+        );
+
+        assert!(matches!(
+            db.reserve_idempotency_key("queued-key", "wf-idem", "fp-queued")
+                .unwrap(),
+            IdempotencyReservation::Reserved
+        ));
+        db.complete_idempotency_key("queued-key", None, Some("queue-idem"), "queued")
+            .unwrap();
+        let queued = db.get_idempotency_record("queued-key").unwrap().unwrap();
+        assert_eq!(queued.queued_run_id.as_deref(), Some("queue-idem"));
+        assert_eq!(queued.request_fingerprint.as_deref(), Some("fp-queued"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

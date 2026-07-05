@@ -151,7 +151,7 @@ describe("ChaosSchedulerClient", () => {
   it("recognizes the duplicate-dispatch replay shape", async () => {
     const { fetch } = fakeFetch(() => ({
       status: 200,
-      json: { status: "duplicate", run_id: "r1" },
+      json: { status: "duplicate", run_id: null, queued_run_id: "q1" },
     }));
     const client = new ChaosSchedulerClient({
       baseUrl: BASE,
@@ -162,6 +162,10 @@ describe("ChaosSchedulerClient", () => {
       idempotencyKey: "abc-123",
     });
     expect(isDuplicateDispatch(res)).toBe(true);
+    if (isDuplicateDispatch(res)) {
+      expect(res.run_id).toBeNull();
+      expect(res.queued_run_id).toBe("q1");
+    }
   });
 
   it("signs the inbound dispatch payload from a secret", async () => {

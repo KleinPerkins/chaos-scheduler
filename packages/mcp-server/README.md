@@ -102,7 +102,8 @@ Write: `create_environment`, `register_workflow`, `set_workflow_spec`,
 `delete_workflow`, `run_workflow_now`, `enqueue_workflow`, `dispatch_workflow`.
 
 Each write tool passes through the protected-environment guardrail; all tools
-count against the optional tool-call budget.
+count against the optional tool-call budget. Dispatch tools forward `idempotency_key`;
+replays return the original `run_id` or `queued_run_id`.
 
 ### Resources
 
