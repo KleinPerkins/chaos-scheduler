@@ -30,12 +30,15 @@ All via `CHAOS_SCHEDULER_*` env vars (CLI flags override):
 | `CHAOS_SCHEDULER_MCP_TRANSPORT`              | `stdio`                 | `stdio` \| `http`                                 |
 | `CHAOS_SCHEDULER_MCP_HTTP_HOST`              | `127.0.0.1`             | HTTP bind host                                    |
 | `CHAOS_SCHEDULER_MCP_HTTP_PORT`              | `9700`                  | HTTP bind port                                    |
+| `CHAOS_SCHEDULER_MCP_ALLOW_REMOTE_HTTP`      | `false`                 | Permit non-loopback HTTP binds                    |
+| `CHAOS_SCHEDULER_MCP_MAX_BODY_BYTES`         | `1048576`               | HTTP MCP request body cap                         |
 | `CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS` | `prod,production`       | Env names whose writes are blocked                |
 | `CHAOS_SCHEDULER_MCP_ALLOW_PROTECTED_WRITES` | `false`                 | Permit writes to protected environments           |
 | `CHAOS_SCHEDULER_MCP_MAX_TOOL_CALLS`         | `0` (unlimited)         | Per-process tool-call budget (runaway-loop guard) |
 | `CHAOS_SCHEDULER_MCP_REQUEST_TIMEOUT_MS`     | `30000`                 | Per-request SDK timeout                           |
 
-CLI flags: `--stdio`, `--http`, `--host <h>`, `--port <p>`, `--url <baseUrl>`,
+CLI flags: `--stdio`, `--http`, `--host <h>`, `--port <p>`,
+`--allow-remote-http`, `--max-http-body-bytes <n>`, `--url <baseUrl>`,
 `--allow-protected-writes`, `--help`.
 
 ## Run it
@@ -53,13 +56,13 @@ Remote/team (Streamable HTTP):
 ```bash
 CHAOS_SCHEDULER_URL=http://127.0.0.1:9618 \
 CHAOS_SCHEDULER_API_KEY=<service-key> \
-npx -y @chaos-scheduler/mcp-server --http --host 0.0.0.0 --port 9700
+npx -y @chaos-scheduler/mcp-server --http --host 0.0.0.0 --allow-remote-http --port 9700
 # → POST http://<host>:9700/mcp   (GET /health for a liveness probe)
 ```
 
-In HTTP mode the per-request API key is taken from the incoming
-`Authorization: Bearer` header (falling back to `CHAOS_SCHEDULER_API_KEY`), so
-each teammate can pass their own scoped scheduler key.
+In HTTP mode every `/mcp` request must include its own `Authorization: Bearer`
+header. The server does not fall back to `CHAOS_SCHEDULER_API_KEY`, so a shared
+deployment cannot accidentally run all teammates as the hosting service key.
 
 ## Add to Cursor
 
@@ -120,6 +123,10 @@ Freshness is pull-based (Cursor does not document resource subscriptions).
   The Cursor hook adds a second, client-side confirmation layer.
 - **Tool budget** — set `CHAOS_SCHEDULER_MCP_MAX_TOOL_CALLS` to cap tool calls
   per server instance and stop runaway agent loops.
+- **HTTP exposure** — HTTP binds are loopback-only unless
+  `--allow-remote-http` / `CHAOS_SCHEDULER_MCP_ALLOW_REMOTE_HTTP=1` is set.
+  `/mcp` also requires a bearer token and rejects bodies over
+  `CHAOS_SCHEDULER_MCP_MAX_BODY_BYTES`.
 - **Scoped auth** — the server never mints keys; it forwards a scoped API key to
   the REST API, which enforces `read`/`write`/`admin` scopes per endpoint.
 

@@ -7,10 +7,10 @@
     "Run the server in HTTP mode on the host:",
     "  CHAOS_SCHEDULER_URL=http://127.0.0.1:9618 \\",
     "  CHAOS_SCHEDULER_API_KEY=<service-key> \\",
-    "  npx -y @chaos-scheduler/mcp-server --http --host 0.0.0.0 --port 9700",
+    "  npx -y @chaos-scheduler/mcp-server --http --host 0.0.0.0 --allow-remote-http --port 9700",
     "",
     "Each Cursor client then passes its OWN scoped scheduler key via the Authorization",
-    "header; the server forwards it to the REST API (falling back to its configured key)."
+    "header; HTTP mode never falls back to the server's configured key."
   ],
   "mcpServers": {
     "chaos-scheduler": {
