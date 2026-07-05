@@ -9,8 +9,9 @@
 # Fails OPEN: any parse problem returns "allow" so it never blocks legitimate
 # work. Requires `jq` (checked below); if missing, it allows and warns.
 #
-# Configure protected env names via CHAOS_SCHEDULER_PROTECTED_ENVIRONMENTS
-# (comma-separated); defaults to "prod,production".
+# Configure protected env names via CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS
+# (comma-separated, matches the MCP server); falls back to
+# CHAOS_SCHEDULER_PROTECTED_ENVIRONMENTS for older hook configs.
 
 set -euo pipefail
 
@@ -31,7 +32,7 @@ args=$(printf '%s' "$input" | jq -c '(.tool_input // .arguments // .input // {})
 
 # Destructive / write tools exposed by the Chaos MCP server.
 case "$tool" in
-  *delete_workflow*|*register_workflow*|*set_workflow_spec*|*create_environment*|*run_workflow_now*|*enqueue_workflow*|*dispatch_workflow*)
+  *delete_workflow*|*register_workflow*|*update_workflow*|*set_workflow_spec*|*create_environment*|*run_workflow_now*|*enqueue_workflow*|*dispatch_workflow*|*rerun_workflow*)
     is_write=1
     ;;
   *)
@@ -43,7 +44,7 @@ if [[ "$is_write" -eq 0 ]]; then
   allow
 fi
 
-protected_csv="${CHAOS_SCHEDULER_PROTECTED_ENVIRONMENTS:-prod,production}"
+protected_csv="${CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS:-${CHAOS_SCHEDULER_PROTECTED_ENVIRONMENTS:-prod,production}}"
 IFS=',' read -r -a protected <<< "$protected_csv"
 
 hits_protected=0

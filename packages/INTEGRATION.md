@@ -112,16 +112,37 @@ and are covered by cross-implementation test vectors in the SDK.
 
 ## 6. Poll runs / read state (read)
 
-`listWorkflows`, `getWorkflow`, `listRuns`, `getRun`, `listEnvironments`, plus
-`waitForRun` (client-side polling; the backend has no long-poll).
+`listWorkflows`, `getWorkflow`, `listRuns`, `getRun`, `getRunLogs`,
+`getRunTasks`, `getRunMetrics`, `listQueues`, `listQueuedRuns`,
+`listEnvironments`, plus `waitForRun` (client-side polling with a default 5-minute
+overall timeout; the backend has no long-poll).
 
 ## 7. Drive it from Cursor (MCP)
 
 Run the MCP server and add it to Cursor (see the
 [mcp-server README](./mcp-server/README.md) and the repo's `.cursor/mcp.json`).
-The agent then uses tools like `register_workflow`, `enqueue_workflow`,
-`get_run`, and `chaos://` resources — the same operations as above, but
+The agent then uses tools like `register_workflow`, `update_workflow`,
+`enqueue_workflow`, `rerun_workflow`, `get_run`, `get_run_logs`, `list_queues`,
+and `chaos://` resources — the same operations as above, but
 conversational, with prod-write guardrails.
+
+## 8. Update or rerun a workflow (write)
+
+```ts
+await client.updateWorkflow(wf.id, {
+  enabled: true,
+  cron_schedule: "0 7 * * *",
+});
+
+const rerun = await client.rerunWorkflow(wf.id, {
+  sourceRunId: failedRunId,
+  idempotencyKey: crypto.randomUUID(),
+});
+```
+
+`updateWorkflow` maps to `PATCH /api/v1/workflows/{id}`; `rerunWorkflow` maps to
+`POST /api/v1/workflows/{id}/rerun` and supports the same idempotent-replay shape
+as run/enqueue.
 
 ## Error handling
 

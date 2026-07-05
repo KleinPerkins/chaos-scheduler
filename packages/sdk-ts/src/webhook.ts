@@ -8,6 +8,9 @@
  * (`api.rs::inbound_dispatch`) verifies the same scheme over the raw request
  * body. Verification MUST run over the exact raw bytes received — never a
  * re-serialized object, whose key order/spacing may differ.
+ *
+ * Note: this helper normalizes hex case for **outbound** result webhooks.
+ * The scheduler's inbound trigger verifier is case-sensitive — send lowercase hex.
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
