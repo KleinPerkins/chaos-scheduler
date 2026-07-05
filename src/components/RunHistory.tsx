@@ -7,6 +7,7 @@ import {
 import { openExternalSafe } from "../lib/openExternalSafe";
 import RerunModal from "./RerunModal";
 import type { Run, Workflow, WorkflowHistoryBucket } from "../lib/commands";
+import { formatRunStatusLabel } from "../lib/runStatus";
 import "./RunHistory.css";
 
 interface Props {
@@ -153,7 +154,7 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
                 <tr key={run.id}>
                   <td>
                     <span className={`status-badge ${run.status}`}>
-                      {run.status}
+                      {formatRunStatusLabel(run.status)}
                     </span>
                   </td>
                   <td>{formatDate(run.started_at)}</td>
