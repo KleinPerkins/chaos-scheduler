@@ -11,7 +11,7 @@ use crate::service::{ApiIdentity, SchedulerService, ServiceError, WorkflowDraft}
 use crate::workflow_spec::WorkflowSpec;
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -29,7 +29,10 @@ pub struct ApiState {
     pub db: Arc<Database>,
     pub workspace_root: String,
     pub python_path: String,
+    pub preauth_rate: Arc<Mutex<RateLimiter>>,
     pub rate: Arc<Mutex<RateLimiter>>,
+    /// Allowed Host header values. Empty = loopback defaults only.
+    pub host_allowlist: Vec<String>,
     /// Allowed CORS origins. Empty = no cross-origin (same-origin/loopback),
     /// the secure default.
     pub cors_allowlist: Vec<String>,
@@ -103,6 +106,59 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
         .map(|t| t.trim().to_string())
 }
 
+fn normalized_header(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+}
+
+fn host_allowed(state: &ApiState, headers: &HeaderMap) -> bool {
+    let Some(host) = normalized_header(headers, "host") else {
+        return true;
+    };
+    if is_loopback_host(&host) {
+        return true;
+    }
+    state
+        .host_allowlist
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(&host))
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let lower = host.trim().to_ascii_lowercase();
+    let host_no_port = lower
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(lower.as_str());
+    matches!(host_no_port, "localhost" | "127.0.0.1" | "[::1]" | "::1")
+        || host_no_port.starts_with("127.")
+}
+
+fn preauth_rate_key(headers: &HeaderMap) -> String {
+    if let Some(token) = bearer(headers) {
+        let key_id = token.split_once('.').map(|(id, _)| id).unwrap_or("present");
+        return format!("token:{key_id}");
+    }
+    if let Some(forwarded) = normalized_header(headers, "x-forwarded-for") {
+        return format!("remote:{forwarded}");
+    }
+    normalized_header(headers, "host")
+        .map(|host| format!("host:{host}"))
+        .unwrap_or_else(|| "anonymous".to_string())
+}
+
+fn allow_preauth_request(state: &ApiState, headers: &HeaderMap) -> bool {
+    let key = preauth_rate_key(headers);
+    state
+        .preauth_rate
+        .lock()
+        .map(|mut limiter| limiter.allow(&key))
+        .unwrap_or(true)
+}
+
 /// Authenticate + authorize a request, enforce rate limits, and audit the
 /// outcome. Returns the identity on success.
 fn authorize(
@@ -112,15 +168,22 @@ fn authorize(
     method: &str,
     path: &str,
 ) -> Result<ApiIdentity, ApiError> {
+    if !host_allowed(state, headers) {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "host is not allowed"));
+    }
+    if !allow_preauth_request(state, headers) {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "pre-auth rate limit exceeded",
+        ));
+    }
     let Some(token) = bearer(headers) else {
-        let _ = state.db.record_api_audit(None, method, path, 401, None);
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "missing bearer token",
         ));
     };
     let Some(identity) = state.service.verify_api_key(&token) else {
-        let _ = state.db.record_api_audit(None, method, path, 401, None);
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "invalid API key"));
     };
     if !identity.has_scope(required_scope) {
@@ -157,10 +220,10 @@ pub fn router(state: ApiState) -> Router {
     let cors = if state.cors_allowlist.is_empty() {
         None
     } else {
-        let origins: Vec<axum::http::HeaderValue> = state
+        let origins: Vec<HeaderValue> = state
             .cors_allowlist
             .iter()
-            .filter_map(|o| o.parse().ok())
+            .filter_map(|o| cors_origin(o))
             .collect();
         Some(
             tower_http::cors::CorsLayer::new()
@@ -205,6 +268,18 @@ pub fn router(state: ApiState) -> Router {
         None => router,
     };
     router.with_state(state)
+}
+
+fn cors_origin(origin: &str) -> Option<HeaderValue> {
+    let trimmed = origin.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.is_empty() || lower == "*" || lower == "null" {
+        return None;
+    }
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return None;
+    }
+    trimmed.parse().ok()
 }
 
 async fn health() -> Json<Value> {
@@ -659,7 +734,9 @@ mod tests {
             db,
             workspace_root: "/tmp".to_string(),
             python_path: "python3".to_string(),
+            preauth_rate: Arc::new(Mutex::new(RateLimiter::new(1000, Duration::from_secs(60)))),
             rate: Arc::new(Mutex::new(RateLimiter::new(1000, Duration::from_secs(60)))),
+            host_allowlist: vec![],
             cors_allowlist: vec![],
         };
         (state, key.token)
@@ -672,6 +749,13 @@ mod tests {
             .unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, value)
+    }
+
+    fn audit_count(db: &Database) -> i64 {
+        rusqlite::Connection::open(db.path())
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM api_audit_log", [], |row| row.get(0))
+            .unwrap()
     }
 
     #[tokio::test]
@@ -704,6 +788,102 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_requests_are_preauth_limited_without_audit_spam() {
+        let (mut state, _) = test_state();
+        state.preauth_rate = Arc::new(Mutex::new(RateLimiter::new(1, Duration::from_secs(60))));
+        let db = state.db.clone();
+        let app = router(state);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workflows")
+                    .header("host", "127.0.0.1:9618")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workflows")
+                    .header("host", "127.0.0.1:9618")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            audit_count(&db),
+            0,
+            "pre-auth rejects must not fill audit log"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_loopback_host_headers_are_rejected_by_default() {
+        let (state, token) = test_state();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workflows")
+                    .header("host", "attacker.example")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn cors_only_echoes_exact_configured_http_origins() {
+        let (mut state, _) = test_state();
+        state.cors_allowlist = vec![
+            "https://app.example".into(),
+            "*".into(),
+            "null".into(),
+            "file://local".into(),
+        ];
+        let app = router(state);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header("origin", "https://app.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers().get("access-control-allow-origin").unwrap(),
+            "https://app.example"
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header("origin", "null")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
     }
 
     #[tokio::test]
@@ -870,7 +1050,9 @@ mod tests {
             db,
             workspace_root: "/tmp".into(),
             python_path: "python3".into(),
+            preauth_rate: Arc::new(Mutex::new(RateLimiter::new(1000, Duration::from_secs(60)))),
             rate: Arc::new(Mutex::new(RateLimiter::new(1000, Duration::from_secs(60)))),
+            host_allowlist: vec![],
             cors_allowlist: vec![],
         };
         let app = router(state);
