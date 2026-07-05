@@ -164,6 +164,8 @@ describe("Chaos MCP server", () => {
         "register_workflow",
         "run_workflow_now",
         "set_workflow_spec",
+        "rerun_workflow",
+        "update_workflow",
       ].sort(),
     );
   });

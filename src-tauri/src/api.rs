@@ -316,8 +316,11 @@ pub fn router(state: ApiState) -> Router {
         )
         .route(
             "/api/v1/workflows/{id}",
-            get(get_workflow).delete(delete_workflow),
+            get(get_workflow)
+                .patch(update_workflow)
+                .delete(delete_workflow),
         )
+        .route("/api/v1/workflows/{id}/rerun", post(rerun_workflow))
         .route("/api/v1/workflows/{id}/spec", post(set_spec))
         .route("/api/v1/workflows/{id}/run", post(run_now))
         .route("/api/v1/workflows/{id}/enqueue", post(enqueue))
@@ -506,6 +509,101 @@ async fn delete_workflow(
     Ok(Json(json!({ "deleted": id })))
 }
 
+#[derive(Deserialize)]
+struct UpdateWorkflowBody {
+    name: Option<String>,
+    description: Option<String>,
+    script_path: Option<String>,
+    cron_schedule: Option<String>,
+    enabled: Option<bool>,
+    async_mode: Option<bool>,
+    email_on_failure: Option<bool>,
+    timezone: Option<String>,
+    environment: Option<String>,
+    domain: Option<String>,
+    trigger_config: Option<String>,
+    queue_config: Option<String>,
+}
+
+async fn update_workflow(
+    State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateWorkflowBody>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(
+        &st,
+        &headers,
+        "write",
+        "PATCH",
+        "/api/v1/workflows/{id}",
+        &audit,
+    )?;
+    let existing = st.service.get_workflow(&id)?;
+    let environment = body
+        .environment
+        .clone()
+        .or_else(|| Some(existing.environment.clone()));
+    let draft = WorkflowDraft {
+        name: body.name.unwrap_or(existing.name),
+        description: body.description.or(existing.description),
+        script_path: body.script_path.unwrap_or(existing.script_path),
+        cron_schedule: body.cron_schedule.unwrap_or(existing.cron_schedule),
+        async_mode: body.async_mode.unwrap_or(existing.async_mode),
+        email_on_failure: body.email_on_failure.unwrap_or(existing.email_on_failure),
+        timezone: body.timezone.unwrap_or(existing.timezone),
+        corpus: environment
+            .clone()
+            .unwrap_or_else(|| existing.corpus.clone()),
+        environment,
+        domain: body.domain.or(existing.domain),
+        trigger_config: body.trigger_config.or(existing.trigger_config),
+        queue_config: body.queue_config.or(existing.queue_config),
+    };
+    let enabled = body.enabled.unwrap_or(existing.enabled);
+    let wf = st.service.update_workflow(&id, enabled, draft, true)?;
+    Ok(Json(json!({ "workflow": wf })))
+}
+
+#[derive(Deserialize)]
+struct RerunWorkflowBody {
+    source_run_id: Option<String>,
+    input_override: Option<serde_json::Value>,
+}
+
+async fn rerun_workflow(
+    State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<RerunWorkflowBody>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(
+        &st,
+        &headers,
+        "write",
+        "POST",
+        "/api/v1/workflows/{id}/rerun",
+        &audit,
+    )?;
+    let input_json = body.input_override.as_ref().map(|value| value.to_string());
+    let payload = json!({
+        "source_run_id": body.source_run_id,
+        "input_override": body.input_override,
+    })
+    .to_string();
+    dispatch_with_idempotency(
+        &st,
+        &headers,
+        &id,
+        "api_rerun",
+        Some(payload.as_str()),
+        body.source_run_id.as_deref(),
+        input_json.as_deref(),
+    )
+}
+
 async fn set_spec(
     State(st): State<ApiState>,
     Extension(audit): Extension<AuditTrail>,
@@ -566,6 +664,8 @@ fn dispatch_with_idempotency(
     id: &str,
     trigger_kind: &str,
     payload: Option<&str>,
+    rerun_of_run_id: Option<&str>,
+    input_json: Option<&str>,
 ) -> Result<Json<Value>, ApiError> {
     st.service.ensure_workflow_execution_allowed(id)?;
     let idem = headers
@@ -602,8 +702,8 @@ fn dispatch_with_idempotency(
         trigger_kind,
         trigger_payload: payload,
         upstream_run_id: None,
-        input_json: None,
-        rerun_of_run_id: None,
+        input_json,
+        rerun_of_run_id,
         suppress_completion_triggers: false,
         dedupe: false,
         app_handle: None,
@@ -650,7 +750,7 @@ async fn run_now(
         "/api/v1/workflows/{id}/run",
         &audit,
     )?;
-    dispatch_with_idempotency(&st, &headers, &id, "api_run", None)
+    dispatch_with_idempotency(&st, &headers, &id, "api_run", None, None, None)
 }
 
 async fn enqueue(
@@ -667,7 +767,7 @@ async fn enqueue(
         "/api/v1/workflows/{id}/enqueue",
         &audit,
     )?;
-    dispatch_with_idempotency(&st, &headers, &id, "api_enqueue", None)
+    dispatch_with_idempotency(&st, &headers, &id, "api_enqueue", None, None, None)
 }
 
 /// Inbound signed webhook trigger. Requires write scope; if an
@@ -700,7 +800,7 @@ async fn inbound_dispatch(
     } else {
         Some(body.as_str())
     };
-    dispatch_with_idempotency(&st, &headers, &id, "webhook", payload)
+    dispatch_with_idempotency(&st, &headers, &id, "webhook", payload, None, None)
 }
 
 async fn list_runs(
@@ -1639,6 +1739,113 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn patch_workflow_updates_runtime_fields() {
+        let (state, token) = test_state();
+        let wf = state
+            .db
+            .create_workflow(
+                "Patchable",
+                None,
+                "s.py",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "instance",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/v1/workflows/{}", wf.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "enabled": false,
+                            "cron_schedule": "0 1 * * *",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, value) = body_json(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["workflow"]["enabled"], false);
+        assert_eq!(value["workflow"]["cron_schedule"], "0 1 * * *");
+    }
+
+    #[tokio::test]
+    async fn rerun_workflow_requires_auth_and_dispatches() {
+        let (state, token) = test_state();
+        let wf = state
+            .db
+            .create_workflow(
+                "Rerun",
+                None,
+                "s.py",
+                "0 0 * * *",
+                true,
+                false,
+                "UTC",
+                "instance",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let source = state
+            .db
+            .create_run_with_context(&wf.id, Some("manual"), None, None, None, None)
+            .unwrap();
+        state
+            .db
+            .finish_run(&source.id, 1, "", "failed", None)
+            .unwrap();
+        let app = router(state);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workflows/{}/rerun", wf.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "source_run_id": source.id }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workflows/{}/rerun", wf.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "source_run_id": source.id }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, value) = body_json(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(value.get("run_id").is_some() || value.get("queued_run_id").is_some());
     }
 
     /// A previously-recorded `Idempotency-Key` short-circuits dispatch and

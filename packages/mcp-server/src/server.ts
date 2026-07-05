@@ -274,6 +274,63 @@ export function buildServer(deps: ServerDeps): McpServer {
   );
 
   tool(
+    "update_workflow",
+    {
+      title: "Update workflow",
+      description:
+        "Patch workflow metadata/runtime preferences (cron, enabled, environment, etc.).",
+      inputSchema: {
+        id: z.string(),
+        name: z.string().optional(),
+        description: z.string().nullable().optional(),
+        script_path: z.string().optional(),
+        cron_schedule: z.string().optional(),
+        enabled: z.boolean().optional(),
+        async_mode: z.boolean().optional(),
+        email_on_failure: z.boolean().optional(),
+        timezone: z.string().optional(),
+        environment: z.string().optional(),
+        domain: z.string().nullable().optional(),
+        trigger_config: z.string().nullable().optional(),
+        queue_config: z.string().nullable().optional(),
+      },
+    },
+    async (args) => {
+      const { id, ...patch } = args;
+      await assertWorkflowWritable(id);
+      return jsonResult(await client.updateWorkflow(id, patch));
+    },
+  );
+
+  tool(
+    "rerun_workflow",
+    {
+      title: "Rerun workflow",
+      description:
+        "Rerun a workflow from a prior run, optionally overriding input JSON. Supports idempotency_key.",
+      inputSchema: {
+        id: z.string().describe("Workflow id"),
+        source_run_id: z
+          .string()
+          .optional()
+          .describe("Run id to copy inputs from"),
+        input_override: z.unknown().optional().describe("JSON input override"),
+        idempotency_key: z.string().optional(),
+      },
+    },
+    async (args) => {
+      await assertWorkflowWritable(args.id);
+      return jsonResult(
+        await client.rerunWorkflow(args.id, {
+          sourceRunId: args.source_run_id,
+          inputOverride: args.input_override,
+          idempotencyKey: args.idempotency_key,
+        }),
+      );
+    },
+  );
+
+  tool(
     "delete_workflow",
     {
       title: "Delete workflow",

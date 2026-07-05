@@ -265,4 +265,50 @@ describe("ChaosSchedulerClient", () => {
       `${BASE}/api/v1/queued-runs`,
     ]);
   });
+  it("patches a workflow via PATCH", async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      status: 200,
+      json: {
+        workflow: { id: "w1", enabled: false, cron_schedule: "0 1 * * *" },
+      },
+    }));
+    const client = new ChaosSchedulerClient({
+      baseUrl: BASE,
+      apiKey: "id.secret",
+      fetch,
+    });
+    const wf = await client.updateWorkflow("w1", {
+      enabled: false,
+      cron_schedule: "0 1 * * *",
+    });
+    expect(wf.enabled).toBe(false);
+    expect(calls[0]!.method).toBe("PATCH");
+    expect(calls[0]!.url).toBe(`${BASE}/api/v1/workflows/w1`);
+  });
+
+  it("reruns a workflow with source run and idempotency key", async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      status: 200,
+      json: {
+        workflow_id: "w1",
+        status: "admitted",
+        run_id: "r2",
+        queued_run_id: null,
+        queue_name: "instance-default",
+      },
+    }));
+    const client = new ChaosSchedulerClient({
+      baseUrl: BASE,
+      apiKey: "id.secret",
+      fetch,
+    });
+    const res = await client.rerunWorkflow("w1", {
+      sourceRunId: "r1",
+      idempotencyKey: "rerun-1",
+    });
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.url).toBe(`${BASE}/api/v1/workflows/w1/rerun`);
+    expect(calls[0]!.headers?.["idempotency-key"]).toBe("rerun-1");
+    if (!isDuplicateDispatch(res)) expect(res.run_id).toBe("r2");
+  });
 });

@@ -303,4 +303,31 @@ export interface CreateEnvironmentInput {
 }
 
 /** Scopes recognized by the backend API-key model (`service.rs`). */
+
+/** Partial update body for `PATCH /workflows/{id}` (`api.rs::UpdateWorkflowBody`). */
+export interface UpdateWorkflowInput {
+  name?: string;
+  description?: string | null;
+  script_path?: string;
+  cron_schedule?: string;
+  enabled?: boolean;
+  async_mode?: boolean;
+  email_on_failure?: boolean;
+  timezone?: string;
+  environment?: string;
+  domain?: string | null;
+  trigger_config?: string | null;
+  queue_config?: string | null;
+}
+
+/** Options for `POST /workflows/{id}/rerun`. */
+export interface RerunWorkflowOptions {
+  /** Value for the `Idempotency-Key` header (safe replay). */
+  idempotencyKey?: string;
+  /** Prior run to copy inputs from. */
+  sourceRunId?: string;
+  /** JSON input override merged into the rerun dispatch. */
+  inputOverride?: unknown;
+}
+
 export type ApiScope = "read" | "write" | "admin";
