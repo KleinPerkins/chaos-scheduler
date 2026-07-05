@@ -8,6 +8,7 @@
 use crate::service::ProcessRunner;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 
 /// A minimal HTTP response used by operators.
 #[derive(Debug, Clone)]
@@ -131,6 +132,141 @@ impl Default for OperatorRegistry {
     }
 }
 
+/// Allowed transports for `git_pull` `repo_url`: HTTPS and SSH only. This
+/// rejects git's local / transport-helper syntaxes (`ext::`, `fd::`, `file://`,
+/// `http://`, `git://`, ...) that can execute commands or read local files.
+fn validate_git_url(url: &str) -> Result<(), String> {
+    let u = url.trim();
+    if u.is_empty() {
+        return Err("git_pull: `repo_url` must not be empty".into());
+    }
+    if u.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(
+            "git_pull: `repo_url` must not contain whitespace or control characters".into(),
+        );
+    }
+    if u.starts_with('-') {
+        return Err("git_pull: `repo_url` must not begin with '-'".into());
+    }
+    // Transport-helper syntax (e.g. `ext::`, `fd::`) uses `::`.
+    if u.contains("::") {
+        return Err("git_pull: `repo_url` transport-helper syntax is not allowed".into());
+    }
+    let lower = u.to_ascii_lowercase();
+    let allowed =
+        lower.starts_with("https://") || lower.starts_with("ssh://") || is_scp_like_ssh(u);
+    if allowed {
+        Ok(())
+    } else {
+        Err("git_pull: `repo_url` scheme not allowed (only https:// and ssh are permitted)".into())
+    }
+}
+
+/// scp-like SSH syntax: `user@host:path` (no explicit scheme). Requires a
+/// non-empty user, a hostname-shaped host, and a `:` that precedes any `/`.
+fn is_scp_like_ssh(u: &str) -> bool {
+    let Some(at) = u.find('@') else {
+        return false;
+    };
+    let (user, rest) = (&u[..at], &u[at + 1..]);
+    if user.is_empty() || user.contains('/') {
+        return false;
+    }
+    let Some(colon) = rest.find(':') else {
+        return false;
+    };
+    let host = &rest[..colon];
+    if host.is_empty() || host.contains('/') {
+        return false;
+    }
+    host.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
+/// Reject branch / ref names that could smuggle git options or shell / control
+/// characters (defense in depth on top of the `--` positional separator).
+fn validate_git_ref(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("git_pull: `branch` must not be empty".into());
+    }
+    if name.starts_with('-') {
+        return Err("git_pull: `branch` must not begin with '-'".into());
+    }
+    if name.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("git_pull: `branch` must not contain whitespace or control characters".into());
+    }
+    Ok(())
+}
+
+/// Resolve `requested` to an absolute path confined within `workspace_root`,
+/// defeating `..` traversal and symlink escapes. Relative paths are joined onto
+/// the workspace root. The deepest existing ancestor is canonicalized (so a
+/// symlink cannot redirect outside the root) and any not-yet-created tail (the
+/// clone target) is re-appended.
+fn confine_path_under_root(workspace_root: &str, requested: &str) -> Result<PathBuf, String> {
+    if workspace_root.trim().is_empty() {
+        return Err("git_pull: workspace_root is not configured".into());
+    }
+    let root = std::fs::canonicalize(workspace_root)
+        .map_err(|e| format!("git_pull: invalid workspace_root '{workspace_root}': {e}"))?;
+    let requested_path = Path::new(requested);
+    let absolute = if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        root.join(requested_path)
+    };
+    let normalized = normalize_lexical(&absolute);
+    let resolved = canonicalize_existing_prefix(&normalized)?;
+    if resolved == root || resolved.starts_with(&root) {
+        Ok(resolved)
+    } else {
+        Err(format!(
+            "git_pull: path '{requested}' escapes workspace_root"
+        ))
+    }
+}
+
+/// Lexically normalize a path (resolve `.` and `..`) without touching the FS.
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Canonicalize the longest existing ancestor of `path`, then re-append the
+/// remaining (not-yet-existing) components. Defeats symlink escapes on the
+/// portion of the path that exists (e.g. `/tmp` -> `/private/tmp` on macOS).
+fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf, String> {
+    let mut existing = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        match existing.file_name() {
+            Some(name) => {
+                tail.push(name.to_os_string());
+                match existing.parent() {
+                    Some(parent) => existing = parent.to_path_buf(),
+                    None => break,
+                }
+            }
+            None => break,
+        }
+    }
+    let mut resolved = std::fs::canonicalize(&existing)
+        .map_err(|e| format!("git_pull: cannot resolve path prefix: {e}"))?;
+    for name in tail.iter().rev() {
+        resolved.push(name);
+    }
+    Ok(resolved)
+}
+
 /// `git_pull` — clone (if absent) or fast-forward/rebase a repository via the
 /// system `git`. Config:
 /// `{ "path": "...", "repo_url"?: "...", "branch"?: "...", "rebase"?: bool, "depth"?: u32 }`.
@@ -157,6 +293,12 @@ impl Operator for GitPullOperator {
                 return Err("git_pull `rebase` must be a boolean".into());
             }
         }
+        if let Some(url) = config.get("repo_url").and_then(|v| v.as_str()) {
+            validate_git_url(url)?;
+        }
+        if let Some(branch) = config.get("branch").and_then(|v| v.as_str()) {
+            validate_git_ref(branch)?;
+        }
         Ok(())
     }
 
@@ -173,6 +315,19 @@ impl Operator for GitPullOperator {
         let repo_url = config.get("repo_url").and_then(|v| v.as_str());
         let depth = config.get("depth").and_then(|v| v.as_u64());
 
+        if let Some(b) = branch {
+            if let Err(e) = validate_git_ref(b) {
+                return OperatorOutcome::failure(e);
+            }
+        }
+
+        // Confine the clone/working path under the workspace root, defeating
+        // `..` traversal and symlink escapes before it ever reaches `git`.
+        let path = match confine_path_under_root(ctx.workspace_root, &path) {
+            Ok(p) => p.to_string_lossy().to_string(),
+            Err(e) => return OperatorOutcome::failure(e),
+        };
+
         let git_dir_exists = std::path::Path::new(&path).join(".git").exists();
 
         let args: Vec<String> = if !git_dir_exists {
@@ -182,6 +337,9 @@ impl Operator for GitPullOperator {
                     "git_pull: path is not a git repo and no repo_url was provided to clone",
                 );
             };
+            if let Err(e) = validate_git_url(url) {
+                return OperatorOutcome::failure(e);
+            }
             let mut a = vec!["clone".to_string()];
             if let Some(d) = depth {
                 a.push("--depth".to_string());
@@ -191,6 +349,9 @@ impl Operator for GitPullOperator {
                 a.push("--branch".to_string());
                 a.push(b.to_string());
             }
+            // `--` terminates option parsing so a crafted URL or path beginning
+            // with `-` can never be reinterpreted as a git flag.
+            a.push("--".to_string());
             a.push(url.to_string());
             a.push(path.clone());
             a
@@ -201,6 +362,7 @@ impl Operator for GitPullOperator {
                 a.push("--rebase".to_string());
             }
             if let Some(b) = branch {
+                a.push("--".to_string());
                 a.push("origin".to_string());
                 a.push(b.to_string());
             }
@@ -646,6 +808,134 @@ mod tests {
         let calls = runner.calls.lock().unwrap();
         assert_eq!(calls[0].0, "git");
         assert_eq!(calls[0].1[0], "clone");
+    }
+
+    #[test]
+    fn git_pull_validate_rejects_dangerous_url_schemes() {
+        let op = GitPullOperator;
+        // Transport-helper and non-https/ssh schemes are rejected.
+        for bad in [
+            "ext::sh -c 'touch /tmp/pwned'",
+            "file:///etc/passwd",
+            "http://example.com/r.git",
+            "git://example.com/r.git",
+            "-oProxyCommand=evil",
+            "fd::17/foo",
+        ] {
+            assert!(
+                op.validate(&serde_json::json!({"path": "/tmp/repo", "repo_url": bad}))
+                    .is_err(),
+                "expected rejection for repo_url: {bad}"
+            );
+        }
+        // HTTPS and SSH transports are accepted.
+        for good in [
+            "https://example.com/r.git",
+            "ssh://git@example.com/org/r.git",
+            "git@github.com:org/repo.git",
+        ] {
+            assert!(
+                op.validate(&serde_json::json!({"path": "/tmp/repo", "repo_url": good}))
+                    .is_ok(),
+                "expected acceptance for repo_url: {good}"
+            );
+        }
+        // Branch names that could smuggle options are rejected.
+        assert!(op
+            .validate(&serde_json::json!({"path": "/tmp/repo", "branch": "--upload-pack=evil"}))
+            .is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn git_pull_clone_confines_path_and_terminates_options() {
+        let root = std::env::temp_dir().join(format!("chaos-gp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let http = NoopHttp;
+        let secrets = no_secrets();
+        let root_str = root.to_string_lossy().to_string();
+        let ctx = OperatorContext {
+            runner: &runner,
+            http: &http,
+            secrets: &secrets,
+            workspace_root: &root_str,
+        };
+        // Relative path is joined onto the workspace root.
+        let outcome = GitPullOperator.execute(
+            &ctx,
+            &serde_json::json!({"path": "repo", "repo_url": "https://example.com/r.git"}),
+        );
+        assert!(outcome.success, "{}", outcome.summary);
+        let calls = runner.calls.lock().unwrap();
+        let args = &calls[0].1;
+        assert_eq!(args[0], "clone");
+        // `--` must separate options from the positional url + path.
+        let sep = args.iter().position(|a| a == "--").expect("`--` present");
+        assert_eq!(args[sep + 1], "https://example.com/r.git");
+        let confined = &args[sep + 2];
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        assert!(
+            std::path::Path::new(confined).starts_with(&canonical_root),
+            "clone path {confined} must be confined under {canonical_root:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn git_pull_rejects_path_escaping_workspace_root() {
+        let root = std::env::temp_dir().join(format!("chaos-gp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let http = NoopHttp;
+        let secrets = no_secrets();
+        let root_str = root.to_string_lossy().to_string();
+        let ctx = OperatorContext {
+            runner: &runner,
+            http: &http,
+            secrets: &secrets,
+            workspace_root: &root_str,
+        };
+        // Traversal outside the workspace root is refused before git runs.
+        let outcome = GitPullOperator.execute(
+            &ctx,
+            &serde_json::json!({"path": "../../../../etc", "repo_url": "https://example.com/r.git"}),
+        );
+        assert!(!outcome.success);
+        assert!(outcome.summary.contains("escapes workspace_root"));
+        assert!(runner.calls.lock().unwrap().is_empty(), "git must not run");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn git_pull_execute_rejects_bad_url_before_running_git() {
+        let root = std::env::temp_dir().join(format!("chaos-gp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let http = NoopHttp;
+        let secrets = no_secrets();
+        let root_str = root.to_string_lossy().to_string();
+        let ctx = OperatorContext {
+            runner: &runner,
+            http: &http,
+            secrets: &secrets,
+            workspace_root: &root_str,
+        };
+        let outcome = GitPullOperator.execute(
+            &ctx,
+            &serde_json::json!({"path": "repo", "repo_url": "ext::sh -c evil"}),
+        );
+        assert!(!outcome.success);
+        assert!(runner.calls.lock().unwrap().is_empty(), "git must not run");
     }
 
     #[test]
