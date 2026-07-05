@@ -65,32 +65,52 @@ function cronFromState(s: ScheduleState): string {
   if (s.frequency === "hourly") {
     return `0 0 */${s.interval} * * * *`;
   }
-  return s.times.map((t) => {
-    const h = to24Hour(t.hour, t.ampm);
-    switch (s.frequency) {
-      case "daily":
-        return `0 ${t.minute} ${h} * * * *`;
-      case "weekdays":
-        return `0 ${t.minute} ${h} * * Mon-Fri *`;
-      case "weekly":
-        return `0 ${t.minute} ${h} * * ${s.selectedDays.join(",")} *`;
-      case "monthly":
-        return `0 ${t.minute} ${h} ${s.dayOfMonth} * * *`;
-    }
-  }).join("; ");
+  return s.times
+    .map((t) => {
+      const h = to24Hour(t.hour, t.ampm);
+      switch (s.frequency) {
+        case "daily":
+          return `0 ${t.minute} ${h} * * * *`;
+        case "weekdays":
+          return `0 ${t.minute} ${h} * * Mon-Fri *`;
+        case "weekly":
+          return `0 ${t.minute} ${h} * * ${s.selectedDays.join(",")} *`;
+        case "monthly":
+          return `0 ${t.minute} ${h} ${s.dayOfMonth} * * *`;
+      }
+    })
+    .join("; ");
 }
 
 const DAY_NAMES_LONG: Record<string, string> = {
-  Mon: "Monday", Tue: "Tuesday", Wed: "Wednesday",
-  Thu: "Thursday", Fri: "Friday", Sat: "Saturday", Sun: "Sunday",
+  Mon: "Monday",
+  Tue: "Tuesday",
+  Wed: "Wednesday",
+  Thu: "Thursday",
+  Fri: "Friday",
+  Sat: "Saturday",
+  Sun: "Sunday",
 };
 
 const DAY_INDICES: Record<string, number> = {
-  Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
+  Sun: 0,
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
 };
 
 const NUM_TO_DAY: Record<number, string> = {
-  0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat", 7: "Sun",
+  0: "Sun",
+  1: "Mon",
+  2: "Tue",
+  3: "Wed",
+  4: "Thu",
+  5: "Fri",
+  6: "Sat",
+  7: "Sun",
 };
 
 function normalizeCron(cron: string): string {
@@ -111,31 +131,42 @@ function normalizeDow(dow: string): string {
 const LOCAL_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 function convertCronFields(
-  cronHour: number, cronMinute: number, fromTz: string,
+  cronHour: number,
+  cronMinute: number,
+  fromTz: string,
 ): { hour: number; minute: number; dowShift: number } {
   if (fromTz === LOCAL_TZ) {
     return { hour: cronHour, minute: cronMinute, dowShift: 0 };
   }
   // Use a reference Monday (Jan 6, 2025 is a Monday) in UTC
-  const ref = fromTz === "UTC"
-    ? new Date(Date.UTC(2025, 0, 6, cronHour, cronMinute, 0))
-    : (() => {
-        // For arbitrary timezone: approximate using UTC offset difference
-        // Create a date at the given hour in UTC, then find offset of fromTz
-        const d = new Date(Date.UTC(2025, 0, 6, cronHour, cronMinute, 0));
-        const utcStr = d.toLocaleString("en-US", { timeZone: "UTC", hour12: false });
-        const tzStr = d.toLocaleString("en-US", { timeZone: fromTz, hour12: false });
-        const utcH = parseInt(utcStr.split(", ")[1]?.split(":")[0] ?? "0");
-        const tzH = parseInt(tzStr.split(", ")[1]?.split(":")[0] ?? "0");
-        const offsetH = tzH - utcH;
-        // The ref date is when it's cronHour in fromTz, so subtract that offset
-        return new Date(Date.UTC(2025, 0, 6, cronHour - offsetH, cronMinute, 0));
-      })();
+  const ref =
+    fromTz === "UTC"
+      ? new Date(Date.UTC(2025, 0, 6, cronHour, cronMinute, 0))
+      : (() => {
+          // For arbitrary timezone: approximate using UTC offset difference
+          // Create a date at the given hour in UTC, then find offset of fromTz
+          const d = new Date(Date.UTC(2025, 0, 6, cronHour, cronMinute, 0));
+          const utcStr = d.toLocaleString("en-US", {
+            timeZone: "UTC",
+            hour12: false,
+          });
+          const tzStr = d.toLocaleString("en-US", {
+            timeZone: fromTz,
+            hour12: false,
+          });
+          const utcH = parseInt(utcStr.split(", ")[1]?.split(":")[0] ?? "0");
+          const tzH = parseInt(tzStr.split(", ")[1]?.split(":")[0] ?? "0");
+          const offsetH = tzH - utcH;
+          // The ref date is when it's cronHour in fromTz, so subtract that offset
+          return new Date(
+            Date.UTC(2025, 0, 6, cronHour - offsetH, cronMinute, 0),
+          );
+        })();
   const localDay = ref.getDay(); // 0=Sun..6=Sat
   const utcDay = ref.getUTCDay();
   const refDay = fromTz === "UTC" ? utcDay : 1; // Monday=1
   let dowShift = localDay - refDay;
-  if (dowShift > 1) dowShift = -1;   // wrapped around week boundary
+  if (dowShift > 1) dowShift = -1; // wrapped around week boundary
   if (dowShift < -1) dowShift = 1;
   return { hour: ref.getHours(), minute: ref.getMinutes(), dowShift };
 }
@@ -150,7 +181,10 @@ function shiftDayName(day: string, shift: number): string {
 
 export function cronToHuman(cron: string, timezone?: string): string {
   if (cron.includes(";")) {
-    const parts = cron.split(";").map((c) => cronToHuman(c.trim(), timezone)).filter(Boolean);
+    const parts = cron
+      .split(";")
+      .map((c) => cronToHuman(c.trim(), timezone))
+      .filter(Boolean);
     return parts.join(" and ");
   }
   const needsConvert = timezone && timezone !== LOCAL_TZ;
@@ -170,12 +204,16 @@ export function cronToHuman(cron: string, timezone?: string): string {
         let dowShift = 0;
         if (needsConvert) {
           const conv = convertCronFields(h, m, timezone!);
-          h = conv.hour; m = conv.minute; dowShift = conv.dowShift;
+          h = conv.hour;
+          m = conv.minute;
+          dowShift = conv.dowShift;
         }
         if (dow === "Mon-Fri") {
           pieces.push("Weekdays");
         } else if (dow !== "*") {
-          const converted = dow.split(",").map((d) => shiftDayName(d, dowShift));
+          const converted = dow
+            .split(",")
+            .map((d) => shiftDayName(d, dowShift));
           pieces.push(converted.map((d) => DAY_NAMES_LONG[d] || d).join(", "));
         }
         if (dom !== "*") pieces.push(`day ${dom}`);
@@ -183,7 +221,13 @@ export function cronToHuman(cron: string, timezone?: string): string {
         pieces.push(`at ${h12}:${String(m).padStart(2, "0")} ${ampm}`);
       } else {
         if (dow === "Mon-Fri") pieces.push("Weekdays");
-        else if (dow !== "*") pieces.push(dow.split(",").map((d) => DAY_NAMES_LONG[d] || d).join(", "));
+        else if (dow !== "*")
+          pieces.push(
+            dow
+              .split(",")
+              .map((d) => DAY_NAMES_LONG[d] || d)
+              .join(", "),
+          );
         if (dom !== "*") pieces.push(`day ${dom}`);
       }
       return pieces.join(" ") || cron;
@@ -250,7 +294,12 @@ function parseSingleCron(cron: string): ScheduleState | null {
   if (hour.startsWith("*/")) {
     const interval = parseInt(hour.slice(2));
     if (HOUR_INTERVALS.includes(interval)) {
-      return { ...DEFAULT_STATE, frequency: "hourly", interval, times: [{ ...DEFAULT_TIME }] };
+      return {
+        ...DEFAULT_STATE,
+        frequency: "hourly",
+        interval,
+        times: [{ ...DEFAULT_TIME }],
+      };
     }
     return null;
   }
@@ -262,7 +311,12 @@ function parseSingleCron(cron: string): ScheduleState | null {
   if (dom !== "*") {
     const d = parseInt(dom);
     if (!isNaN(d) && d >= 1 && d <= 28 && dow === "*") {
-      return { ...DEFAULT_STATE, frequency: "monthly", dayOfMonth: d, times: [time] };
+      return {
+        ...DEFAULT_STATE,
+        frequency: "monthly",
+        dayOfMonth: d,
+        times: [time],
+      };
     }
     return null;
   }
@@ -277,7 +331,12 @@ function parseSingleCron(cron: string): ScheduleState | null {
 
   const dayList = dow.split(",").filter((d) => d in DAY_NAMES_LONG);
   if (dayList.length > 0) {
-    return { ...DEFAULT_STATE, frequency: "weekly", selectedDays: dayList, times: [time] };
+    return {
+      ...DEFAULT_STATE,
+      frequency: "weekly",
+      selectedDays: dayList,
+      times: [time],
+    };
   }
 
   return null;
@@ -304,7 +363,10 @@ function convertState(s: ScheduleState, fromTz: string): ScheduleState {
 
 function stateFromCron(cron: string, timezone?: string): ScheduleState | null {
   if (cron.includes(";")) {
-    const subExprs = cron.split(";").map((s) => s.trim()).filter(Boolean);
+    const subExprs = cron
+      .split(";")
+      .map((s) => s.trim())
+      .filter(Boolean);
     if (subExprs.length === 0) return null;
     const states = subExprs.map((s) => parseSingleCron(s));
     if (states.some((s) => s === null)) return null;
@@ -312,7 +374,8 @@ function stateFromCron(cron: string, timezone?: string): ScheduleState | null {
     const allMatch = states.every(
       (s) =>
         s!.frequency === first.frequency &&
-        JSON.stringify(s!.selectedDays) === JSON.stringify(first.selectedDays) &&
+        JSON.stringify(s!.selectedDays) ===
+          JSON.stringify(first.selectedDays) &&
         s!.dayOfMonth === first.dayOfMonth &&
         s!.interval === first.interval,
     );
@@ -330,16 +393,21 @@ function getNextRun(s: ScheduleState): Date | null {
   if (s.frequency === "hourly") {
     const next = new Date(now);
     next.setMinutes(0, 0, 0);
-    next.setHours(next.getHours() + s.interval - (next.getHours() % s.interval));
+    next.setHours(
+      next.getHours() + s.interval - (next.getHours() % s.interval),
+    );
     if (next <= now) next.setHours(next.getHours() + s.interval);
     return next;
   }
 
   const targetDays =
-    s.frequency === "daily" ? [0, 1, 2, 3, 4, 5, 6]
-    : s.frequency === "weekdays" ? [1, 2, 3, 4, 5]
-    : s.frequency === "monthly" ? null
-    : s.selectedDays.map((d) => DAY_INDICES[d]).sort((a, b) => a - b);
+    s.frequency === "daily"
+      ? [0, 1, 2, 3, 4, 5, 6]
+      : s.frequency === "weekdays"
+        ? [1, 2, 3, 4, 5]
+        : s.frequency === "monthly"
+          ? null
+          : s.selectedDays.map((d) => DAY_INDICES[d]).sort((a, b) => a - b);
 
   let earliest: Date | null = null;
 
@@ -347,7 +415,15 @@ function getNextRun(s: ScheduleState): Date | null {
     const h = to24Hour(t.hour, t.ampm);
 
     if (s.frequency === "monthly") {
-      const next = new Date(now.getFullYear(), now.getMonth(), s.dayOfMonth, h, t.minute, 0, 0);
+      const next = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        s.dayOfMonth,
+        h,
+        t.minute,
+        0,
+        0,
+      );
       if (next <= now) next.setMonth(next.getMonth() + 1);
       if (!earliest || next < earliest) earliest = next;
       continue;
@@ -373,13 +449,29 @@ function getNextRun(s: ScheduleState): Date | null {
 function formatNextRun(d: Date | null): string {
   if (!d) return "";
   const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const months = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
   const { hour, ampm } = to12Hour(d.getHours());
   return `${days[d.getDay()]}, ${months[d.getMonth()]} ${d.getDate()} at ${hour}:${String(d.getMinutes()).padStart(2, "0")} ${ampm}`;
 }
 
 function validateRawCron(cron: string): string | null {
-  const segments = cron.split(";").map((s) => s.trim()).filter(Boolean);
+  const segments = cron
+    .split(";")
+    .map((s) => s.trim())
+    .filter(Boolean);
   if (segments.length === 0) return "Expression is empty";
   for (const seg of segments) {
     const parts = seg.split(/\s+/);
@@ -417,7 +509,9 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
   const updateTimeAt = useCallback(
     (idx: number, patch: Partial<TimeEntry>) => {
       setState((prev) => {
-        const nextTimes = prev.times.map((t, i) => (i === idx ? { ...t, ...patch } : t));
+        const nextTimes = prev.times.map((t, i) =>
+          i === idx ? { ...t, ...patch } : t,
+        );
         const next = { ...prev, times: nextTimes };
         onChange(cronFromState(next));
         return next;
@@ -460,7 +554,9 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
         setIsAdvanced(false);
         setRawError(null);
       } else {
-        setRawError("Cannot parse this expression into the visual builder. Edit it here or clear to start fresh.");
+        setRawError(
+          "Cannot parse this expression into the visual builder. Edit it here or clear to start fresh.",
+        );
       }
     } else {
       setRawCron(cronFromState(state));
@@ -482,21 +578,33 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
       ? current.filter((d) => d !== day)
       : [...current, day];
     if (next.length === 0) return;
-    const ordered = DAYS_OF_WEEK.map((d) => d.key).filter((k) => next.includes(k));
+    const ordered = DAYS_OF_WEEK.map((d) => d.key).filter((k) =>
+      next.includes(k),
+    );
     updateState({ selectedDays: ordered });
   };
 
-  const preview = isAdvanced ? cronToHuman(rawCron, timezone) : humanFromState(state);
+  const preview = isAdvanced
+    ? cronToHuman(rawCron, timezone)
+    : humanFromState(state);
   const nextRun = isAdvanced ? null : getNextRun(state);
 
   return (
     <div className="sched-builder">
-      <label className="editor-label">Schedule</label>
+      <span className="editor-label">Schedule</span>
 
       {!isAdvanced && (
         <>
           <div className="sched-freq-bar">
-            {(["hourly", "daily", "weekdays", "weekly", "monthly"] as Frequency[]).map((f) => (
+            {(
+              [
+                "hourly",
+                "daily",
+                "weekdays",
+                "weekly",
+                "monthly",
+              ] as Frequency[]
+            ).map((f) => (
               <button
                 key={f}
                 type="button"
@@ -514,7 +622,9 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                 <span className="sched-label">Every</span>
                 <select
                   value={state.interval}
-                  onChange={(e) => updateState({ interval: parseInt(e.target.value) })}
+                  onChange={(e) =>
+                    updateState({ interval: parseInt(e.target.value) })
+                  }
                 >
                   {HOUR_INTERVALS.map((n) => (
                     <option key={n} value={n}>
@@ -522,7 +632,9 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                     </option>
                   ))}
                 </select>
-                <span className="sched-label">{state.interval === 1 ? "hour" : "hours"}</span>
+                <span className="sched-label">
+                  {state.interval === 1 ? "hour" : "hours"}
+                </span>
               </div>
             )}
 
@@ -537,7 +649,9 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                     title={DAY_NAMES_LONG[d.key]}
                   >
                     <span className="sched-day-letter">{d.label}</span>
-                    <span className="sched-day-abbr">{["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][i]}</span>
+                    <span className="sched-day-abbr">
+                      {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][i]}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -548,7 +662,9 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                 <span className="sched-label">On day</span>
                 <select
                   value={state.dayOfMonth}
-                  onChange={(e) => updateState({ dayOfMonth: parseInt(e.target.value) })}
+                  onChange={(e) =>
+                    updateState({ dayOfMonth: parseInt(e.target.value) })
+                  }
                 >
                   {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
                     <option key={d} value={d}>
@@ -566,7 +682,9 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                     <span className="sched-label">At</span>
                     <select
                       value={t.hour}
-                      onChange={(e) => updateTimeAt(idx, { hour: parseInt(e.target.value) })}
+                      onChange={(e) =>
+                        updateTimeAt(idx, { hour: parseInt(e.target.value) })
+                      }
                     >
                       {Array.from({ length: 12 }, (_, i) => i + 1).map((h) => (
                         <option key={h} value={h}>
@@ -577,7 +695,9 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                     <span className="sched-colon">:</span>
                     <select
                       value={t.minute}
-                      onChange={(e) => updateTimeAt(idx, { minute: parseInt(e.target.value) })}
+                      onChange={(e) =>
+                        updateTimeAt(idx, { minute: parseInt(e.target.value) })
+                      }
                     >
                       {MINUTES.map((m) => (
                         <option key={m} value={m}>
@@ -637,7 +757,8 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
           />
           {rawError && <span className="sched-error">{rawError}</span>}
           <span className="editor-hint">
-            7-field cron: sec min hour day month weekday year. Use ; to separate multiple schedules.
+            7-field cron: sec min hour day month weekday year. Use ; to separate
+            multiple schedules.
             {timezone && timezone !== LOCAL_TZ
               ? ` Fields are in ${timezone}.`
               : " Fields are in local time."}

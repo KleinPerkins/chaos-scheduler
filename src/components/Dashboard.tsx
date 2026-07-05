@@ -182,6 +182,11 @@ export default function Dashboard() {
           </button>
           <button
             className={`sidebar-link ${["workflows", "editor", "history", "detail"].includes(nav.view) ? "active" : ""}`}
+            aria-current={
+              ["workflows", "editor", "history", "detail"].includes(nav.view)
+                ? "page"
+                : undefined
+            }
             onClick={() => setNav({ view: "workflows" })}
           >
             <span className="sidebar-icon">&#9776;</span>

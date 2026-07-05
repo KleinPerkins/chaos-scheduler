@@ -423,7 +423,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
 
         {kind === "generic" ? (
           <div className="editor-field">
-            <label className="editor-label">Steps</label>
+            <span className="editor-label">Steps</span>
             <span className="editor-hint">
               Each step runs a command or script. Use “Depends on” to sequence
               steps into a DAG; independent steps run in parallel. Cycles are
@@ -437,7 +437,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           </div>
         ) : (
           <div className="editor-field">
-            <label className="editor-label">Operator</label>
+            <span className="editor-label">Operator</span>
             <OperatorConfigForm
               spec={typedSpec}
               onChange={setTypedSpec}
@@ -449,7 +449,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
         <div className="editor-field">
           {isManaged ? (
             <>
-              <label className="editor-label">Schedule</label>
+              <span className="editor-label">Schedule</span>
               <div className="editor-hint">
                 {cronToHuman(
                   workflow?.cron_schedule ?? cronSchedule,

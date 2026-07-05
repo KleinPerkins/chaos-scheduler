@@ -4,14 +4,14 @@
   --bg-tertiary: #242736;
   --bg-hover: #2a2e3d;
   --text-primary: #e8eaed;
-  --text-secondary: #9aa0a6;
-  --text-muted: #8b9199;
-  --accent: #7c6cff;
-  --accent-hover: #6b5ce7;
-  --success: #34a853;
-  --error: #ea4335;
+  --text-secondary: #b0b6bd;
+  --text-muted: #c5cad1;
+  --accent: #6355e8;
+  --accent-hover: #5749d4;
+  --success: #5fd68a;
+  --error: #f28b82;
   --warning: #fbbc04;
-  --running: #4285f4;
+  --running: #6ea8fe;
   --border: #2e3140;
   --radius: 8px;
   --radius-lg: 12px;
@@ -116,24 +116,30 @@ a:focus-visible,
   letter-spacing: 0.5px;
 }
 
-.status-badge.success {
-  background: rgba(52, 168, 83, 0.15);
-  color: var(--success);
+.status-badge.success,
+.status-badge.succeeded {
+  background: rgba(95, 214, 138, 0.22);
+  color: #c8f7d8;
 }
 
 .status-badge.failed {
-  background: rgba(234, 67, 53, 0.15);
-  color: var(--error);
+  background: rgba(242, 139, 130, 0.22);
+  color: #ffd5d1;
 }
 
 .status-badge.poll_exhausted {
-  background: rgba(251, 188, 4, 0.15);
-  color: #c9a000;
+  background: rgba(251, 188, 4, 0.22);
+  color: #ffe8a3;
+}
+
+.status-badge.stale {
+  background: rgba(242, 139, 130, 0.18);
+  color: #ffd5d1;
 }
 
 .status-badge.running {
-  background: rgba(66, 133, 244, 0.15);
-  color: var(--running);
+  background: rgba(110, 168, 254, 0.22);
+  color: #c5dcff;
 }
 
 .btn {
@@ -157,7 +163,7 @@ a:focus-visible,
 
 .btn-ghost {
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--text-primary);
 }
 
 .btn-ghost:hover {

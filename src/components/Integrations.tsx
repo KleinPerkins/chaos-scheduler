@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   createApiKey,
   listApiKeys,
@@ -58,6 +58,16 @@ export default function Integrations() {
   );
   const [copied, setCopied] = useState<string | null>(null);
   const [revokePendingId, setRevokePendingId] = useState<string | null>(null);
+  const revokeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearRevokeTimer = () => {
+    if (revokeTimerRef.current) {
+      clearTimeout(revokeTimerRef.current);
+      revokeTimerRef.current = null;
+    }
+  };
+
+  useEffect(() => () => clearRevokeTimer(), []);
 
   const notify = (msg: string, type: "info" | "error" | "success" = "info") => {
     setStatus(msg);
@@ -128,9 +138,12 @@ export default function Integrations() {
 
   const handleRevoke = async (id: string) => {
     if (revokePendingId !== id) {
+      clearRevokeTimer();
       setRevokePendingId(id);
+      revokeTimerRef.current = setTimeout(() => setRevokePendingId(null), 3000);
       return;
     }
+    clearRevokeTimer();
     setRevokePendingId(null);
     setBusy(true);
     try {

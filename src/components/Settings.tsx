@@ -249,8 +249,15 @@ export default function Settings() {
         <section className="settings-section">
           <h2 className="settings-section-title">Paths</h2>
           <div className="settings-field">
-            <label className="settings-label">Workspace Root</label>
-            <input type="text" value={workspaceRoot} readOnly />
+            <label className="settings-label" htmlFor="settings-workspace-root">
+              Workspace Root
+            </label>
+            <input
+              id="settings-workspace-root"
+              type="text"
+              value={workspaceRoot}
+              readOnly
+            />
             <span className="settings-hint">
               Where relative script paths and per-environment working
               directories resolve. Auto-detected; set
@@ -258,8 +265,15 @@ export default function Settings() {
             </span>
           </div>
           <div className="settings-field">
-            <label className="settings-label">Python Path</label>
-            <input type="text" value={pythonPath} readOnly />
+            <label className="settings-label" htmlFor="settings-python-path">
+              Python Path
+            </label>
+            <input
+              id="settings-python-path"
+              type="text"
+              value={pythonPath}
+              readOnly
+            />
             <span className="settings-hint">
               Uses .venv/bin/python3 when available, falls back to system
               python3.
@@ -316,8 +330,14 @@ export default function Settings() {
           {emailConfig.enabled && (
             <div className="email-config-fields">
               <div className="settings-field">
-                <label className="settings-label">Alert Email</label>
+                <label
+                  className="settings-label"
+                  htmlFor="settings-alert-email"
+                >
+                  Alert Email
+                </label>
                 <input
+                  id="settings-alert-email"
                   type="email"
                   value={emailConfig.alert_email}
                   onChange={(e) =>
@@ -333,8 +353,17 @@ export default function Settings() {
               <div className="email-config-divider" />
 
               <div className="settings-field">
-                <label className="settings-label">SMTP Provider</label>
-                <div className="smtp-presets">
+                <span
+                  className="settings-label"
+                  id="settings-smtp-provider-label"
+                >
+                  SMTP Provider
+                </span>
+                <div
+                  className="smtp-presets"
+                  role="group"
+                  aria-labelledby="settings-smtp-provider-label"
+                >
                   {Object.entries(smtpPresets).map(([name, preset]) => (
                     <button
                       key={name}
@@ -371,8 +400,14 @@ export default function Settings() {
 
               <div className="settings-field-row">
                 <div className="settings-field" style={{ flex: 1 }}>
-                  <label className="settings-label">SMTP Host</label>
+                  <label
+                    className="settings-label"
+                    htmlFor="settings-smtp-host"
+                  >
+                    SMTP Host
+                  </label>
                   <input
+                    id="settings-smtp-host"
                     type="text"
                     value={emailConfig.smtp_host}
                     onChange={(e) =>
@@ -382,8 +417,14 @@ export default function Settings() {
                   />
                 </div>
                 <div className="settings-field" style={{ width: 90 }}>
-                  <label className="settings-label">Port</label>
+                  <label
+                    className="settings-label"
+                    htmlFor="settings-smtp-port"
+                  >
+                    Port
+                  </label>
                   <input
+                    id="settings-smtp-port"
                     type="number"
                     value={emailConfig.smtp_port}
                     onChange={(e) =>
@@ -397,8 +438,11 @@ export default function Settings() {
               </div>
 
               <div className="settings-field">
-                <label className="settings-label">SMTP Username</label>
+                <label className="settings-label" htmlFor="settings-smtp-user">
+                  SMTP Username
+                </label>
                 <input
+                  id="settings-smtp-user"
                   type="text"
                   value={emailConfig.smtp_user}
                   onChange={(e) =>
@@ -409,8 +453,14 @@ export default function Settings() {
               </div>
 
               <div className="settings-field">
-                <label className="settings-label">SMTP Password</label>
+                <label
+                  className="settings-label"
+                  htmlFor="settings-smtp-password"
+                >
+                  SMTP Password
+                </label>
                 <input
+                  id="settings-smtp-password"
                   type="password"
                   value={emailConfig.smtp_password}
                   onChange={(e) =>
@@ -435,8 +485,14 @@ export default function Settings() {
               <div className="email-config-divider" />
 
               <div className="settings-field">
-                <label className="settings-label">From Address</label>
+                <label
+                  className="settings-label"
+                  htmlFor="settings-from-address"
+                >
+                  From Address
+                </label>
                 <input
+                  id="settings-from-address"
                   type="text"
                   value={emailConfig.from_address}
                   onChange={(e) =>
@@ -451,8 +507,11 @@ export default function Settings() {
               </div>
 
               <div className="settings-field">
-                <label className="settings-label">From Name</label>
+                <label className="settings-label" htmlFor="settings-from-name">
+                  From Name
+                </label>
                 <input
+                  id="settings-from-name"
                   type="text"
                   value={emailConfig.from_name}
                   onChange={(e) =>
@@ -498,8 +557,15 @@ export default function Settings() {
         <section className="settings-section">
           <h2 className="settings-section-title">Updates</h2>
           <div className="settings-field">
-            <label className="settings-label">Current version</label>
-            <input type="text" value={`v${APP_VERSION}`} readOnly />
+            <label className="settings-label" htmlFor="settings-app-version">
+              Current version
+            </label>
+            <input
+              id="settings-app-version"
+              type="text"
+              value={`v${APP_VERSION}`}
+              readOnly
+            />
           </div>
           <div className="settings-row settings-update-row">
             <button
