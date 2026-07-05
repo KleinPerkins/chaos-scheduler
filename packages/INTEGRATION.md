@@ -115,7 +115,8 @@ Cross-language vectors live in `packages/test-fixtures/webhook-vectors.v1.json`.
 Configure a `webhook` action on a workflow's `on_success`/`on_failure`. On
 completion the scheduler POSTs the run result to your endpoint with:
 
-- `X-Chaos-Event: run.succeeded | run.failed`
+- `X-Chaos-Event: run.succeeded | run.failed` (binary; `poll_exhausted` runs
+  emit `run.failed` but the JSON body carries `"status": "poll_exhausted"`)
 - `X-Chaos-Signature: sha256=<hex HMAC-SHA256 of the raw body>`
 
 Verify over the **raw** bytes:
@@ -151,6 +152,16 @@ For deeper run detail and scheduler state:
   counts and caps).
 - `listQueuedRuns()` — durable queued runs awaiting or undergoing admission.
 
+**Read-scope redaction** — `getWorkflow` / `listWorkflows` (and MCP
+`get_workflow` + `chaos://workflows/{id}`) replace nested secret fields
+(`secret`, `signature_secret`, `cursor_api_key`, `smtp_password`) with the
+stable sentinel `__redacted__` when the caller has **read** scope only.
+**Write/admin** scopes receive full values so PATCH round-trips work. See
+[SECURITY.md](../SECURITY.md#secrets-storage--read-scope-redaction).
+
+Terminal run `status` values include `success`, `failed`, `cancelled`,
+`stale`, and `poll_exhausted` (cloud-agent poll budget exhausted).
+
 `waitForRun` throws once `timeoutMs` (default 300000) elapses without a terminal
 status, so a slow run is distinguishable from a failed one.
 
@@ -162,6 +173,11 @@ The agent then uses tools like `register_workflow`, `update_workflow`,
 `enqueue_workflow`, `rerun_workflow`, `get_run`, `get_run_logs`, `list_queues`,
 and `chaos://` resources — the same operations as above, but
 conversational, with prod-write guardrails.
+
+MCP write tools are **fail-closed** on protected environments (lookup errors
+block writes; `update_workflow` checks `patch.environment`). A shared
+in-process tool-call budget caps runaway loops. Details in the
+[mcp-server README guardrails section](./mcp-server/README.md#guardrails).
 
 ## 8. Update or rerun a workflow (write)
 
