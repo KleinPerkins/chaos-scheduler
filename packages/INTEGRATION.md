@@ -117,6 +117,18 @@ and are covered by cross-implementation test vectors in the SDK.
 `listEnvironments`, plus `waitForRun` (client-side polling with a default 5-minute
 overall timeout; the backend has no long-poll).
 
+For deeper run detail and scheduler state:
+
+- `getRunLogs(id)` — stdout/stderr, exit code, and result URL for a run.
+- `getRunTasks(id)` — per-step tasks and retry attempts (step-flow execution).
+- `getRunMetrics(id)` — metric samples emitted during the run.
+- `listQueues()` — per-environment queue capacity snapshots (active/queued
+  counts and caps).
+- `listQueuedRuns()` — durable queued runs awaiting or undergoing admission.
+
+`waitForRun` throws once `timeoutMs` (default 300000) elapses without a terminal
+status, so a slow run is distinguishable from a failed one.
+
 ## 7. Drive it from Cursor (MCP)
 
 Run the MCP server and add it to Cursor (see the

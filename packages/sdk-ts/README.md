@@ -179,9 +179,18 @@ Client methods (all return typed models):
 | `rerunWorkflow(id, opts)`    | `POST /api/v1/workflows/{id}/rerun`    | write |
 | `waitForRun(runId, opts)`    | polls `GET /api/v1/runs/{id}`          | read  |
 
+`waitForRun` throws if the run does not reach a terminal status before
+`timeoutMs` (default 300000) elapses; catch the error to distinguish a slow run
+from a failed one.
+
 Webhook helpers: `computeWebhookSignature`, `webhookSignatureHeader`,
 `verifyWebhookSignature`. Errors: `ChaosApiError` (`.status`, `.isAuthError`,
 `.isRateLimited`, `.isNotFound`).
+
+> `verifyWebhookSignature` compares the hex digest case-insensitively (and
+> tolerates a missing `sha256=` prefix). The backend emits lowercase hex with
+> the prefix, so this only relaxes acceptance and never rejects a valid
+> backend-signed request.
 
 ## Source of truth
 
