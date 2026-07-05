@@ -4073,7 +4073,14 @@ impl Database {
             return Ok(true);
         }
         let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
+        // BEGIN IMMEDIATE (not the default DEFERRED): mutex acquisition reads the
+        // lock rows and then writes them, so a deferred transaction takes only a
+        // shared lock up front and must upgrade to a write lock on the first
+        // INSERT. Under concurrent admission that upgrade races another writer's
+        // snapshot and aborts with SQLITE_BUSY_SNAPSHOT, spuriously failing an
+        // otherwise-valid admission. Taking the write lock immediately serializes
+        // acquisition (honoring busy_timeout) so the check-then-insert is atomic.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         for key in mutex_keys {
             let exists: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM workflow_mutex_locks WHERE mutex_key = ?1",
@@ -4879,6 +4886,93 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert!(db
             .acquire_mutex_locks(&workflow.id, &other_run.id, &keys)
             .unwrap());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_mutex_acquisition_serializes_without_busy_errors() {
+        // Regression for the BEGIN DEFERRED -> BEGIN IMMEDIATE fix: many threads
+        // race to acquire the same mutex key at once. Exactly one must win, the
+        // rest must observe the lock and return Ok(false), and none may abort
+        // with SQLITE_BUSY_SNAPSHOT (which a deferred read-then-write txn would
+        // hit under contention, spuriously failing a valid admission).
+        use std::sync::{Arc, Barrier};
+
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Database::new(&dir));
+        let workflow = db
+            .create_workflow(
+                "Concurrent Mutex Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let thread_count = 8;
+        let mut run_ids = Vec::with_capacity(thread_count);
+        for _ in 0..thread_count {
+            run_ids.push(
+                db.create_run_with_context(&workflow.id, Some("manual"), None, None, None, None)
+                    .unwrap()
+                    .id,
+            );
+        }
+        let keys = vec!["tag:source:source-default:heavy_io".to_string()];
+        let barrier = Arc::new(Barrier::new(thread_count));
+
+        let handles: Vec<_> = run_ids
+            .into_iter()
+            .map(|run_id| {
+                let db = Arc::clone(&db);
+                let barrier = Arc::clone(&barrier);
+                let workflow_id = workflow.id.clone();
+                let keys = keys.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    db.acquire_mutex_locks(&workflow_id, &run_id, &keys)
+                })
+            })
+            .collect();
+
+        let mut acquired = 0;
+        let mut refused = 0;
+        for handle in handles {
+            match handle.join().unwrap() {
+                Ok(true) => acquired += 1,
+                Ok(false) => refused += 1,
+                Err(e) => panic!("mutex acquisition raced to an error: {e}"),
+            }
+        }
+        assert_eq!(acquired, 1, "exactly one racer should win the mutex");
+        assert_eq!(
+            refused,
+            thread_count - 1,
+            "all other racers should be cleanly refused"
+        );
+
+        let held: i64 = db
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_mutex_locks WHERE mutex_key = ?1",
+                params![keys[0]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            held, 1,
+            "the mutex key must be held exactly once after the race"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
