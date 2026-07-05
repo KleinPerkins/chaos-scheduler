@@ -250,6 +250,21 @@ pub fn run() {
                     120,
                     std::time::Duration::from_secs(60),
                 ))),
+                preauth_rate: Arc::new(Mutex::new(api::RateLimiter::new(
+                    120,
+                    std::time::Duration::from_secs(60),
+                ))),
+                host_allowlist: db
+                    .get_scheduler_config("api_host_allowlist")
+                    .ok()
+                    .flatten()
+                    .map(|s| {
+                        s.split(',')
+                            .map(|h| h.trim().to_string())
+                            .filter(|h| !h.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 cors_allowlist: db
                     .get_scheduler_config("api_cors_allowlist")
                     .ok()
