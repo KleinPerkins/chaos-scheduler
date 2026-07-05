@@ -165,6 +165,8 @@ describe("ChaosSchedulerClient", () => {
   });
 
   it("signs the inbound dispatch payload from a secret", async () => {
+    const { computeInboundDispatchSignature } =
+      await import("../src/webhook.js");
     const { fetch, calls } = fakeFetch(() => ({
       status: 200,
       json: {
@@ -179,14 +181,26 @@ describe("ChaosSchedulerClient", () => {
       apiKey: "id.secret",
       fetch,
     });
+    const path = "/api/v1/workflows/w1/dispatch";
+    const timestamp = "1700000000";
+    const eventId = "evt-test";
     await client.dispatchWorkflow("w1", {
       payload: '{"a":1}',
       signatureSecret: "topsecret",
+      timestamp,
+      eventId,
     });
     expect(calls[0]!.body).toBe('{"a":1}');
-    expect(calls[0]!.headers?.["x-chaos-signature"]).toBe(
-      "sha256=bf1e6501b7fa928ec2391fea9dd90af3c9ad1b7b1ef6ff319c25940cec746bf8",
+    const expected = computeInboundDispatchSignature(
+      "POST",
+      path,
+      timestamp,
+      '{"a":1}',
+      "topsecret",
     );
+    expect(calls[0]!.headers?.["x-chaos-signature"]).toBe(`sha256=${expected}`);
+    expect(calls[0]!.headers?.["x-chaos-timestamp"]).toBe(timestamp);
+    expect(calls[0]!.headers?.["x-chaos-event-id"]).toBe(eventId);
   });
 
   it("polls waitForRun until a terminal status", async () => {

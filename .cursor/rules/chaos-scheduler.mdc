@@ -32,9 +32,13 @@ hand-writing HTTP calls.
   manage concurrency/admission; use `run_workflow_now` only for true one-offs.
 - **Always pass an `idempotency_key`** (a fresh UUID per logical action) to
   `run_workflow_now` / `enqueue_workflow` / `dispatch_workflow` /
-  `rerun_workflow`. A reused key returns `{ "status": "duplicate", run_id,
-  queued_run_id }` — treat that as success, not
-  a new run.
+  `rerun_workflow`. A reused key returns `{ "status": "duplicate", "run_id",
+  "queued_run_id" }` — treat that as success, not a new run.
+- **Inbound `dispatch_workflow` signing:** when the workflow has an inbound
+  secret, pass `signature_secret` (canonical
+  `METHOD\nPATH\nTIMESTAMP\nSHA256(body)` HMAC — the SDK sets
+  `X-Chaos-Timestamp`, `X-Chaos-Event-Id`, `X-Chaos-Signature`). Optional
+  `event_id` pins the event header for replays.
 - **Reading run detail.** `get_run` returns the run summary; use `get_run_logs`
   for stdout/stderr/exit, `get_run_tasks` for per-step tasks + retry attempts,
   and `get_run_metrics` for emitted metrics. Inspect queue pressure with

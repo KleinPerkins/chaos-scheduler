@@ -159,6 +159,7 @@ export interface DispatchOutcome {
 export interface DuplicateDispatch {
   status: "duplicate";
   run_id: string | null;
+  queued_run_id?: string | null;
 }
 
 /** Union of the two shapes a run/enqueue/dispatch call can return. */
