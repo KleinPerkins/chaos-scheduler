@@ -10,7 +10,7 @@ use crate::scheduler::{dispatch_non_cron_workflow, NonCronDispatchOptions};
 use crate::service::{ApiIdentity, SchedulerService, ServiceError, WorkflowDraft};
 use crate::workflow_spec::WorkflowSpec;
 use axum::{
-    extract::{Path, Request, State},
+    extract::{ConnectInfo, Extension, Path, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -175,9 +176,34 @@ fn origin_allowed(state: &ApiState, headers: &HeaderMap) -> bool {
     state.cors_allowlist.iter().any(|allowed| allowed == origin)
 }
 
+#[derive(Clone, Default)]
+struct AuditTrail(Arc<Mutex<Option<ApiAuditEvent>>>);
+
+struct ApiAuditEvent {
+    key_id: String,
+    method: String,
+    path: String,
+}
+
+impl AuditTrail {
+    fn remember(&self, key_id: &str, method: &str, path: &str) {
+        if let Ok(mut event) = self.0.lock() {
+            *event = Some(ApiAuditEvent {
+                key_id: key_id.to_string(),
+                method: method.to_string(),
+                path: path.to_string(),
+            });
+        }
+    }
+
+    fn take(&self) -> Option<ApiAuditEvent> {
+        self.0.lock().ok()?.take()
+    }
+}
+
 async fn request_guard(
     State(state): State<ApiState>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
     if !host_allowed(&state, req.headers()) {
@@ -186,7 +212,25 @@ async fn request_guard(
     if !origin_allowed(&state, req.headers()) {
         return Err(ApiError::new(StatusCode::FORBIDDEN, "origin not allowed"));
     }
-    Ok(next.run(req).await)
+    let remote = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|connect| connect.0.to_string());
+    let audit = AuditTrail::default();
+    req.extensions_mut().insert(audit.clone());
+
+    let response = next.run(req).await;
+    if let Some(event) = audit.take() {
+        let _ = state.db.record_api_audit(
+            Some(&event.key_id),
+            &event.method,
+            &event.path,
+            response.status().as_u16(),
+            remote.as_deref(),
+        );
+    }
+
+    Ok(response)
 }
 
 /// Authenticate + authorize a request, enforce rate limits, and audit the
@@ -197,6 +241,7 @@ fn authorize(
     required_scope: &str,
     method: &str,
     path: &str,
+    audit: &AuditTrail,
 ) -> Result<ApiIdentity, ApiError> {
     if let Ok(mut limiter) = state.preauth_rate.lock() {
         if !limiter.allow(&preauth_rate_key(headers)) {
@@ -215,10 +260,8 @@ fn authorize(
     let Some(identity) = state.service.verify_api_key(&token) else {
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "invalid API key"));
     };
+    audit.remember(&identity.id, method, path);
     if !identity.has_scope(required_scope) {
-        let _ = state
-            .db
-            .record_api_audit(Some(&identity.id), method, path, 403, None);
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             format!("API key lacks required scope '{required_scope}'"),
@@ -226,18 +269,12 @@ fn authorize(
     }
     if let Ok(mut limiter) = state.rate.lock() {
         if !limiter.allow(&identity.id) {
-            let _ = state
-                .db
-                .record_api_audit(Some(&identity.id), method, path, 429, None);
             return Err(ApiError::new(
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate limit exceeded",
             ));
         }
     }
-    let _ = state
-        .db
-        .record_api_audit(Some(&identity.id), method, path, 200, None);
     Ok(identity)
 }
 
@@ -315,9 +352,10 @@ async fn version() -> Json<Value> {
 
 async fn list_environments(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "read", "GET", "/api/v1/environments")?;
+    authorize(&st, &headers, "read", "GET", "/api/v1/environments", &audit)?;
     let envs = st.service.list_environments()?;
     Ok(Json(json!({ "environments": envs })))
 }
@@ -334,10 +372,18 @@ struct CreateEnvironmentBody {
 
 async fn create_environment(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
     Json(body): Json<CreateEnvironmentBody>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "write", "POST", "/api/v1/environments")?;
+    authorize(
+        &st,
+        &headers,
+        "write",
+        "POST",
+        "/api/v1/environments",
+        &audit,
+    )?;
     let env = st.service.create_environment(
         &body.name,
         body.description.as_deref(),
@@ -351,19 +397,28 @@ async fn create_environment(
 
 async fn list_workflows(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "read", "GET", "/api/v1/workflows")?;
+    authorize(&st, &headers, "read", "GET", "/api/v1/workflows", &audit)?;
     let workflows = st.service.list_workflows()?;
     Ok(Json(json!({ "workflows": workflows })))
 }
 
 async fn get_workflow(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "read", "GET", "/api/v1/workflows/{id}")?;
+    authorize(
+        &st,
+        &headers,
+        "read",
+        "GET",
+        "/api/v1/workflows/{id}",
+        &audit,
+    )?;
     let wf = st.service.get_workflow(&id)?;
     Ok(Json(json!({ "workflow": wf })))
 }
@@ -394,10 +449,11 @@ struct RegisterWorkflowBody {
 
 async fn register_workflow(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
     Json(body): Json<RegisterWorkflowBody>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "write", "POST", "/api/v1/workflows")?;
+    authorize(&st, &headers, "write", "POST", "/api/v1/workflows", &audit)?;
     let environment = body.environment.unwrap_or_else(|| "instance".to_string());
     let draft = WorkflowDraft {
         name: body.name,
@@ -423,16 +479,25 @@ async fn register_workflow(
 
 async fn delete_workflow(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "write", "DELETE", "/api/v1/workflows/{id}")?;
+    authorize(
+        &st,
+        &headers,
+        "write",
+        "DELETE",
+        "/api/v1/workflows/{id}",
+        &audit,
+    )?;
     st.service.delete_workflow(&id, true)?;
     Ok(Json(json!({ "deleted": id })))
 }
 
 async fn set_spec(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(spec): Json<WorkflowSpec>,
@@ -443,6 +508,7 @@ async fn set_spec(
         "write",
         "POST",
         "/api/v1/workflows/{id}/spec",
+        &audit,
     )?;
     let wf = st.service.set_workflow_spec(&id, &spec, true)?;
     Ok(Json(json!({ "workflow": wf })))
@@ -544,15 +610,24 @@ fn dispatch_with_idempotency(
 
 async fn run_now(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "write", "POST", "/api/v1/workflows/{id}/run")?;
+    authorize(
+        &st,
+        &headers,
+        "write",
+        "POST",
+        "/api/v1/workflows/{id}/run",
+        &audit,
+    )?;
     dispatch_with_idempotency(&st, &headers, &id, "api_run", None)
 }
 
 async fn enqueue(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
@@ -562,6 +637,7 @@ async fn enqueue(
         "write",
         "POST",
         "/api/v1/workflows/{id}/enqueue",
+        &audit,
     )?;
     dispatch_with_idempotency(&st, &headers, &id, "api_enqueue", None)
 }
@@ -572,6 +648,7 @@ async fn enqueue(
 /// idempotency key when supplied).
 async fn inbound_dispatch(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
     Path(id): Path<String>,
     body: String,
@@ -582,6 +659,7 @@ async fn inbound_dispatch(
         "write",
         "POST",
         "/api/v1/workflows/{id}/dispatch",
+        &audit,
     )?;
     if let Ok(Some(secret)) = st.db.get_scheduler_config("inbound_webhook_secret") {
         if !secret.trim().is_empty() {
@@ -609,10 +687,18 @@ async fn inbound_dispatch(
 
 async fn list_runs(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "read", "GET", "/api/v1/workflows/{id}/runs")?;
+    authorize(
+        &st,
+        &headers,
+        "read",
+        "GET",
+        "/api/v1/workflows/{id}/runs",
+        &audit,
+    )?;
     let runs = st
         .db
         .get_run_history(&id, 50)
@@ -622,10 +708,11 @@ async fn list_runs(
 
 async fn get_run(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "read", "GET", "/api/v1/runs/{id}")?;
+    authorize(&st, &headers, "read", "GET", "/api/v1/runs/{id}", &audit)?;
     let run = st
         .db
         .get_run(&id)
@@ -635,10 +722,18 @@ async fn get_run(
 
 async fn get_run_logs(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "read", "GET", "/api/v1/runs/{id}/logs")?;
+    authorize(
+        &st,
+        &headers,
+        "read",
+        "GET",
+        "/api/v1/runs/{id}/logs",
+        &audit,
+    )?;
     let run = st
         .db
         .get_run(&id)
@@ -655,10 +750,18 @@ async fn get_run_logs(
 
 async fn get_run_tasks(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "read", "GET", "/api/v1/runs/{id}/tasks")?;
+    authorize(
+        &st,
+        &headers,
+        "read",
+        "GET",
+        "/api/v1/runs/{id}/tasks",
+        &audit,
+    )?;
     let tasks = st
         .db
         .get_run_tasks(&id)
@@ -672,10 +775,18 @@ async fn get_run_tasks(
 
 async fn get_run_metrics(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "read", "GET", "/api/v1/runs/{id}/metrics")?;
+    authorize(
+        &st,
+        &headers,
+        "read",
+        "GET",
+        "/api/v1/runs/{id}/metrics",
+        &audit,
+    )?;
     let metrics = st
         .db
         .get_run_metrics(&id)
@@ -685,9 +796,10 @@ async fn get_run_metrics(
 
 async fn list_queues(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "read", "GET", "/api/v1/queues")?;
+    authorize(&st, &headers, "read", "GET", "/api/v1/queues", &audit)?;
     let queues = st
         .db
         .list_queues()
@@ -697,9 +809,10 @@ async fn list_queues(
 
 async fn list_queued_runs(
     State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "read", "GET", "/api/v1/queued-runs")?;
+    authorize(&st, &headers, "read", "GET", "/api/v1/queued-runs", &audit)?;
     let queued = st
         .db
         .list_queued_runs(100)
@@ -760,7 +873,12 @@ pub fn start_api_server(state: ApiState, addr: String) {
                 }
             };
             log::info!("Chaos Scheduler API listening on {addr}");
-            if let Err(e) = axum::serve(listener, router(state)).await {
+            if let Err(e) = axum::serve(
+                listener,
+                router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            {
                 log::error!("API server error: {e}");
             }
         });
@@ -955,6 +1073,44 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM api_audit_log", [], |row| row.get(0))
             .unwrap();
         assert_eq!(audit_count, 0, "unauthenticated 401/429s are not persisted");
+    }
+
+    #[tokio::test]
+    async fn audit_records_final_status_remote_and_never_body() {
+        let (state, token) = test_state();
+        let audit_db_path = state.db.path().to_string();
+        rusqlite::Connection::open(&audit_db_path)
+            .unwrap()
+            .execute("DELETE FROM api_audit_log", [])
+            .unwrap();
+        let app = router(state);
+        let mut req = Request::builder()
+            .uri("/api/v1/runs/missing?token=secret-token")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"password":"super-secret"}"#))
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(
+            "203.0.113.7:49152".parse::<SocketAddr>().unwrap(),
+        ));
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let row: (String, String, i64, Option<String>) = rusqlite::Connection::open(&audit_db_path)
+            .unwrap()
+            .query_row(
+                "SELECT method, path, status, remote FROM api_audit_log",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "GET");
+        assert_eq!(row.1, "/api/v1/runs/{id}");
+        assert_eq!(row.2, StatusCode::NOT_FOUND.as_u16() as i64);
+        assert_eq!(row.3.as_deref(), Some("203.0.113.7:49152"));
+        assert!(!row.1.contains("secret-token"));
+        assert!(!row.1.contains("super-secret"));
     }
 
     #[tokio::test]
