@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "inbound": [
+    {
+      "method": "POST",
+      "path": "/api/v1/workflows/test-wf/dispatch",
+      "timestamp": "1700000000",
+      "event_id": "evt-pinned-001",
+      "body": "{\"event\":\"push\",\"ref\":\"main\"}",
+      "secret": "test-inbound-secret",
+      "signature_hex": "7d5bc73dc378357ac8f0d6a8d3e96fac2e97d3453d84d0b6c3f4b3e82d4de399"
+    }
+  ],
+  "outbound": [
+    {
+      "secret": "topsecret",
+      "body": "{\"a\":1}",
+      "signature_hex": "bf1e6501b7fa928ec2391fea9dd90af3c9ad1b7b1ef6ff319c25940cec746bf8"
+    },
+    {
+      "secret": "chaos-secret",
+      "body": "hello",
+      "signature_hex": "65b8731ae4e6c79e1ee19671cfc4561fe6e8c81d45b3172d83c8312457b4890e"
+    }
+  ]
+}

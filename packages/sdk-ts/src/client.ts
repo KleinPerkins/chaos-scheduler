@@ -7,7 +7,7 @@
  *   - Errors: non-2xx render as `{ "error": "<message>" }`.
  *   - Response envelopes: `{ environments }`, `{ workflows }`, `{ workflow }`,
  *     `{ runs }`, `{ run }`, `{ deleted }`; dispatch returns a bare
- *     `DispatchOutcome` (or `{ status: "duplicate", run_id }` on replay).
+ *     `DispatchOutcome` (or `{ status: "duplicate", run_id, queued_run_id }` on replay).
  */
 
 import { ChaosApiError } from "./errors.js";
@@ -66,12 +66,17 @@ export interface InboundDispatchOptions extends DispatchOptions {
   /** Raw request body forwarded to the workflow's webhook trigger. */
   payload?: string;
   /**
-   * Value for the `X-Chaos-Signature` header. If `signatureSecret` is provided
-   * instead, the client computes `sha256=<hmac>` over `payload` for you.
+   * Value for the `X-Chaos-Signature` header (canonical inbound scheme).
+   * If `signatureSecret` is provided, the client computes canonical HMAC
+   * (`METHOD\nPATH\nTIMESTAMP\nSHA256(body)`) and sets timestamp/event-id headers.
    */
   signature?: string;
-  /** Shared secret used to sign `payload` (alternative to `signature`). */
+  /** Shared secret used to sign the inbound dispatch (canonical scheme). */
   signatureSecret?: string;
+  /** Unix seconds for `X-Chaos-Timestamp` (default: now). */
+  timestamp?: string;
+  /** Value for `X-Chaos-Event-Id` (default: random UUID). */
+  eventId?: string;
 }
 
 /** Run statuses treated as terminal by {@link ChaosSchedulerClient.waitForRun}. */
@@ -299,26 +304,42 @@ export class ChaosSchedulerClient {
   /**
    * `POST /api/v1/workflows/{id}/dispatch` — inbound webhook trigger (scope:
    * write). Sends the raw `payload` as the request body; if the workflow's
-   * inbound secret is configured, provide `signature` (or `signatureSecret` to
-   * have the client compute `sha256=<hmac>`).
+   * inbound secret is configured, provide `signature` or `signatureSecret` to
+   * set canonical `X-Chaos-Timestamp`, `X-Chaos-Event-Id`, and `X-Chaos-Signature`.
    */
   async dispatchWorkflow(
     id: string,
     options: InboundDispatchOptions = {},
   ): Promise<DispatchResult> {
     const payload = options.payload ?? "";
-    let signature = options.signature;
-    if (!signature && options.signatureSecret) {
-      const { webhookSignatureHeader } = await import("./webhook.js");
-      signature = webhookSignatureHeader(payload, options.signatureSecret);
-    }
+    const path = `/api/v1/workflows/${encodeURIComponent(id)}/dispatch`;
     const headers: Record<string, string> = {};
-    if (signature) headers["x-chaos-signature"] = signature;
-    return this.request<DispatchResult>(
-      "POST",
-      `/api/v1/workflows/${encodeURIComponent(id)}/dispatch`,
-      { rawBody: payload, headers, idempotencyKey: options.idempotencyKey },
-    );
+    if (options.signature) {
+      headers["x-chaos-signature"] = options.signature;
+      if (options.timestamp) {
+        headers["x-chaos-timestamp"] = options.timestamp;
+      }
+      if (options.eventId) {
+        headers["x-chaos-event-id"] = options.eventId;
+      }
+    } else if (options.signatureSecret) {
+      const { inboundDispatchHeaders } = await import("./webhook.js");
+      Object.assign(
+        headers,
+        inboundDispatchHeaders({
+          path,
+          body: payload,
+          secret: options.signatureSecret,
+          timestamp: options.timestamp,
+          eventId: options.eventId,
+        }),
+      );
+    }
+    return this.request<DispatchResult>("POST", path, {
+      rawBody: payload,
+      headers,
+      idempotencyKey: options.idempotencyKey,
+    });
   }
 
   // --- Runs (read) ---

@@ -73,17 +73,42 @@ if (!isDuplicateDispatch(res) && res.run_id) {
 
 ## 4. Event-driven trigger (inbound webhook)
 
-If the scheduler has an inbound webhook secret configured, sign the raw body:
+If the scheduler has an inbound webhook secret configured, sign with the
+**canonical** scheme (not raw-body HMAC):
+
+```
+METHOD\nPATH\nTIMESTAMP\nSHA256_HEX(raw_body)
+→ hex(HMAC_SHA256(secret, canonical))
+```
+
+Headers: `X-Chaos-Timestamp`, `X-Chaos-Event-Id`, `X-Chaos-Signature: sha256=<hex>`.
 
 ```ts
 await client.dispatchWorkflow(wf.id, {
   payload: JSON.stringify({ event: "push", ref: "main" }),
-  signatureSecret: process.env.INBOUND_SECRET, // → X-Chaos-Signature: sha256=<hmac>
+  signatureSecret: process.env.INBOUND_SECRET,
+  // optional pinned replay fields:
+  // timestamp: "1700000000",
+  // eventId: "evt-pinned-001",
 });
 ```
 
-The backend verifies `hex(HMAC_SHA256(secret, raw_body))` against
-`X-Chaos-Signature: sha256=<hex>` (`api.rs::inbound_dispatch`).
+`dispatchWorkflow` sets all three headers when `signatureSecret` is provided.
+Manual signing:
+
+```ts
+import { inboundDispatchHeaders } from "@chaos-scheduler/sdk";
+
+const path = `/api/v1/workflows/${encodeURIComponent(wf.id)}/dispatch`;
+const headers = inboundDispatchHeaders({
+  path,
+  body: payload,
+  secret: process.env.INBOUND_SECRET!,
+});
+```
+
+Verified by `api.rs::verify_inbound_webhook` / `inbound_canonical_payload`.
+Cross-language vectors live in `packages/test-fixtures/webhook-vectors.v1.json`.
 
 ## 5. Receive result webhooks (outbound)
 

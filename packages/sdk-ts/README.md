@@ -101,15 +101,26 @@ if (isDuplicateDispatch(res)) {
 ## Inbound webhook trigger (signed)
 
 `POST /api/v1/workflows/{id}/dispatch` accepts a raw body forwarded to the
-workflow's `webhook` trigger. If an inbound secret is configured on the
-scheduler, sign the raw body:
+workflow's `webhook` trigger. If an inbound secret is configured, sign the
+**canonical** payload (not raw-body HMAC):
+
+```
+METHOD\nPATH\nTIMESTAMP\nSHA256_HEX(body) → hex(HMAC_SHA256(secret, canonical))
+```
+
+The client sets `X-Chaos-Timestamp`, `X-Chaos-Event-Id`, and `X-Chaos-Signature`
+when you pass `signatureSecret`:
 
 ```ts
 await client.dispatchWorkflow(id, {
   payload: JSON.stringify({ event: "push", ref: "main" }),
-  signatureSecret: process.env.INBOUND_SECRET, // → X-Chaos-Signature: sha256=<hmac>
+  signatureSecret: process.env.INBOUND_SECRET,
+  // optional: timestamp, eventId for pinned replays
 });
 ```
+
+Helpers: `computeInboundDispatchSignature`, `inboundDispatchHeaders`,
+`verifyInboundDispatchSignature`. Vectors: `packages/test-fixtures/webhook-vectors.v1.json`.
 
 ## Verifying outbound result webhooks
 
