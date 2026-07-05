@@ -4286,6 +4286,167 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Admit a run and mark it `running` so orphan recovery evaluates its
+    /// process metadata rather than the unclaimed-admitted fast path.
+    #[cfg(unix)]
+    fn admit_running_orphan_run(db: &Arc<Database>, workflow_id: &str) -> String {
+        let admitted = db
+            .admit_run_with_context(
+                workflow_id,
+                "source-default",
+                "source",
+                &[],
+                Some("manual"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                None,
+            )
+            .unwrap();
+        let run_id = match admitted {
+            RunAdmission::Admitted(run) => run.id,
+            _ => panic!("run should admit"),
+        };
+        db.mark_run_started(&run_id, "worker-orphan-test").unwrap();
+        run_id
+    }
+
+    #[cfg(unix)]
+    fn make_orphan_workflow(db: &Arc<Database>, name: &str) -> Workflow {
+        db.create_workflow(
+            name,
+            None,
+            "scripts/workflows/noop.py",
+            "0 0 * * *",
+            false,
+            true,
+            "UTC",
+            "source",
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// Spawn a child in its OWN session/process-group (mirrors the scheduler's
+    /// `setsid` in `run_workflow_command`) so a group-kill can never reach the
+    /// test runner. Returns `(child, pid)` where `pgid == pid`.
+    #[cfg(unix)]
+    fn spawn_own_group_child() -> (std::process::Child, i64) {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().expect("spawn sleep child");
+        let pid = child.id() as i64;
+        (child, pid)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn orphan_recovery_terminates_verified_live_orphan() {
+        let (db, dir) = structured_test_db();
+        let wf = make_orphan_workflow(&db, "Live Orphan");
+        let run_id = admit_running_orphan_run(&db, &wf.id);
+
+        let (mut child, pid) = spawn_own_group_child();
+        let pgid = pid; // setsid => process-group leader, pgid == pid
+        let started = process_start_time_fingerprint(pid as u32);
+        assert!(started.is_some(), "ps lstart fingerprint should be present");
+        assert!(process_is_alive(pid), "child should be alive pre-recovery");
+        db.record_run_process(&run_id, pid, pgid, started.as_deref())
+            .unwrap();
+
+        recover_orphaned_runs(&db, dir.to_str().unwrap());
+
+        let recovered = db.get_run(&run_id).unwrap();
+        assert_eq!(recovered.status, "stale");
+        let stderr = recovered.stderr.as_deref().unwrap_or_default();
+        assert!(
+            stderr.contains("verified orphan PID")
+                && stderr.contains("terminated its process group"),
+            "unexpected stderr: {stderr}"
+        );
+        // Recovery must have signalled the verified orphan dead.
+        let status = child.wait().unwrap();
+        assert!(
+            status.signal().is_some(),
+            "verified orphan should have been killed by a signal"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn orphan_recovery_marks_dead_pid_stale() {
+        let (db, dir) = structured_test_db();
+        let wf = make_orphan_workflow(&db, "Dead PID Orphan");
+        let run_id = admit_running_orphan_run(&db, &wf.id);
+
+        // Spawn then immediately reap so the recorded PID is no longer alive.
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let pid = child.id() as i64;
+        child.wait().unwrap();
+        assert!(!process_is_alive(pid), "reaped PID should be dead");
+        db.record_run_process(&run_id, pid, pid, Some("Fri Jan  1 00:00:00 2021"))
+            .unwrap();
+
+        recover_orphaned_runs(&db, dir.to_str().unwrap());
+
+        let recovered = db.get_run(&run_id).unwrap();
+        assert_eq!(recovered.status, "stale");
+        let stderr = recovered.stderr.as_deref().unwrap_or_default();
+        assert!(stderr.contains("dead"), "unexpected stderr: {stderr}");
+        assert!(
+            !stderr.contains("terminated its process group"),
+            "dead PID must not trigger a group kill: {stderr}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn orphan_recovery_marks_pid_recycle_mismatch_stale_without_kill() {
+        let (db, dir) = structured_test_db();
+        let wf = make_orphan_workflow(&db, "Recycled PID Orphan");
+        let run_id = admit_running_orphan_run(&db, &wf.id);
+
+        let (mut child, pid) = spawn_own_group_child();
+        // Live PID but a start-time fingerprint that can never match a real
+        // `ps lstart` => the PID has been recycled to an unrelated process.
+        db.record_run_process(&run_id, pid, pid, Some("Thu Jan  1 00:00:00 1970"))
+            .unwrap();
+        assert!(process_is_alive(pid), "child should be alive pre-recovery");
+
+        recover_orphaned_runs(&db, dir.to_str().unwrap());
+
+        let recovered = db.get_run(&run_id).unwrap();
+        assert_eq!(recovered.status, "stale");
+        let stderr = recovered.stderr.as_deref().unwrap_or_default();
+        assert!(stderr.contains("mismatched"), "unexpected stderr: {stderr}");
+        // A recycle mismatch must NOT kill the unrelated live process.
+        assert!(
+            process_is_alive(pid),
+            "recycle-mismatch PID must be left running"
+        );
+
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     #[cfg(unix)]
     fn live_generic_step_flow_records_tasks_and_attempts() {
