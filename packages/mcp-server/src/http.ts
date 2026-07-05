@@ -10,6 +10,7 @@ import http from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { ChaosMcpConfig } from "./config.js";
 import { makeClient } from "./factory.js";
+import { ToolBudget } from "./guardrails.js";
 import { buildServer } from "./server.js";
 
 const MCP_PATH = "/mcp";
@@ -109,9 +110,13 @@ function notFound(res: http.ServerResponse): void {
 }
 
 /** Create (but do not start) the HTTP server. Exposed for tests. */
-export function createHttpServer(config: ChaosMcpConfig): http.Server {
+export function createHttpServer(
+  config: ChaosMcpConfig,
+  sharedBudget?: ToolBudget,
+): http.Server {
+  const budget = sharedBudget ?? new ToolBudget(config.maxToolCalls);
   return http.createServer((req, res) => {
-    void handle(req, res, config);
+    void handle(req, res, config, budget);
   });
 }
 
@@ -119,6 +124,7 @@ async function handle(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   config: ChaosMcpConfig,
+  sharedBudget: ToolBudget,
 ): Promise<void> {
   const url = new URL(
     req.url ?? "/",
@@ -159,7 +165,7 @@ async function handle(
   try {
     const parsedBody = await readBody(req, config.httpMaxBodyBytes);
     const client = makeClient(config, apiKey);
-    const server = buildServer({ client, config });
+    const server = buildServer({ client, config, budget: sharedBudget });
     // Stateless: a new transport per request (sessionIdGenerator: undefined).
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -185,7 +191,8 @@ async function handle(
 
 export async function runHttp(config: ChaosMcpConfig): Promise<http.Server> {
   ensureLocalBind(config);
-  const httpServer = createHttpServer(config);
+  const sharedBudget = new ToolBudget(config.maxToolCalls);
+  const httpServer = createHttpServer(config, sharedBudget);
   await new Promise<void>((resolve) => {
     httpServer.listen(config.httpPort, config.httpHost, resolve);
   });

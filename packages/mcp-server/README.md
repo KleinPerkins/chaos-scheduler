@@ -121,12 +121,17 @@ Freshness is pull-based (Cursor does not document resource subscriptions).
 
 ## Guardrails
 
-- **Protected environments** — writes targeting a protected env (default
-  `prod`/`production`) are rejected with a clear message unless
-  `--allow-protected-writes` / `CHAOS_SCHEDULER_MCP_ALLOW_PROTECTED_WRITES=1`.
-  The Cursor hook adds a second, client-side confirmation layer.
-- **Tool budget** — set `CHAOS_SCHEDULER_MCP_MAX_TOOL_CALLS` to cap tool calls
-  per server instance and stop runaway agent loops.
+- **Protected environments (fail-closed)** — when
+  `CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS` is set and protected writes are
+  not allowed, write tools resolve the workflow environment via `get_workflow`
+  and **refuse** if lookup fails (no silent allow). `update_workflow` also checks
+  `patch.environment` against the protected list. Mirror the backend list with
+  `CHAOS_SCHEDULER_PROTECTED_ENVIRONMENTS` (example in `.cursor/mcp.json`).
+- **Tool budget** — `CHAOS_SCHEDULER_MCP_MAX_TOOL_CALLS` caps tool calls per MCP
+  process. Stdio = one budget per Cursor session; Streamable HTTP shares one
+  in-process budget across requests on that server instance.
+- **Cursor hooks vs MCP** — `.cursor/hooks/guard-writes.sh` stays **fail-open**
+  (warn/confirm); MCP guardrails are **fail-closed** for protected env writes.
 - **HTTP auth and bind safety** — Streamable HTTP requires per-request bearer
   auth, rejects DNS-rebinding-style Host headers on loopback binds, caps request
   bodies, and requires `--allow-remote-http` before binding outside loopback.
