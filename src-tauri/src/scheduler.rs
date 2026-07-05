@@ -1530,20 +1530,36 @@ impl crate::operators::SecretResolver for SchedulerSecretResolver {
     }
 }
 
+/// Map an operator outcome to a first-class terminal run status when one
+/// applies (e.g. a cloud agent whose poll budget was exhausted), so the run row
+/// carries `poll_exhausted` instead of collapsing to `failed`.
+fn operator_run_terminal_status(
+    outcome: &crate::operators::OperatorOutcome,
+) -> Option<&'static str> {
+    if outcome.details.get("status").and_then(|v| v.as_str()) == Some("POLL_EXHAUSTED") {
+        Some("poll_exhausted")
+    } else {
+        None
+    }
+}
+
 /// Execute a typed operator via the operator registry, recording a task/attempt.
+/// Returns `(exit_code, stdout, stderr, terminal_status)` where `terminal_status`
+/// is a first-class run status when the outcome maps to one.
 fn execute_typed_operator(
     db: &Arc<Database>,
     workspace_root: &str,
     run_id: &str,
     _workflow: &Workflow,
     typed: &crate::workflow_spec::TypedSpec,
-) -> (i32, String, String) {
+) -> (i32, String, String, Option<&'static str>) {
     let registry = crate::operators::OperatorRegistry::with_builtins();
     let Some(operator) = registry.get(&typed.operator_type) else {
         return (
             -1,
             String::new(),
             format!("unknown operator_type: {}", typed.operator_type),
+            None,
         );
     };
     let attempt_id = db
@@ -1586,12 +1602,14 @@ fn execute_typed_operator(
         Some(&outcome.details),
     );
     let exit_code = if outcome.success { 0 } else { 1 };
+    let terminal = operator_run_terminal_status(&outcome);
     let stderr = if outcome.success {
         String::new()
     } else {
         outcome.summary.clone()
     };
-    (exit_code, outcome.summary, stderr)
+    let summary = outcome.summary;
+    (exit_code, summary, stderr, terminal)
 }
 
 #[allow(clippy::too_many_arguments)] // Threads full run context through the engine entry point.
@@ -1686,15 +1704,18 @@ pub fn execute_workflow_with_context(
         .as_deref()
         .and_then(|json| crate::workflow_spec::WorkflowSpec::from_json(json).ok())
     {
-        let (exit_code, stdout, stderr) = match spec.kind {
+        let (exit_code, stdout, stderr, terminal_status) = match spec.kind {
             crate::workflow_spec::WorkflowKind::Generic => match spec.generic.as_ref() {
                 Some(generic) => {
-                    execute_generic_step_flow(db, chaos_labs_root, &run.id, &workflow, generic)
+                    let (code, out, err) =
+                        execute_generic_step_flow(db, chaos_labs_root, &run.id, &workflow, generic);
+                    (code, out, err, None)
                 }
                 None => (
                     -1,
                     String::new(),
                     "generic workflow has no step body".to_string(),
+                    None,
                 ),
             },
             crate::workflow_spec::WorkflowKind::Typed => match spec.typed.as_ref() {
@@ -1705,11 +1726,24 @@ pub fn execute_workflow_with_context(
                     -1,
                     String::new(),
                     "typed workflow has no operator body".to_string(),
+                    None,
                 ),
             },
         };
-        db.finish_run(&run.id, exit_code, &stdout, &stderr, None)
+        if let Some(status) = terminal_status {
+            db.finish_run_with_status_details(
+                &run.id,
+                Some(exit_code),
+                status,
+                &stdout,
+                &stderr,
+                None,
+            )
             .map_err(|e| format!("Failed to update run: {}", e))?;
+        } else {
+            db.finish_run(&run.id, exit_code, &stdout, &stderr, None)
+                .map_err(|e| format!("Failed to update run: {}", e))?;
+        }
         let success = exit_code == 0;
         return Ok(RunResult {
             run_id: run.id,
@@ -3702,7 +3736,7 @@ fn dispatch_completion_actions_impl(
                 "workflow_id": workflow.id.clone(),
                 "workflow_name": workflow.name.clone(),
                 "run_id": run.id.clone(),
-                "status": if success { "success" } else { "failed" },
+                "status": run.status.clone(),
                 "exit_code": run.exit_code,
                 "stdout": run.stdout.clone(),
                 "stderr": run.stderr.clone(),
@@ -4076,6 +4110,79 @@ mod tests {
         assert!(output.stdout_truncated);
         assert!(output.stderr_truncated);
         assert!(output.task_events_truncated);
+    }
+
+    #[test]
+    fn operator_run_terminal_status_maps_poll_exhausted() {
+        let exhausted = crate::operators::OperatorOutcome {
+            success: false,
+            summary: "poll done".into(),
+            details: serde_json::json!({"status": "POLL_EXHAUSTED"}),
+        };
+        assert_eq!(
+            operator_run_terminal_status(&exhausted),
+            Some("poll_exhausted")
+        );
+
+        let plain_failure = crate::operators::OperatorOutcome {
+            success: false,
+            summary: "boom".into(),
+            details: serde_json::json!({"status": "FAILED"}),
+        };
+        assert_eq!(operator_run_terminal_status(&plain_failure), None);
+
+        let success = crate::operators::OperatorOutcome {
+            success: true,
+            summary: "ok".into(),
+            details: serde_json::json!({}),
+        };
+        assert_eq!(operator_run_terminal_status(&success), None);
+    }
+
+    #[test]
+    fn finish_run_persists_poll_exhausted_run_row_status() {
+        let (db, dir) = structured_test_db();
+        let wf = db
+            .create_workflow(
+                "Poll",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "instance",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let admitted = db
+            .admit_run_with_context(
+                &wf.id,
+                "instance-default",
+                "instance",
+                &[],
+                Some("manual"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                None,
+            )
+            .unwrap();
+        let run_id = match admitted {
+            RunAdmission::Admitted(run) => run.id,
+            _ => panic!("run should admit"),
+        };
+        db.finish_run_with_status_details(&run_id, Some(1), "poll_exhausted", "", "poll", None)
+            .unwrap();
+        let run = db.get_run(&run_id).unwrap();
+        assert_eq!(run.status, "poll_exhausted");
+        assert_eq!(run.exit_code, Some(1));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
