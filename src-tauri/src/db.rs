@@ -45,6 +45,16 @@ fn owner_label(domain: Option<String>) -> String {
     }
 }
 
+fn redact_audit_path(path: &str) -> String {
+    path.split('?')
+        .next()
+        .unwrap_or(path)
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(512)
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workflow {
     pub id: String,
@@ -1641,6 +1651,7 @@ impl Database {
     ) -> rusqlite::Result<()> {
         let conn = self.conn()?;
         let id = uuid::Uuid::new_v4().to_string();
+        let path = redact_audit_path(path);
         conn.execute(
             "INSERT INTO api_audit_log (id, key_id, method, path, status, remote) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![id, key_id, method, path, status as i64, remote],
@@ -4538,6 +4549,29 @@ mod tests {
             }
         }
         panic!("missing foreign key for {table}.{from_col}");
+    }
+
+    #[test]
+    fn api_audit_redacts_query_strings() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        db.record_api_audit(
+            Some("key-1"),
+            "GET",
+            "/api/v1/runs/run-1?token=secret&password=hidden",
+            200,
+            Some("127.0.0.1:9618"),
+        )
+        .unwrap();
+        let conn = db.conn().unwrap();
+        let path: String = conn
+            .query_row("SELECT path FROM api_audit_log", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(path, "/api/v1/runs/run-1");
+        assert!(!path.contains("secret"));
+        assert!(!path.contains("password"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
