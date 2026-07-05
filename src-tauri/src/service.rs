@@ -62,6 +62,24 @@ pub trait ProcessRunner: Send + Sync {
     ) -> std::io::Result<Output>;
 }
 
+fn should_scrub_child_env_key(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    matches!(
+        key.as_str(),
+        "CURSOR_API_KEY"
+            | "ANTHROPIC_API_KEY"
+            | "OPENAI_API_KEY"
+            | "GITHUB_TOKEN"
+            | "GH_TOKEN"
+            | "TAURI_SIGNING_PRIVATE_KEY"
+            | "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+            | "CHAOS_SCHEDULER_API_TOKEN"
+    ) || key.contains("SECRET")
+        || key.contains("PASSWORD")
+        || key.ends_with("_TOKEN")
+        || key.ends_with("_API_KEY")
+}
+
 /// Real process runner backed by `std::process::Command`.
 pub struct SystemProcessRunner;
 impl ProcessRunner for SystemProcessRunner {
@@ -74,6 +92,11 @@ impl ProcessRunner for SystemProcessRunner {
     ) -> std::io::Result<Output> {
         let mut cmd = std::process::Command::new(program);
         cmd.args(args);
+        for (key, _) in std::env::vars() {
+            if should_scrub_child_env_key(&key) {
+                cmd.env_remove(key);
+            }
+        }
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
@@ -907,6 +930,25 @@ mod tests {
         let same = draft("wf", "source");
         assert!(svc.update_workflow(&wf.id, false, same, false).is_ok());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn process_runner_scrubs_secret_child_env_keys() {
+        for key in [
+            "CURSOR_API_KEY",
+            "GITHUB_TOKEN",
+            "SMTP_PASSWORD",
+            "TAURI_SIGNING_PRIVATE_KEY",
+            "MY_SECRET_VALUE",
+        ] {
+            assert!(should_scrub_child_env_key(key), "{key} should be scrubbed");
+        }
+        for key in ["PATH", "HOME", "RUST_LOG", "CHAOS_SCHEDULER_API_ADDR"] {
+            assert!(
+                !should_scrub_child_env_key(key),
+                "{key} should be preserved"
+            );
+        }
     }
 
     #[test]

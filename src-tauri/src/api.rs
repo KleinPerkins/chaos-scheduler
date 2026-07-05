@@ -24,7 +24,7 @@ use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Shared server state (cheap to clone).
 #[derive(Clone)]
@@ -41,6 +41,8 @@ pub struct ApiState {
     /// Allowed CORS origins. Empty = no cross-origin (same-origin/loopback),
     /// the secure default.
     pub cors_allowlist: Vec<String>,
+    /// Recently accepted inbound webhook event IDs for replay protection.
+    pub webhook_replays: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 /// Fixed-window per-key rate limiter.
@@ -74,6 +76,7 @@ impl RateLimiter {
 }
 
 /// Error type that renders as a JSON body with the right status code.
+#[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
     message: String,
@@ -668,9 +671,9 @@ async fn enqueue(
 }
 
 /// Inbound signed webhook trigger. Requires write scope; if an
-/// `inbound_webhook_secret` is configured, the raw body's HMAC-SHA256 must match
-/// the `X-Chaos-Signature: sha256=<hex>` header (replay-protected via the
-/// idempotency key when supplied).
+/// `inbound_webhook_secret` is configured, the request must include
+/// `X-Chaos-Timestamp`, `X-Chaos-Event-Id`, and `X-Chaos-Signature`, where the
+/// HMAC covers method, concrete path, timestamp, and body hash.
 async fn inbound_dispatch(
     State(st): State<ApiState>,
     Extension(audit): Extension<AuditTrail>,
@@ -688,18 +691,8 @@ async fn inbound_dispatch(
     )?;
     if let Ok(Some(secret)) = st.db.get_scheduler_config("inbound_webhook_secret") {
         if !secret.trim().is_empty() {
-            let provided = headers
-                .get("x-chaos-signature")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("sha256="))
-                .unwrap_or("");
-            let expected = crate::actions::sign_payload(&secret, body.as_bytes());
-            if !constant_time_str(provided, &expected) {
-                return Err(ApiError::new(
-                    StatusCode::UNAUTHORIZED,
-                    "invalid webhook signature",
-                ));
-            }
+            let path = format!("/api/v1/workflows/{id}/dispatch");
+            verify_inbound_webhook(&st, &headers, "POST", &path, body.as_bytes(), &secret)?;
         }
     }
     let payload = if body.trim().is_empty() {
@@ -875,6 +868,101 @@ fn constant_time_str(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+const INBOUND_WEBHOOK_TTL: Duration = Duration::from_secs(5 * 60);
+
+fn unix_timestamp_now() -> Result<i64, ApiError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "system clock before epoch",
+            )
+        })
+}
+
+fn inbound_canonical_payload(method: &str, path: &str, timestamp: &str, body: &[u8]) -> String {
+    let mut body_hash = Sha256::new();
+    body_hash.update(body);
+    format!(
+        "{}\n{}\n{}\n{}",
+        method.to_ascii_uppercase(),
+        path,
+        timestamp,
+        hex::encode(body_hash.finalize())
+    )
+}
+
+fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)?
+        .to_str()
+        .ok()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn verify_inbound_webhook(
+    state: &ApiState,
+    headers: &HeaderMap,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    secret: &str,
+) -> Result<(), ApiError> {
+    let timestamp = header_str(headers, "x-chaos-timestamp")
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "missing webhook timestamp"))?;
+    let timestamp_seconds = timestamp
+        .parse::<i64>()
+        .map_err(|_| ApiError::new(StatusCode::UNAUTHORIZED, "invalid webhook timestamp"))?;
+    let now = unix_timestamp_now()?;
+    if (now - timestamp_seconds).abs() > INBOUND_WEBHOOK_TTL.as_secs() as i64 {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "webhook timestamp outside replay window",
+        ));
+    }
+
+    let event_id = header_str(headers, "x-chaos-event-id")
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "missing webhook event id"))?;
+    if event_id.len() > 160 || event_id.chars().any(|c| c.is_control()) {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid webhook event id",
+        ));
+    }
+
+    let provided = header_str(headers, "x-chaos-signature")
+        .and_then(|value| value.strip_prefix("sha256="))
+        .unwrap_or("");
+    let canonical = inbound_canonical_payload(method, path, timestamp, body);
+    let expected = crate::actions::sign_payload(secret, canonical.as_bytes());
+    if !constant_time_str(provided, &expected) {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid webhook signature",
+        ));
+    }
+
+    let mut cache = state.webhook_replays.lock().map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "webhook replay cache unavailable",
+        )
+    })?;
+    cache.retain(|_, seen_at| seen_at.elapsed() <= INBOUND_WEBHOOK_TTL);
+    let replay_key = format!("{path}:{event_id}");
+    if cache.contains_key(&replay_key) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "duplicate webhook event",
+        ));
+    }
+    cache.insert(replay_key, Instant::now());
+    Ok(())
+}
+
 /// Spawn the API server on its own tokio runtime + thread. Never blocks the
 /// caller. Binds `addr` (loopback by default).
 pub fn start_api_server(state: ApiState, addr: String) {
@@ -953,6 +1041,7 @@ mod tests {
             preauth_rate: Arc::new(Mutex::new(RateLimiter::new(1000, Duration::from_secs(60)))),
             host_allowlist: vec![],
             cors_allowlist: vec![],
+            webhook_replays: Arc::new(Mutex::new(HashMap::new())),
         };
         (state, key.token)
     }
@@ -964,6 +1053,50 @@ mod tests {
             .unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, value)
+    }
+
+    fn signed_inbound_headers(
+        secret: &str,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        event_id: &str,
+    ) -> HeaderMap {
+        let timestamp = unix_timestamp_now().unwrap().to_string();
+        let canonical = inbound_canonical_payload(method, path, &timestamp, body);
+        let signature = crate::actions::sign_payload(secret, canonical.as_bytes());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-chaos-timestamp", timestamp.parse().unwrap());
+        headers.insert("x-chaos-event-id", event_id.parse().unwrap());
+        headers.insert(
+            "x-chaos-signature",
+            format!("sha256={signature}").parse().unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn inbound_webhook_requires_canonical_signature_and_blocks_replay() {
+        let (state, _) = test_state();
+        let secret = "hook-secret";
+        let path = "/api/v1/workflows/wf-1/dispatch";
+        let body = br#"{"ok":true}"#;
+        let headers = signed_inbound_headers(secret, "POST", path, body, "event-1");
+        verify_inbound_webhook(&state, &headers, "POST", path, body, secret).unwrap();
+
+        let replay =
+            verify_inbound_webhook(&state, &headers, "POST", path, body, secret).unwrap_err();
+        assert_eq!(replay.status, StatusCode::CONFLICT);
+
+        let mut legacy = signed_inbound_headers(secret, "POST", path, body, "event-2");
+        legacy.insert(
+            "x-chaos-signature",
+            format!("sha256={}", crate::actions::sign_payload(secret, body))
+                .parse()
+                .unwrap(),
+        );
+        let err = verify_inbound_webhook(&state, &legacy, "POST", path, body, secret).unwrap_err();
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -1238,6 +1371,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_workflow_rolls_back_when_spec_validation_fails() {
+        let (state, token) = test_state();
+        let db = state.db.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workflows")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "name": "Rollback WF",
+                            "script_path": "scripts/x.py",
+                            "cron_schedule": "0 0 * * *",
+                            "environment": "instance",
+                            "spec": {"kind":"generic", "generic":{"steps":[]}}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            db.list_workflows()
+                .unwrap()
+                .iter()
+                .all(|workflow| workflow.name != "Rollback WF"),
+            "failed spec registration must not leave a spec-less workflow"
+        );
+    }
+
+    #[tokio::test]
     async fn protected_environment_write_endpoints_are_rejected() {
         let (state, token) = test_state();
         let wf = state
@@ -1454,6 +1623,7 @@ mod tests {
             preauth_rate: Arc::new(Mutex::new(RateLimiter::new(1000, Duration::from_secs(60)))),
             host_allowlist: vec![],
             cors_allowlist: vec![],
+            webhook_replays: Arc::new(Mutex::new(HashMap::new())),
         };
         let app = router(state);
         let resp = app
@@ -1581,9 +1751,7 @@ mod tests {
     /// back to a source system — the register -> enqueue -> result-webhook loop.
     #[tokio::test]
     async fn register_enqueue_then_result_webhook_smoke() {
-        use crate::actions::{dispatch_actions, sign_payload, ActionContext, ActionSpec};
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
+        use crate::actions::{dispatch_actions, ActionContext, ActionSpec};
 
         let (state, token) = test_state();
         let db = state.db.clone();
@@ -1663,63 +1831,28 @@ mod tests {
             Some(queued_run_id.as_str())
         );
 
-        // 3) Deliver the run result back to the source system via a signed
-        //    outbound webhook (the results-feedback contract).
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = vec![0u8; 8192];
-            let n = stream.read(&mut buf).unwrap();
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                .unwrap();
-            String::from_utf8_lossy(&buf[..n]).to_string()
-        });
-
-        let result_payload = json!({
-            "workflow_id": wf_id,
-            "run_id": "smoke-run",
-            "status": "failed"
-        });
-        // The signature the receiver must observe (HMAC of the exact bytes sent).
-        let expected = sign_payload("hook-secret", &serde_json::to_vec(&result_payload).unwrap());
+        // 3) Local result-webhook targets are blocked before any network send to
+        //    prevent outbound SSRF against loopback/private services.
         let ctx = ActionContext {
             db,
             notifier: Arc::new(NoopNotifier),
             workflow_name: "Smoke WF".into(),
             run_id: "smoke-run".into(),
             success: false,
-            result_payload,
+            result_payload: json!({
+                "workflow_id": wf_id,
+                "run_id": "smoke-run",
+                "status": "failed"
+            }),
         };
         let action = ActionSpec::Webhook {
-            url: format!("http://{addr}/results"),
+            url: "http://127.0.0.1:9/results".into(),
             secret: Some("hook-secret".into()),
             max_retries: 0,
         };
-        // dispatch_webhook uses a blocking HTTP client (its own runtime); run it
-        // off the async test runtime to avoid a nested-runtime drop panic.
-        let results = tokio::task::spawn_blocking(move || {
-            dispatch_actions(std::slice::from_ref(&action), &ctx)
-        })
-        .await
-        .unwrap();
+        let results = dispatch_actions(std::slice::from_ref(&action), &ctx);
         assert_eq!(results.len(), 1);
-        assert!(
-            results[0].success,
-            "result webhook delivery failed: {}",
-            results[0].message
-        );
-
-        let request = server.join().unwrap();
-        let lower = request.to_lowercase();
-        assert!(
-            lower.contains("x-chaos-signature: sha256="),
-            "result webhook must be HMAC-signed"
-        );
-        assert!(
-            request.contains(&expected),
-            "delivered signature must match the result body HMAC"
-        );
+        assert!(!results[0].success);
+        assert!(results[0].message.contains("blocked local/private"));
     }
 }
