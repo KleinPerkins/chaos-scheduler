@@ -145,6 +145,8 @@ export default function Integrations() {
   };
 
   const tokenForSnippet = newKey?.token ?? "";
+  const writeScopeSelected =
+    scopes.includes("write") || scopes.includes("admin");
 
   return (
     <div className="integrations">
@@ -194,6 +196,14 @@ export default function Integrations() {
               </label>
             ))}
           </fieldset>
+          {writeScopeSelected && (
+            <p className="intg-hint" role="note">
+              <strong>Write/admin keys can execute local code.</strong> Treat
+              them like machine-owner credentials: store them in a secret
+              manager, revoke unused keys, and avoid sharing them in chat or
+              logs. Protected environments require an explicit backend override.
+            </p>
+          )}
           <button type="submit" className="btn btn-primary" disabled={busy}>
             {busy ? "Working..." : "Create key"}
           </button>

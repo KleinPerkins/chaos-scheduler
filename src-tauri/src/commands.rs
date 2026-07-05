@@ -228,7 +228,7 @@ pub fn set_workflow_spec(
 ) -> Result<Workflow, String> {
     state
         .service
-        .set_workflow_spec(&id, &spec)
+        .set_workflow_spec(&id, &spec, false)
         .map_err(|e| e.to_string())
 }
 
@@ -306,6 +306,10 @@ pub fn create_api_key(
 
 #[tauri::command]
 pub fn trigger_workflow(state: State<AppState>, id: String) -> Result<String, String> {
+    state
+        .service
+        .ensure_workflow_execution_allowed(&id)
+        .map_err(|e| e.to_string())?;
     let result = scheduler::execute_workflow_with_context(
         &state.db,
         &state.workspace_root,
@@ -349,6 +353,10 @@ pub fn rerun_workflow(
         serde_json::from_str::<serde_json::Value>(input)
             .map_err(|e| format!("Invalid input override JSON: {}", e))?;
     }
+    state
+        .service
+        .ensure_workflow_execution_allowed(&workflow_id)
+        .map_err(|e| e.to_string())?;
     let payload = serde_json::json!({
         "source_run_id": source_run_id,
         "input_override": input_override_json.as_ref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
@@ -505,6 +513,12 @@ pub fn dispatch_backfill(
 ) -> Result<BackfillDispatchResult, String> {
     let dry_run = dry_run.unwrap_or(false);
     let plan = build_backfill_plan(&state.db, &workflow_id, &since, &until, max_runs, dry_run)?;
+    if !dry_run {
+        state
+            .service
+            .ensure_workflow_execution_allowed(&workflow_id)
+            .map_err(|e| e.to_string())?;
+    }
     if dry_run {
         return Ok(BackfillDispatchResult {
             plan,
@@ -1356,6 +1370,10 @@ pub fn update_queue(
     tag_cap: Option<i64>,
     max_queued: Option<i64>,
 ) -> Result<QueueInfo, String> {
+    state
+        .service
+        .ensure_environment_target_writable(&environment, "update queue")
+        .map_err(|e| e.to_string())?;
     state
         .db
         .upsert_queue(&name, &environment, capacity, tag_cap, max_queued)
