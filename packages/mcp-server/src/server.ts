@@ -78,7 +78,20 @@ export function buildServer(deps: ServerDeps): McpServer {
     config.protectedEnvironments.length > 0 && !config.allowProtectedWrites;
   const assertWorkflowWritable = async (id: string): Promise<void> => {
     if (!protectionActive) return;
-    assertEnvironmentWritable(await workflowEnvironment(client, id), config);
+    let env: string | undefined;
+    try {
+      const wf = await client.getWorkflow(id);
+      env = wf.environment ?? wf.corpus;
+    } catch (err) {
+      // Fail closed: if we cannot resolve the workflow's environment while
+      // protection is active, refuse the write rather than silently
+      // treating an unresolvable lookup as "unprotected" (the prior
+      // behavior returned `undefined`, which made the guardrail a no-op).
+      throw new GuardrailError(
+        `could not resolve workflow '${id}' environment; refusing write while environment protection is active (${err instanceof Error ? err.message : String(err)})`,
+      );
+    }
+    assertEnvironmentWritable(env, config);
   };
 
   const server = new McpServer(
@@ -298,6 +311,9 @@ export function buildServer(deps: ServerDeps): McpServer {
     async (args) => {
       const { id, ...patch } = args;
       await assertWorkflowWritable(id);
+      if (patch.environment) {
+        assertEnvironmentWritable(patch.environment, config);
+      }
       return jsonResult(await client.updateWorkflow(id, patch));
     },
   );
@@ -690,21 +706,4 @@ export function buildServer(deps: ServerDeps): McpServer {
   );
 
   return server;
-}
-
-/**
- * Best-effort lookup of a workflow's environment for the protected-write
- * guardrail. Only performed when protection is actually configured, to avoid an
- * extra round-trip on every write.
- */
-async function workflowEnvironment(
-  client: ChaosSchedulerClient,
-  id: string,
-): Promise<string | undefined> {
-  try {
-    const wf = await client.getWorkflow(id);
-    return wf.environment ?? wf.corpus;
-  } catch {
-    return undefined;
-  }
 }

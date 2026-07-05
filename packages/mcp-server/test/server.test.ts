@@ -106,9 +106,34 @@ const ROUTES: Record<string, unknown> = {
       },
     ],
   },
+  "POST /api/v1/workflows/w1/dispatch": {
+    workflow_id: "w1",
+    status: "queued",
+    run_id: null,
+    queued_run_id: "q2",
+    queue_name: "instance-default",
+  },
+  "PATCH /api/v1/workflows/w1": {
+    workflow: {
+      id: "w1",
+      name: "A",
+      environment: "instance",
+      corpus: "instance",
+    },
+  },
+  "POST /api/v1/workflows/w1/rerun": {
+    workflow_id: "w1",
+    status: "admitted",
+    run_id: "r2",
+    queued_run_id: null,
+    queue_name: "instance-default",
+  },
 };
 
-async function connectedPair(envOverrides: Record<string, string> = {}) {
+async function connectedPair(
+  envOverrides: Record<string, string> = {},
+  routes: Record<string, unknown> = ROUTES,
+) {
   const config = configFromEnv({
     CHAOS_SCHEDULER_API_KEY: "id.secret",
     ...envOverrides,
@@ -116,7 +141,7 @@ async function connectedPair(envOverrides: Record<string, string> = {}) {
   const sdk = new ChaosSchedulerClient({
     baseUrl: config.baseUrl,
     apiKey: config.apiKey,
-    fetch: routedFetch(ROUTES),
+    fetch: routedFetch(routes),
   });
   const server = buildServer({ client: sdk, config });
   const [clientTransport, serverTransport] =
@@ -266,5 +291,178 @@ describe("Chaos MCP server", () => {
     };
     expect(result.isError).toBeFalsy();
     expect(JSON.parse(textOf(result))[0].name).toBe("instance-default");
+  });
+
+  it("fail-closed when getWorkflow returns 404 under active protection", async () => {
+    const routes = { ...ROUTES };
+    delete routes["GET /api/v1/workflows/w1"];
+    const { client } = await connectedPair(
+      { CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "instance" },
+      routes,
+    );
+    const result = (await client.callTool({
+      name: "run_workflow_now",
+      arguments: { id: "w1" },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/could not resolve workflow/i);
+  });
+
+  it("fail-closed when getWorkflow returns 500 under active protection", async () => {
+    const fetch: FetchLike = async (url, init) => {
+      const path = url.replace("http://127.0.0.1:9618", "");
+      const key = `${init?.method ?? "GET"} ${path}`;
+      if (key === "GET /api/v1/workflows/w1") {
+        return {
+          ok: false,
+          status: 500,
+          text: async () => JSON.stringify({ error: "internal error" }),
+        };
+      }
+      return routedFetch(ROUTES)(url, init);
+    };
+    const config = configFromEnv({
+      CHAOS_SCHEDULER_API_KEY: "id.secret",
+      CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "instance",
+    });
+    const sdk = new ChaosSchedulerClient({
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      fetch,
+    });
+    const server = buildServer({ client: sdk, config });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+    const result = (await client.callTool({
+      name: "run_workflow_now",
+      arguments: { id: "w1" },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/could not resolve workflow/i);
+  });
+
+  it("blocks update_workflow when destination environment is protected", async () => {
+    const { client } = await connectedPair({
+      CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "prod",
+    });
+    const result = (await client.callTool({
+      name: "update_workflow",
+      arguments: { id: "w1", environment: "prod" },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/protected/i);
+  });
+
+  it("update_workflow proxies through the SDK", async () => {
+    const { client } = await connectedPair();
+    const result = (await client.callTool({
+      name: "update_workflow",
+      arguments: { id: "w1", name: "Renamed" },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(textOf(result)).id).toBe("w1");
+  });
+
+  it("rerun_workflow proxies through the SDK", async () => {
+    const { client } = await connectedPair();
+    const result = (await client.callTool({
+      name: "rerun_workflow",
+      arguments: { id: "w1", idempotency_key: "rk1" },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(textOf(result)).run_id).toBe("r2");
+  });
+
+  it("get_run_tasks proxies through the SDK", async () => {
+    const { client } = await connectedPair();
+    const result = (await client.callTool({
+      name: "get_run_tasks",
+      arguments: { id: "r1" },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(textOf(result)).tasks[0].task_id).toBe("step1");
+  });
+
+  it("list_queued_runs proxies through the SDK", async () => {
+    const { client } = await connectedPair();
+    const result = (await client.callTool({
+      name: "list_queued_runs",
+      arguments: {},
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(textOf(result))[0].id).toBe("q1");
+  });
+
+  it("dispatch_workflow proxies through the SDK with signature header", async () => {
+    const calls: Array<{ headers?: Record<string, string> }> = [];
+    const fetch: FetchLike = async (url, init) => {
+      calls.push({ headers: init?.headers as Record<string, string> });
+      const path = url.replace("http://127.0.0.1:9618", "");
+      const key = `${init?.method ?? "GET"} ${path}`;
+      const body = ROUTES[key];
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(body),
+      };
+    };
+    const config = configFromEnv({ CHAOS_SCHEDULER_API_KEY: "id.secret" });
+    const sdk = new ChaosSchedulerClient({
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      fetch,
+    });
+    const server = buildServer({ client: sdk, config });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+    const result = (await client.callTool({
+      name: "dispatch_workflow",
+      arguments: {
+        id: "w1",
+        payload: "{}",
+        signature_secret: "hook-secret",
+      },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    const dispatchCall = calls.find((c) =>
+      c.headers?.["x-chaos-signature"]?.startsWith("sha256="),
+    );
+    expect(dispatchCall?.headers?.["x-chaos-signature"]).toMatch(
+      /^sha256=[0-9a-f]{64}$/,
+    );
   });
 });
