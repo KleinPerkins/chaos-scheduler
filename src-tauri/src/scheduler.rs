@@ -19,7 +19,55 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+static ALREADY_EXITING: AtomicBool = AtomicBool::new(false);
 static SLA_NOTIFICATION_CACHE: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+
+/// First quit path wins; subsequent `ExitRequested` events are ignored so the
+/// off-main-thread grace timer is armed exactly once.
+pub fn claim_exit_shutdown() -> bool {
+    !ALREADY_EXITING.swap(true, Ordering::SeqCst)
+}
+
+/// Fixed grace before `app.exit(0)` on the off-main shutdown thread. Covers the
+/// in-flight child `SIGTERM`->`SIGKILL` window plus a small margin.
+pub fn process_exit_grace() -> Duration {
+    PROCESS_SHUTDOWN_GRACE + Duration::from_secs(2)
+}
+
+/// Signal all workers/poll/retry paths to stop promptly.
+pub fn initiate_shutdown() {
+    SHUTDOWN.store(true, Ordering::Relaxed);
+}
+
+/// Sleep that returns early when [`SHUTDOWN`] is set (poll/retry backoff paths),
+/// so a fixed shutdown grace is actually sufficient to stop in-flight workers.
+pub fn sleep_interruptible(duration: Duration) {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
+}
+
+#[cfg(test)]
+static SHUTDOWN_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Serialize + reset the process-global `SHUTDOWN`/`ALREADY_EXITING` flags for any
+/// test that reads or mutates them. `cargo test` runs tests in-process and in
+/// parallel, so a test that flips `SHUTDOWN` true would otherwise race a command
+/// that expects it false. Hold the returned guard for the whole test body.
+#[cfg(test)]
+pub(crate) fn lock_shutdown_test_state() -> std::sync::MutexGuard<'static, ()> {
+    let guard = SHUTDOWN_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    SHUTDOWN.store(false, Ordering::Relaxed);
+    ALREADY_EXITING.store(false, Ordering::Relaxed);
+    guard
+}
 
 pub const SCHEDULER_BUNDLE_ID: &str = crate::branding::BUNDLE_ID;
 pub const CANONICAL_EXECUTABLE_PATH: &str = crate::branding::CANONICAL_EXECUTABLE_PATH;
@@ -3906,8 +3954,68 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn shutdown_kills_in_flight_child_within_grace() {
+        let _guard = lock_shutdown_test_state();
+        let dir =
+            std::env::temp_dir().join(format!("chaos-shutdown-kill-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let child_pid_path = dir.join("child.pid");
+        let script = format!(
+            "(sleep 30) & echo $! > {}; wait",
+            child_pid_path.to_string_lossy()
+        );
+        let script_for_thread = script.clone();
+        let handle = std::thread::spawn(move || {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(&script_for_thread);
+            run_workflow_command(cmd, None, Duration::from_secs(60))
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        initiate_shutdown();
+        let output = handle
+            .join()
+            .expect("workflow thread")
+            .expect("command output");
+        assert!(output.cancelled, "shutdown should cancel in-flight command");
+        std::thread::sleep(Duration::from_millis(250));
+        let child_pid: i64 = std::fs::read_to_string(&child_pid_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            !process_is_alive(child_pid),
+            "shutdown should kill descendants in the child process group"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn claim_exit_shutdown_is_idempotent() {
+        let _guard = lock_shutdown_test_state();
+        assert!(claim_exit_shutdown());
+        assert!(!claim_exit_shutdown());
+        assert!(!claim_exit_shutdown());
+    }
+
+    #[test]
+    fn sleep_interruptible_returns_early_on_shutdown() {
+        let _guard = lock_shutdown_test_state();
+        let handle = std::thread::spawn(|| sleep_interruptible(Duration::from_secs(30)));
+        std::thread::sleep(Duration::from_millis(50));
+        initiate_shutdown();
+        let start = Instant::now();
+        handle.join().expect("sleep thread");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "interruptible sleep should return promptly after SHUTDOWN"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn run_command_timeout_kills_process_group() {
-        SHUTDOWN.store(false, Ordering::Relaxed);
+        let _guard = lock_shutdown_test_state();
         let dir = std::env::temp_dir().join(format!("chaos-timeout-kill-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let child_pid_path = dir.join("child.pid");
@@ -3936,7 +4044,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn run_command_caps_stdout_stderr_and_fd3() {
-        SHUTDOWN.store(false, Ordering::Relaxed);
+        let _guard = lock_shutdown_test_state();
         let script = format!(
             "import os,sys; sys.stdout.write('o' * {}); sys.stderr.write('e' * {}); os.write(3, b't' * {})",
             OUTPUT_CAPTURE_LIMIT_BYTES + 1024,

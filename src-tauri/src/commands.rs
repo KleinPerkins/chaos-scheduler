@@ -1556,7 +1556,9 @@ pub fn open_url(url: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
-    crate::scheduler::SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+    // The `RunEvent::ExitRequested` handler in `run()` owns the shutdown sequence
+    // (re-entrancy guard, SHUTDOWN signal, off-main-thread grace exit). Every quit
+    // path routes through `exit()`, so this stays a thin trigger.
     app.exit(0);
     Ok(())
 }

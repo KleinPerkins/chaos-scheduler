@@ -62,7 +62,7 @@ pub fn execute_step_flow(
     base_env: &[(String, String)],
 ) -> Result<StepFlowOutcome, String> {
     execute_step_flow_inner(spec, runner, workspace_root, base_env, &mut |d| {
-        std::thread::sleep(d)
+        crate::scheduler::sleep_interruptible(d)
     })
 }
 
@@ -135,6 +135,9 @@ fn execute_step_flow_inner(
                 }
             }
             if attempt + 1 < max_attempts && backoff > 0 {
+                if crate::scheduler::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 sleep(std::time::Duration::from_secs(backoff));
             }
         }

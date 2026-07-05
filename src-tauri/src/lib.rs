@@ -433,6 +433,22 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
+            // Single choke point for every quit path (Cmd+Q / dock / tray /
+            // quit_app / restart all route through ExitRequested). Claim the
+            // shutdown once, signal workers, and arm a fixed-grace exit on a
+            // non-main thread so the event loop is never blocked.
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+                if scheduler::claim_exit_shutdown() {
+                    api.prevent_exit();
+                    scheduler::initiate_shutdown();
+                    let app = app_handle.clone();
+                    std::thread::spawn(move || {
+                        scheduler::sleep_interruptible(scheduler::process_exit_grace());
+                        app.exit(0);
+                    });
+                }
+            }
+
             if let tauri::RunEvent::Ready = event {
                 if let Some(tray) = app_handle.tray_by_id(TRAY_ID) {
                     // Reassert tray visibility on Ready for macOS 26+ resilience.
