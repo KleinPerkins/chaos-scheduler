@@ -590,7 +590,7 @@ pub struct ApiKeyInfo {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 5;
+pub const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 pub struct Database {
     path: String,
@@ -693,7 +693,7 @@ impl Database {
             );
             CREATE TABLE IF NOT EXISTS queued_runs (
                 id TEXT PRIMARY KEY,
-                run_id TEXT REFERENCES runs(id),
+                run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
                 workflow_id TEXT NOT NULL REFERENCES workflows(id),
                 queue_name TEXT NOT NULL,
                 priority INTEGER NOT NULL DEFAULT 0,
@@ -710,7 +710,7 @@ impl Database {
             CREATE TABLE IF NOT EXISTS workflow_mutex_locks (
                 mutex_key TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL REFERENCES workflows(id),
-                run_id TEXT REFERENCES runs(id),
+                run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
                 acquired_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_runs_workflow ON runs(workflow_id);",
@@ -1014,7 +1014,87 @@ impl Database {
             (3, Self::migrate_v3_workflow_spec),
             (4, Self::migrate_v4_api_keys),
             (5, Self::migrate_v5_queue_environment),
+            (6, Self::migrate_v6_run_retention_fk_actions),
         ]
+    }
+
+    /// v6: make retention-safe `runs` foreign-key behavior explicit for queue
+    /// and mutex rows that predate the full run-child cascade matrix.
+    fn migrate_v6_run_retention_fk_actions(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "CREATE TEMP TABLE run_relationships_queued_run_refs_v6 AS
+                SELECT id, queued_run_id
+                FROM run_relationships
+                WHERE queued_run_id IS NOT NULL;
+
+            CREATE TABLE queued_runs_v6 (
+                id TEXT PRIMARY KEY,
+                run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+                workflow_id TEXT NOT NULL REFERENCES workflows(id),
+                queue_name TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'queued',
+                queued_at TEXT NOT NULL,
+                admitted_at TEXT,
+                finished_at TEXT,
+                trigger_kind TEXT,
+                trigger_payload TEXT,
+                upstream_run_id TEXT,
+                input_json TEXT,
+                rerun_of_run_id TEXT
+            );
+            INSERT INTO queued_runs_v6
+                (id, run_id, workflow_id, queue_name, priority, status, queued_at,
+                 admitted_at, finished_at, trigger_kind, trigger_payload,
+                 upstream_run_id, input_json, rerun_of_run_id)
+                SELECT id,
+                       CASE WHEN run_id IS NULL OR EXISTS (SELECT 1 FROM runs r WHERE r.id = queued_runs.run_id)
+                            THEN run_id ELSE NULL END,
+                       workflow_id, queue_name, priority, status, queued_at,
+                       admitted_at, finished_at, trigger_kind, trigger_payload,
+                       upstream_run_id, input_json, rerun_of_run_id
+                FROM queued_runs;
+            DROP TABLE queued_runs;
+            ALTER TABLE queued_runs_v6 RENAME TO queued_runs;
+            CREATE INDEX IF NOT EXISTS idx_queued_runs_queue_status ON queued_runs(queue_name, status, priority DESC, queued_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_queued_runs_workflow_status ON queued_runs(workflow_id, status);
+
+            UPDATE run_relationships
+               SET queued_run_id = (
+                   SELECT queued_run_id
+                   FROM run_relationships_queued_run_refs_v6 refs
+                   WHERE refs.id = run_relationships.id
+               )
+             WHERE id IN (SELECT id FROM run_relationships_queued_run_refs_v6)
+               AND EXISTS (
+                   SELECT 1
+                   FROM queued_runs q
+                   WHERE q.id = (
+                       SELECT queued_run_id
+                       FROM run_relationships_queued_run_refs_v6 refs
+                       WHERE refs.id = run_relationships.id
+                   )
+               );
+            DROP TABLE run_relationships_queued_run_refs_v6;
+
+            CREATE TABLE workflow_mutex_locks_v6 (
+                mutex_key TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL REFERENCES workflows(id),
+                run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+                acquired_at TEXT NOT NULL
+            );
+            INSERT INTO workflow_mutex_locks_v6 (mutex_key, workflow_id, run_id, acquired_at)
+                SELECT mutex_key,
+                       workflow_id,
+                       CASE WHEN run_id IS NULL OR EXISTS (SELECT 1 FROM runs r WHERE r.id = workflow_mutex_locks.run_id)
+                            THEN run_id ELSE NULL END,
+                       acquired_at
+                FROM workflow_mutex_locks;
+            DROP TABLE workflow_mutex_locks;
+            ALTER TABLE workflow_mutex_locks_v6 RENAME TO workflow_mutex_locks;
+            CREATE INDEX IF NOT EXISTS idx_workflow_mutex_locks_workflow ON workflow_mutex_locks(workflow_id);",
+        )?;
+        Ok(())
     }
 
     /// v5: promote `environment` to the authoritative partition key across the
@@ -4322,6 +4402,24 @@ fn queue_identity_from_config(queue_config: Option<&str>, environment: &str) -> 
 mod tests {
     use super::*;
 
+    fn fk_delete_action(conn: &Connection, table: &str, from_col: &str) -> String {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA foreign_key_list({table})"))
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(3)?, row.get::<_, String>(6)?))
+            })
+            .unwrap();
+        for row in rows {
+            let (column, on_delete) = row.unwrap();
+            if column == from_col {
+                return on_delete;
+            }
+        }
+        panic!("missing foreign key for {table}.{from_col}");
+    }
+
     #[test]
     fn fresh_db_stamps_current_schema_version_and_enables_wal() {
         let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
@@ -4521,6 +4619,111 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ev_env, "prod");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migration_v6_rebuilds_run_fk_actions_for_retention_children() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "PRAGMA foreign_keys = ON;
+                CREATE TABLE workflows (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
+                    script_path TEXT NOT NULL, cron_schedule TEXT NOT NULL,
+                    enabled INTEGER DEFAULT 1, corpus TEXT NOT NULL DEFAULT 'source',
+                    created_at TEXT, updated_at TEXT
+                );
+                CREATE TABLE runs (
+                    id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id),
+                    started_at TEXT NOT NULL, finished_at TEXT, exit_code INTEGER,
+                    stdout TEXT, stderr TEXT, result_url TEXT, status TEXT DEFAULT 'running'
+                );
+                CREATE TABLE queued_runs (
+                    id TEXT PRIMARY KEY, run_id TEXT REFERENCES runs(id),
+                    workflow_id TEXT NOT NULL REFERENCES workflows(id), queue_name TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued',
+                    queued_at TEXT NOT NULL, admitted_at TEXT, finished_at TEXT
+                );
+                CREATE TABLE workflow_mutex_locks (
+                    mutex_key TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id),
+                    run_id TEXT REFERENCES runs(id), acquired_at TEXT NOT NULL
+                );
+                CREATE TABLE queues (
+                    name TEXT NOT NULL, environment TEXT NOT NULL,
+                    capacity INTEGER NOT NULL DEFAULT 1, tag_cap INTEGER, max_queued INTEGER,
+                    created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+                    PRIMARY KEY (name, environment)
+                );
+                CREATE TABLE run_relationships (
+                    id TEXT PRIMARY KEY,
+                    parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    child_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+                    queued_run_id TEXT REFERENCES queued_runs(id) ON DELETE SET NULL,
+                    child_workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+                    relationship TEXT NOT NULL, task_id TEXT, wait INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL, reason TEXT, details_json TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                INSERT INTO workflows (id, name, script_path, cron_schedule, created_at, updated_at)
+                    VALUES ('wf-retention', 'Retention', 's.py', '0 0 * * *', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO runs (id, workflow_id, started_at, status) VALUES
+                    ('run-delete', 'wf-retention', '2026-01-01T00:00:00Z', 'success'),
+                    ('run-parent', 'wf-retention', '2026-01-01T00:00:00Z', 'success');
+                INSERT INTO queued_runs (id, run_id, workflow_id, queue_name, status, queued_at)
+                    VALUES ('queue-delete', 'run-delete', 'wf-retention', 'source-default', 'success', '2026-01-01T00:00:00Z');
+                INSERT INTO workflow_mutex_locks (mutex_key, workflow_id, run_id, acquired_at)
+                    VALUES ('mutex-delete', 'wf-retention', 'run-delete', '2026-01-01T00:00:00Z');
+                INSERT INTO run_relationships (id, parent_run_id, queued_run_id, child_workflow_id, relationship, wait, status, created_at, updated_at)
+                    VALUES ('rel-queue', 'run-parent', 'queue-delete', 'wf-retention', 'run_workflow', 0, 'queued', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                PRAGMA user_version = 5;",
+            )
+            .unwrap();
+        }
+
+        let db = Database::new(&dir);
+        let conn = db.conn().unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(fk_delete_action(&conn, "queued_runs", "run_id"), "SET NULL");
+        assert_eq!(
+            fk_delete_action(&conn, "workflow_mutex_locks", "run_id"),
+            "CASCADE"
+        );
+
+        let relationship_ref: Option<String> = conn
+            .query_row(
+                "SELECT queued_run_id FROM run_relationships WHERE id = 'rel-queue'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(relationship_ref.as_deref(), Some("queue-delete"));
+
+        conn.execute("DELETE FROM runs WHERE id = 'run-delete'", [])
+            .unwrap();
+        let queue_run_id: Option<String> = conn
+            .query_row(
+                "SELECT run_id FROM queued_runs WHERE id = 'queue-delete'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(queue_run_id.is_none());
+        let lock_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_mutex_locks WHERE mutex_key = 'mutex-delete'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lock_count, 0);
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5486,6 +5689,41 @@ SUMMARY_JSON:{\"title\":\"current\"}
         .unwrap();
         db.upsert_scheduler_dead_letter(&preserved.id, &workflow.id, None, None, "boom")
             .unwrap();
+        let deletable_queue_id = db
+            .upsert_queued_run_with_context(
+                &workflow.id,
+                "source-default",
+                0,
+                Some("retention-test"),
+                Some("delete"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        db.mark_queued_run_terminal_by_id(&deletable_queue_id, &deletable.id, "success")
+            .unwrap();
+        let preserved_queue_id = db
+            .upsert_queued_run_with_context(
+                &workflow.id,
+                "source-default",
+                0,
+                Some("retention-test"),
+                Some("preserve"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        db.mark_queued_run_terminal_by_id(&preserved_queue_id, &preserved.id, "dead_lettered")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO workflow_mutex_locks (mutex_key, workflow_id, run_id, acquired_at)
+             VALUES ('retention-delete', ?1, ?2, datetime('now')),
+                    ('retention-preserve', ?1, ?3, datetime('now'))",
+            params![workflow.id, deletable.id, preserved.id],
+        )
+        .unwrap();
 
         let dry = db.cleanup_retention(90, true).unwrap();
         assert_eq!(dry.candidate_runs, 1);
@@ -5496,6 +5734,46 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(applied.deleted_runs, 1);
         assert!(db.get_run(&deletable.id).is_err());
         assert!(db.get_run(&preserved.id).is_ok());
+
+        // Retention's runs-FK deletion matrix:
+        // queued_runs.run_id is retained as queue history with SET NULL;
+        // workflow_mutex_locks rows are deleted with the expired run;
+        // dead-lettered runs and their dependent rows are preserved.
+        let deleted_queue_run_id: Option<String> = conn
+            .query_row(
+                "SELECT run_id FROM queued_runs WHERE id = ?1",
+                params![deletable_queue_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(deleted_queue_run_id.is_none());
+        let preserved_queue_run_id: Option<String> = conn
+            .query_row(
+                "SELECT run_id FROM queued_runs WHERE id = ?1",
+                params![preserved_queue_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            preserved_queue_run_id.as_deref(),
+            Some(preserved.id.as_str())
+        );
+        let deleted_lock_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_mutex_locks WHERE mutex_key = 'retention-delete'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(deleted_lock_count, 0);
+        let preserved_lock_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_mutex_locks WHERE mutex_key = 'retention-preserve'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved_lock_count, 1);
 
         let filtered = db
             .get_global_run_history(
