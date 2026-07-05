@@ -32,10 +32,17 @@ export type {
 export { ChaosApiError } from "./errors.js";
 export {
   computeWebhookSignature,
+  computeInboundDispatchSignature,
+  inboundCanonicalPayload,
+  inboundDispatchHeaders,
   webhookSignatureHeader,
   verifyWebhookSignature,
+  verifyInboundDispatchSignature,
 } from "./webhook.js";
-export type { SignaturePayload } from "./webhook.js";
+export type {
+  InboundDispatchHeaderOptions,
+  SignaturePayload,
+} from "./webhook.js";
 export { isDuplicateDispatch } from "./types.js";
 export type {
   ActionSpec,
