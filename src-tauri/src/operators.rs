@@ -8,6 +8,7 @@
 use crate::service::ProcessRunner;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 
 /// A minimal HTTP response used by operators.
 #[derive(Debug, Clone)]
@@ -131,6 +132,77 @@ impl Default for OperatorRegistry {
     }
 }
 
+fn normalize_path(path: PathBuf) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn confined_workspace_path(workspace_root: &str, raw_path: &str) -> Result<PathBuf, String> {
+    let configured_root = normalize_path(PathBuf::from(workspace_root));
+    let root = Path::new(workspace_root)
+        .canonicalize()
+        .map_err(|e| format!("git_pull: invalid workspace_root: {e}"))?;
+    let raw = Path::new(raw_path.trim());
+    let candidate = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        configured_root.join(raw)
+    };
+    let normalized = normalize_path(candidate);
+    let confined = if normalized.starts_with(&configured_root) {
+        root.join(
+            normalized
+                .strip_prefix(&configured_root)
+                .unwrap_or(Path::new("")),
+        )
+    } else {
+        normalized
+    };
+    if !confined.starts_with(&root) {
+        return Err("git_pull: path must stay within workspace_root".into());
+    }
+    Ok(confined)
+}
+
+fn is_scp_like_ssh_url(value: &str) -> bool {
+    if value.contains("://") {
+        return false;
+    }
+    let Some((user, host_and_path)) = value.split_once('@') else {
+        return false;
+    };
+    if user.is_empty() {
+        return false;
+    }
+    let Some((host, path)) = host_and_path.split_once(':') else {
+        return false;
+    };
+    !host.is_empty() && !path.is_empty()
+}
+
+fn validate_git_repo_url(repo_url: &str) -> Result<String, String> {
+    let trimmed = repo_url.trim();
+    if trimmed.is_empty() || trimmed.chars().any(|c| c.is_control()) {
+        return Err("git_pull: repo_url must be a non-empty https or ssh URL".into());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("https://") || lower.starts_with("ssh://") || is_scp_like_ssh_url(trimmed)
+    {
+        Ok(trimmed.to_string())
+    } else {
+        Err("git_pull: repo_url must use https:// or ssh".into())
+    }
+}
+
 /// `git_pull` — clone (if absent) or fast-forward/rebase a repository via the
 /// system `git`. Config:
 /// `{ "path": "...", "repo_url"?: "...", "branch"?: "...", "rebase"?: bool, "depth"?: u32 }`.
@@ -157,6 +229,12 @@ impl Operator for GitPullOperator {
                 return Err("git_pull `rebase` must be a boolean".into());
             }
         }
+        if let Some(repo_url) = config.get("repo_url") {
+            let Some(repo_url) = repo_url.as_str() else {
+                return Err("git_pull `repo_url` must be a string".into());
+            };
+            validate_git_repo_url(repo_url)?;
+        }
         Ok(())
     }
 
@@ -172,8 +250,13 @@ impl Operator for GitPullOperator {
             .unwrap_or(false);
         let repo_url = config.get("repo_url").and_then(|v| v.as_str());
         let depth = config.get("depth").and_then(|v| v.as_u64());
+        let target_path = match confined_workspace_path(ctx.workspace_root, &path) {
+            Ok(path) => path,
+            Err(e) => return OperatorOutcome::failure(e),
+        };
+        let target_path = target_path.to_string_lossy().to_string();
 
-        let git_dir_exists = std::path::Path::new(&path).join(".git").exists();
+        let git_dir_exists = Path::new(&target_path).join(".git").exists();
 
         let args: Vec<String> = if !git_dir_exists {
             // Clone into the target path.
@@ -181,6 +264,10 @@ impl Operator for GitPullOperator {
                 return OperatorOutcome::failure(
                     "git_pull: path is not a git repo and no repo_url was provided to clone",
                 );
+            };
+            let url = match validate_git_repo_url(url) {
+                Ok(url) => url,
+                Err(e) => return OperatorOutcome::failure(e),
             };
             let mut a = vec!["clone".to_string()];
             if let Some(d) = depth {
@@ -191,16 +278,18 @@ impl Operator for GitPullOperator {
                 a.push("--branch".to_string());
                 a.push(b.to_string());
             }
-            a.push(url.to_string());
-            a.push(path.clone());
+            a.push("--".to_string());
+            a.push(url);
+            a.push(target_path.clone());
             a
         } else {
             // Pull in the existing repo.
-            let mut a = vec!["-C".to_string(), path.clone(), "pull".to_string()];
+            let mut a = vec!["-C".to_string(), target_path.clone(), "pull".to_string()];
             if rebase {
                 a.push("--rebase".to_string());
             }
             if let Some(b) = branch {
+                a.push("--".to_string());
                 a.push("origin".to_string());
                 a.push(b.to_string());
             }
@@ -218,10 +307,10 @@ impl Operator for GitPullOperator {
                         format!(
                             "git_pull ok ({} {})",
                             if git_dir_exists { "pull" } else { "clone" },
-                            path
+                            target_path
                         )
                     } else {
-                        format!("git_pull failed for {path}")
+                        format!("git_pull failed for {target_path}")
                     },
                     details: serde_json::json!({
                         "args": args,
@@ -622,6 +711,31 @@ mod tests {
     }
 
     #[test]
+    fn git_pull_rejects_unsafe_repo_url_schemes() {
+        let op = GitPullOperator;
+        for repo_url in [
+            "http://example.com/r.git",
+            "file:///tmp/r.git",
+            "git://example.com/r.git",
+            "ext::sh -c 'touch /tmp/pwn'",
+        ] {
+            let err = op
+                .validate(&serde_json::json!({"path": "repo", "repo_url": repo_url}))
+                .unwrap_err();
+            assert!(err.contains("https:// or ssh"), "unexpected error: {err}");
+        }
+        for repo_url in [
+            "https://example.com/r.git",
+            "ssh://git@example.com/org/r.git",
+            "git@example.com:org/r.git",
+        ] {
+            assert!(op
+                .validate(&serde_json::json!({"path": "repo", "repo_url": repo_url}))
+                .is_ok());
+        }
+    }
+
+    #[test]
     #[cfg(unix)]
     fn git_pull_clones_when_no_git_dir_and_url_present() {
         let runner = FakeRunner {
@@ -630,22 +744,104 @@ mod tests {
         };
         let http = NoopHttp;
         let secrets = no_secrets();
+        let root =
+            std::env::temp_dir().join(format!("chaos-gitpull-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
         let ctx = OperatorContext {
             runner: &runner,
             http: &http,
             secrets: &secrets,
-            workspace_root: "/tmp",
+            workspace_root: root.to_str().unwrap(),
         };
-        // A path that certainly has no .git dir.
-        let path = format!("/tmp/does-not-exist-{}", uuid::Uuid::new_v4());
         let outcome = GitPullOperator.execute(
             &ctx,
-            &serde_json::json!({"path": path, "repo_url": "https://example.com/r.git"}),
+            &serde_json::json!({"path": "repo", "repo_url": "https://example.com/r.git"}),
         );
         assert!(outcome.success);
         let calls = runner.calls.lock().unwrap();
         assert_eq!(calls[0].0, "git");
-        assert_eq!(calls[0].1[0], "clone");
+        let args = &calls[0].1;
+        assert_eq!(args[0], "clone");
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(args[separator + 1], "https://example.com/r.git");
+        assert_eq!(
+            args[separator + 2],
+            root.canonicalize().unwrap().join("repo").to_string_lossy()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn git_pull_rejects_clone_path_outside_workspace() {
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let http = NoopHttp;
+        let secrets = no_secrets();
+        let root =
+            std::env::temp_dir().join(format!("chaos-gitpull-root-{}", uuid::Uuid::new_v4()));
+        let outside =
+            std::env::temp_dir().join(format!("chaos-gitpull-outside-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let ctx = OperatorContext {
+            runner: &runner,
+            http: &http,
+            secrets: &secrets,
+            workspace_root: root.to_str().unwrap(),
+        };
+        let outcome = GitPullOperator.execute(
+            &ctx,
+            &serde_json::json!({"path": outside, "repo_url": "https://example.com/r.git"}),
+        );
+        assert!(!outcome.success);
+        assert!(outcome.summary.contains("workspace_root"));
+        assert!(runner.calls.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn git_pull_existing_repo_uses_separator_before_remote_and_branch() {
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let http = NoopHttp;
+        let secrets = no_secrets();
+        let root =
+            std::env::temp_dir().join(format!("chaos-gitpull-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("repo/.git")).unwrap();
+        let ctx = OperatorContext {
+            runner: &runner,
+            http: &http,
+            secrets: &secrets,
+            workspace_root: root.to_str().unwrap(),
+        };
+        let outcome = GitPullOperator.execute(
+            &ctx,
+            &serde_json::json!({"path": "repo", "branch": "--upload-pack=bad", "rebase": true}),
+        );
+        assert!(outcome.success);
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(
+            calls[0].1,
+            vec![
+                "-C".to_string(),
+                root.canonicalize()
+                    .unwrap()
+                    .join("repo")
+                    .to_string_lossy()
+                    .to_string(),
+                "pull".to_string(),
+                "--rebase".to_string(),
+                "--".to_string(),
+                "origin".to_string(),
+                "--upload-pack=bad".to_string(),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
