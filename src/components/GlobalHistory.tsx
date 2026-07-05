@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getGlobalRunHistory } from "../lib/commands";
 import type { Run } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
+import { formatRunStatusLabel } from "../lib/runStatus";
 import "./RunHistory.css";
 import "./QueueView.css";
 
@@ -83,6 +84,7 @@ export default function GlobalHistory({ onViewRun }: Props) {
               <option value="success">Success</option>
               <option value="failed">Failed</option>
               <option value="skipped">Skipped</option>
+              <option value="poll_exhausted">Poll exhausted</option>
             </select>
           </label>
           <label>
@@ -165,7 +167,7 @@ export default function GlobalHistory({ onViewRun }: Props) {
               <tr key={run.id}>
                 <td>
                   <span className={`status-badge ${run.status}`}>
-                    {run.status}
+                    {formatRunStatusLabel(run.status)}
                   </span>
                 </td>
                 <td>{run.workflow_name ?? run.workflow_id}</td>

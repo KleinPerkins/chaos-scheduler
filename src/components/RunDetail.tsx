@@ -17,6 +17,7 @@ import type {
   RunTask,
 } from "../lib/commands";
 import { isActiveRunStatus, nextPollDelayMs } from "../lib/runPolling";
+import { formatRunStatusLabel } from "../lib/runStatus";
 import "./RunDetail.css";
 
 interface Props {
@@ -468,7 +469,9 @@ export default function RunDetail({ runId, onBack }: Props) {
 
       {/* Run metadata bar */}
       <div className="rd-meta-bar">
-        <span className={`status-badge ${run.status}`}>{run.status}</span>
+        <span className={`status-badge ${run.status}`}>
+          {formatRunStatusLabel(run.status)}
+        </span>
         {isActiveRunStatus(run.status) && (
           <span className="rd-live-indicator" aria-live="polite">
             Live
@@ -536,7 +539,7 @@ export default function RunDetail({ runId, onBack }: Props) {
                     <td>{attempt.attempt_number}</td>
                     <td>
                       <span className={`status-badge ${attempt.status}`}>
-                        {attempt.status}
+                        {formatRunStatusLabel(attempt.status)}
                       </span>
                     </td>
                     <td>
@@ -610,7 +613,7 @@ export default function RunDetail({ runId, onBack }: Props) {
                     <td>{rel.wait ? "wait" : "fire-and-forget"}</td>
                     <td>
                       <span className={`status-badge ${rel.status}`}>
-                        {rel.status}
+                        {formatRunStatusLabel(rel.status)}
                       </span>
                     </td>
                     <td className="rd-meta-mono">

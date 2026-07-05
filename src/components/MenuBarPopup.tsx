@@ -10,6 +10,7 @@ import {
 } from "../lib/commands";
 import type { NextRun } from "../lib/commands";
 import { PRODUCT_SHORT_NAME } from "../lib/branding";
+import { formatRunStatusLabel } from "../lib/runStatus";
 import "./MenuBarPopup.css";
 
 function envLabel(name: string): string {
@@ -181,7 +182,7 @@ export default function MenuBarPopup() {
                     </span>
                   </div>
                   <span className={`status-badge ${run.status}`}>
-                    {run.status}
+                    {formatRunStatusLabel(run.status)}
                   </span>
                 </button>
               ))}

@@ -20,6 +20,7 @@ import type {
   SchedulerDeadLetter,
 } from "../lib/commands";
 import Notice from "./ui/Notice";
+import { formatRunStatusLabel } from "../lib/runStatus";
 import "./QueueView.css";
 
 interface QueueDraft {
@@ -625,7 +626,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
                 </span>
                 <span>{run.queue_name}</span>
                 <span className={`queue-status ${run.status}`}>
-                  {run.status}
+                  {formatRunStatusLabel(run.status)}
                 </span>
                 <span>{run.priority}</span>
                 <span>{formatDate(run.queued_at)}</span>
