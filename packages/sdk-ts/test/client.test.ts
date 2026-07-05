@@ -332,4 +332,19 @@ describe("ChaosSchedulerClient", () => {
     await assertion;
     vi.useRealTimers();
   });
+
+  it("wraps a network failure as a ChaosApiError with status 0", async () => {
+    const fetch: FetchLike = async () => {
+      throw new Error("connection refused");
+    };
+    const client = new ChaosSchedulerClient({
+      baseUrl: BASE,
+      apiKey: "id.secret",
+      fetch,
+    });
+    await expect(client.getRun("r1")).rejects.toMatchObject({
+      name: "ChaosApiError",
+      status: 0,
+    });
+  });
 });

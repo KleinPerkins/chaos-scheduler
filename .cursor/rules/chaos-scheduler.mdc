@@ -35,6 +35,10 @@ hand-writing HTTP calls.
   `rerun_workflow`. A reused key returns `{ "status": "duplicate", run_id,
   queued_run_id }` — treat that as success, not
   a new run.
+- **Reading run detail.** `get_run` returns the run summary; use `get_run_logs`
+  for stdout/stderr/exit, `get_run_tasks` for per-step tasks + retry attempts,
+  and `get_run_metrics` for emitted metrics. Inspect queue pressure with
+  `list_queues` (capacity/active/queued counts) and `list_queued_runs`.
 - **Registration is authoritative:** workflows created via `register_workflow`
   are marked `managed_externally=true` (source-of-truth is external). Only change
   them through the API/MCP, not the UI.
