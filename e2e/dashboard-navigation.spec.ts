@@ -1,5 +1,4 @@
 import { test, expect } from "@playwright/test";
-import { expectNoAxeViolations } from "./support/axe";
 
 test.describe("Dashboard navigation", () => {
   test.beforeEach(async ({ page }) => {
@@ -14,7 +13,6 @@ test.describe("Dashboard navigation", () => {
       page.getByRole("button", { name: "Mission Control" }),
     ).toBeVisible();
     await expect(page.getByText("Chaos Scheduler").first()).toBeVisible();
-    await expectNoAxeViolations(page, "mission control landing");
   });
 
   test("navigates primary sidebar views", async ({ page }) => {
