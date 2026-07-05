@@ -1,4 +1,4 @@
-use crate::db::{Database, Workflow, WorkflowResourceSample};
+use crate::db::{Database, RunAdmission, Workflow, WorkflowResourceSample};
 use chrono::Utc;
 use chrono_tz::Tz;
 use cron::Schedule;
@@ -1442,37 +1442,33 @@ pub fn execute_workflow_with_context(
     }
     let mutex_keys = mutex_keys(&workflow.id, &queue_config);
 
-    let run = db
-        .create_run_with_context(
+    let run = match db
+        .admit_run_with_context(
             &workflow.id,
             trigger_kind,
             trigger_payload,
             upstream_run_id,
             input_json,
             rerun_of_run_id,
+            queued_run_id,
+            &mutex_keys,
         )
-        .map_err(|e| format!("Failed to create run record: {}", e))?;
-    if let Some(queued_run_id) = queued_run_id {
-        let updated = db
-            .mark_queued_run_admitted_by_id(queued_run_id, &run.id)
-            .map_err(|e| format!("Failed to admit queued run: {}", e))?;
-        if updated == 0 {
-            let reason = format!("Queued run {} is no longer available", queued_run_id);
-            let _ = db.finish_run_with_status(&run.id, "cancelled", "", &reason);
-            return Err(reason);
+        .map_err(|e| format!("Failed to admit run: {}", e))?
+    {
+        RunAdmission::Admitted(run) => run,
+        RunAdmission::MutexBusy => {
+            return Err(format!(
+                "Workflow {} could not acquire mutex locks in queue {}",
+                workflow.id, queue_config.queue
+            ));
         }
-    }
-    let acquired = db
-        .acquire_mutex_locks(&workflow.id, &run.id, &mutex_keys)
-        .map_err(|e| format!("Failed to acquire mutex locks: {}", e))?;
-    if !acquired {
-        let reason = format!(
-            "Workflow {} could not acquire mutex locks in queue {}",
-            workflow.id, queue_config.queue
-        );
-        let _ = db.finish_run_with_status(&run.id, "cancelled", "", &reason);
-        return Err(reason);
-    }
+        RunAdmission::QueuedRunUnavailable => {
+            return Err(format!(
+                "Queued run {} is no longer available",
+                queued_run_id.unwrap_or("<none>")
+            ));
+        }
+    };
     mark_trigger_context_admitted(db, &workflow.id, trigger_kind, trigger_payload);
 
     // Structured workflows (generic step-flow / typed operator) are executed

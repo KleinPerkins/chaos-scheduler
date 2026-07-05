@@ -1,4 +1,4 @@
-use rusqlite::{params, types::Type, Connection, OptionalExtension};
+use rusqlite::{params, types::Type, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -116,6 +116,13 @@ pub struct Run {
     pub upstream_run_id: Option<String>,
     pub input_json: Option<String>,
     pub rerun_of_run_id: Option<String>,
+}
+
+#[allow(clippy::large_enum_variant)]
+pub enum RunAdmission {
+    Admitted(Run),
+    MutexBusy,
+    QueuedRunUnavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1859,6 +1866,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn create_run_with_context(
         &self,
         workflow_id: &str,
@@ -1899,6 +1907,72 @@ impl Database {
         self.get_run(&id)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_run_with_context(
+        &self,
+        workflow_id: &str,
+        trigger_kind: Option<&str>,
+        trigger_payload: Option<&str>,
+        upstream_run_id: Option<&str>,
+        input_json: Option<&str>,
+        rerun_of_run_id: Option<&str>,
+        queued_run_id: Option<&str>,
+        mutex_keys: &[String],
+    ) -> rusqlite::Result<RunAdmission> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        for key in mutex_keys {
+            let exists: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM workflow_mutex_locks WHERE mutex_key = ?1",
+                params![key],
+                |row| row.get(0),
+            )?;
+            if exists > 0 {
+                tx.rollback()?;
+                return Ok(RunAdmission::MutexBusy);
+            }
+        }
+
+        tx.execute(
+            "INSERT INTO runs (id, workflow_id, started_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id)
+             VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                workflow_id,
+                now,
+                trigger_kind,
+                trigger_payload,
+                upstream_run_id,
+                input_json,
+                rerun_of_run_id
+            ],
+        )?;
+
+        if let Some(queued_run_id) = queued_run_id {
+            let updated = tx.execute(
+                "UPDATE queued_runs SET run_id = ?2, status = 'admitted', admitted_at = ?3 WHERE id = ?1 AND status = 'queued'",
+                params![queued_run_id, id, now],
+            )?;
+            if updated == 0 {
+                tx.rollback()?;
+                return Ok(RunAdmission::QueuedRunUnavailable);
+            }
+        }
+
+        for key in mutex_keys {
+            tx.execute(
+                "INSERT INTO workflow_mutex_locks (mutex_key, workflow_id, run_id, acquired_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![key, workflow_id, id, now],
+            )?;
+        }
+        tx.commit()?;
+        self.get_run(&id).map(RunAdmission::Admitted)
+    }
+
     pub fn finish_run(
         &self,
         id: &str,
@@ -1927,6 +2001,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn finish_run_with_status(
         &self,
         id: &str,
@@ -4194,6 +4269,7 @@ impl Database {
         )
     }
 
+    #[allow(dead_code)]
     pub fn acquire_mutex_locks(
         &self,
         workflow_id: &str,
@@ -4204,7 +4280,7 @@ impl Database {
             return Ok(true);
         }
         let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for key in mutex_keys {
             let exists: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM workflow_mutex_locks WHERE mutex_key = ?1",
@@ -5135,6 +5211,112 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert!(db
             .acquire_mutex_locks(&workflow.id, &other_run.id, &keys)
             .unwrap());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn admit_run_claims_queue_and_mutex_atomically() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = db
+            .create_workflow(
+                "Admission Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "source",
+                None,
+                None,
+                Some(r#"{"queue":"source-default"}"#),
+            )
+            .unwrap();
+        let keys = vec!["exclude:admission".to_string()];
+        let queued_id = db
+            .upsert_queued_run_with_context(
+                &workflow.id,
+                "source-default",
+                0,
+                Some("manual"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let run = match db
+            .admit_run_with_context(
+                &workflow.id,
+                Some("manual"),
+                None,
+                None,
+                None,
+                None,
+                Some(&queued_id),
+                &keys,
+            )
+            .unwrap()
+        {
+            RunAdmission::Admitted(run) => run,
+            _ => panic!("expected admission to succeed"),
+        };
+        let conn = db.conn().unwrap();
+        let queued: (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, run_id FROM queued_runs WHERE id = ?1",
+                params![queued_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(queued, ("admitted".to_string(), Some(run.id.clone())));
+        let lock_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_mutex_locks WHERE run_id = ?1 AND mutex_key = ?2",
+                params![run.id, keys[0]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lock_count, 1);
+
+        let blocked_queue = db
+            .upsert_queued_run_with_context(
+                &workflow.id,
+                "source-default",
+                0,
+                Some("manual"),
+                Some("blocked"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            db.admit_run_with_context(
+                &workflow.id,
+                Some("manual"),
+                Some("blocked"),
+                None,
+                None,
+                None,
+                Some(&blocked_queue),
+                &keys,
+            )
+            .unwrap(),
+            RunAdmission::MutexBusy
+        ));
+        let blocked: (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, run_id FROM queued_runs WHERE id = ?1",
+                params![blocked_queue],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(blocked, ("queued".to_string(), None));
 
         let _ = std::fs::remove_dir_all(dir);
     }
