@@ -62,22 +62,19 @@ pub trait ProcessRunner: Send + Sync {
     ) -> std::io::Result<Output>;
 }
 
-fn should_scrub_child_env_key(key: &str) -> bool {
-    let key = key.to_ascii_uppercase();
-    matches!(
-        key.as_str(),
-        "CURSOR_API_KEY"
-            | "ANTHROPIC_API_KEY"
-            | "OPENAI_API_KEY"
-            | "GITHUB_TOKEN"
-            | "GH_TOKEN"
-            | "TAURI_SIGNING_PRIVATE_KEY"
-            | "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
-            | "CHAOS_SCHEDULER_API_TOKEN"
-    ) || key.contains("SECRET")
-        || key.contains("PASSWORD")
-        || key.ends_with("_TOKEN")
-        || key.ends_with("_API_KEY")
+/// Deny-list of the scheduler's OWN secrets to strip from spawned child
+/// processes. Deliberately narrow: a broad heuristic (`*_TOKEN`, `*_API_KEY`,
+/// `contains("SECRET")`) would strip user credentials that personal scripts
+/// legitimately need (`GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, cloud CLI creds). We
+/// only remove secrets the scheduler itself owns.
+pub(crate) fn should_scrub_child_env_key(key: &str) -> bool {
+    if matches!(key, "CURSOR_API_KEY" | "SMTP_PASSWORD") {
+        return true;
+    }
+    if key.starts_with("CHAOS_SCHEDULER_API_") {
+        return true;
+    }
+    key.starts_with("CHAOS_SCHEDULER_") && (key.ends_with("_SECRET") || key.ends_with("_TOKEN"))
 }
 
 /// Real process runner backed by `std::process::Command`.
@@ -936,14 +933,15 @@ mod tests {
     fn process_runner_scrubs_secret_child_env_keys() {
         for key in [
             "CURSOR_API_KEY",
-            "GITHUB_TOKEN",
             "SMTP_PASSWORD",
-            "TAURI_SIGNING_PRIVATE_KEY",
-            "MY_SECRET_VALUE",
+            "CHAOS_SCHEDULER_API_TOKEN",
+            "CHAOS_SCHEDULER_WEBHOOK_SECRET",
         ] {
             assert!(should_scrub_child_env_key(key), "{key} should be scrubbed");
         }
-        for key in ["PATH", "HOME", "RUST_LOG", "CHAOS_SCHEDULER_API_ADDR"] {
+        // User credentials personal scripts rely on must be PRESERVED; only the
+        // scheduler's own secrets are stripped.
+        for key in ["PATH", "HOME", "RUST_LOG", "SSH_AUTH_SOCK", "GITHUB_TOKEN"] {
             assert!(
                 !should_scrub_child_env_key(key),
                 "{key} should be preserved"
