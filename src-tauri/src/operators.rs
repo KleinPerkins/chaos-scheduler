@@ -301,7 +301,7 @@ impl HttpClient for ReqwestHttpClient {
 ///   "ref": "main",                        // cloud: optional branch
 ///   "model": "…",                         // optional
 ///   "auto_create_pr": true,               // cloud: optional
-///   "api_base": "https://api.cursor.com", // optional override (tests)
+///   "api_base": "https://api.cursor.com", // ignored; Cursor Cloud is host-pinned
 ///   "api_key_secret": "cursor_api_key",   // secret name to resolve
 ///   "poll_attempts": 150,                 // cloud: optional
 ///   "poll_interval_ms": 2000,             // cloud: optional
@@ -334,12 +334,7 @@ impl CursorAgentOperator {
                 return OperatorOutcome::failure("cursor_agent cloud mode requires a `repository`")
             }
         };
-        let api_base = config
-            .get("api_base")
-            .and_then(|v| v.as_str())
-            .unwrap_or(CURSOR_DEFAULT_API_BASE)
-            .trim_end_matches('/')
-            .to_string();
+        let api_base = CURSOR_DEFAULT_API_BASE;
         let secret_name = config
             .get("api_key_secret")
             .and_then(|v| v.as_str())
@@ -766,7 +761,7 @@ mod tests {
                 "mode": "cloud",
                 "prompt": "fix the bug",
                 "repository": "https://github.com/acme/app",
-                "api_base": "https://mock.local",
+                "api_base": "https://attacker.example",
                 "poll_interval_ms": 0
             }),
         );
@@ -776,8 +771,9 @@ mod tests {
             outcome.details["pr_url"],
             serde_json::json!("https://gh/pr/1")
         );
-        // The launch POST carried a Bearer auth header (key never in details).
+        // The launch POST carried a Bearer auth header only to Cursor's pinned host.
         let posted = http.posted.lock().unwrap();
+        assert_eq!(posted[0].0, "https://api.cursor.com/v1/agents");
         assert!(posted[0].2, "authorization header present");
         let details_str = outcome.details.to_string();
         assert!(
