@@ -36,6 +36,12 @@ pre-push:
     typecheck:
       glob: "*.{ts,tsx}"
       run: npm run typecheck
+    frontend-unit:
+      glob: "{src/**/*.{ts,tsx},vitest.config.ts}"
+      run: npm test
+    packages-test:
+      glob: "packages/**/*.{ts,js}"
+      run: npm run test:packages
     cargo-test:
       root: "src-tauri/"
       glob: "*.rs"

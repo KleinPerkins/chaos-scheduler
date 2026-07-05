@@ -23,6 +23,8 @@ dist-ssr
 *.sln
 *.sw?
 
-# Local runtime database (not committed)
+# Playwright / Vitest artifacts
+playwright-report/
+test-results/
 scheduler.db
 *.db
