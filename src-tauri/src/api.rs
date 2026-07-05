@@ -5,7 +5,7 @@
 //! and reuses [`SchedulerService`] for **all** governance/validation so
 //! there is no duplicated business logic vs the Tauri commands.
 
-use crate::db::Database;
+use crate::db::{Database, IdempotencyReservation};
 use crate::scheduler::{dispatch_non_cron_workflow, NonCronDispatchOptions};
 use crate::service::{ApiIdentity, SchedulerService, ServiceError, WorkflowDraft};
 use crate::workflow_spec::WorkflowSpec;
@@ -19,6 +19,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
@@ -447,6 +448,24 @@ async fn set_spec(
     Ok(Json(json!({ "workflow": wf })))
 }
 
+fn idempotency_fingerprint(workflow_id: &str, trigger_kind: &str, payload: Option<&str>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(workflow_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(trigger_kind.as_bytes());
+    hasher.update([0]);
+    hasher.update(payload.unwrap_or_default().as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn duplicate_dispatch_value(record: &crate::db::IdempotencyRecord) -> Value {
+    json!({
+        "status": "duplicate",
+        "run_id": record.run_id.as_deref(),
+        "queued_run_id": record.queued_run_id.as_deref(),
+    })
+}
+
 fn dispatch_with_idempotency(
     st: &ApiState,
     headers: &HeaderMap,
@@ -459,9 +478,27 @@ fn dispatch_with_idempotency(
         .get("idempotency-key")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    if let Some(key) = &idem {
-        if let Ok(Some(run_id)) = st.db.get_idempotency_run_id(key) {
-            return Ok(Json(json!({ "status": "duplicate", "run_id": run_id })));
+    let fingerprint = idem
+        .as_ref()
+        .map(|_| idempotency_fingerprint(id, trigger_kind, payload));
+    if let (Some(key), Some(fingerprint)) = (&idem, &fingerprint) {
+        match st
+            .db
+            .reserve_idempotency_key(key, id, fingerprint)
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
+            IdempotencyReservation::Reserved => {}
+            IdempotencyReservation::Existing(record) => {
+                if let Some(existing) = record.request_fingerprint.as_deref() {
+                    if existing != fingerprint.as_str() {
+                        return Err(ApiError::new(
+                            StatusCode::CONFLICT,
+                            "idempotency key was already used for a different request",
+                        ));
+                    }
+                }
+                return Ok(Json(duplicate_dispatch_value(&record)));
+            }
         }
     }
     let options = NonCronDispatchOptions {
@@ -477,11 +514,28 @@ fn dispatch_with_idempotency(
         dedupe: false,
         app_handle: None,
     };
-    let outcome =
-        dispatch_non_cron_workflow(&st.db, &st.workspace_root, &st.python_path, id, options)
-            .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e))?;
-    if let (Some(key), Some(run_id)) = (&idem, &outcome.run_id) {
-        let _ = st.db.insert_idempotency_key(key, Some(run_id), None, None);
+    let outcome = match dispatch_non_cron_workflow(
+        &st.db,
+        &st.workspace_root,
+        &st.python_path,
+        id,
+        options,
+    ) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            if let (Some(key), Some(fingerprint)) = (&idem, &fingerprint) {
+                let _ = st.db.delete_idempotency_reservation(key, fingerprint);
+            }
+            return Err(ApiError::new(StatusCode::BAD_REQUEST, e));
+        }
+    };
+    if let Some(key) = &idem {
+        let _ = st.db.complete_idempotency_key(
+            key,
+            outcome.run_id.as_deref(),
+            outcome.queued_run_id.as_deref(),
+            &outcome.status,
+        );
     }
     Ok(Json(
         serde_json::to_value(&outcome).unwrap_or_else(|_| json!({})),
@@ -1233,6 +1287,59 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn idempotency_key_reuse_with_different_fingerprint_conflicts() {
+        let (state, token) = test_state();
+        let db = state.db.clone();
+        let wf = db
+            .create_workflow(
+                "Idem Conflict",
+                None,
+                "s.py",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "instance",
+                None,
+                None,
+                Some(r#"{"queue":"instance-default","depends_on":["upstream-never"]}"#),
+            )
+            .unwrap();
+        let app = router(state);
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workflows/{}/enqueue", wf.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("idempotency-key", "idem-conflict")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workflows/{}/run", wf.id))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("idempotency-key", "idem-conflict")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+
+        let _ = std::fs::remove_dir_all(db.path().trim_end_matches("/scheduler.db"));
+    }
+
     /// End-to-end smoke over the external surface: register a workflow via the
     /// REST API, enqueue it on demand, then deliver a signed run-result webhook
     /// back to a source system — the register -> enqueue -> result-webhook loop.
@@ -1276,13 +1383,16 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let wf_id = value["workflow"]["id"].as_str().unwrap().to_string();
 
-        // 2) Enqueue on demand via the API (queued or admitted, both valid).
+        // 2) Enqueue on demand via the API. The reused idempotency key must
+        // replay the queued_run_id instead of double-queueing.
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/workflows/{wf_id}/enqueue"))
                     .header("authorization", format!("Bearer {token}"))
+                    .header("idempotency-key", "smoke-enqueue")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1293,6 +1403,28 @@ mod tests {
         assert_eq!(
             value["status"], "queued",
             "dependency-gated enqueue should queue: {value}"
+        );
+        let queued_run_id = value["queued_run_id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workflows/{wf_id}/enqueue"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("idempotency-key", "smoke-enqueue")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, value) = body_json(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["status"], "duplicate");
+        assert_eq!(value["run_id"], Value::Null);
+        assert_eq!(
+            value["queued_run_id"].as_str(),
+            Some(queued_run_id.as_str())
         );
 
         // 3) Deliver the run result back to the source system via a signed

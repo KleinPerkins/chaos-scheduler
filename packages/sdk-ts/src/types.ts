@@ -141,7 +141,7 @@ export interface Run {
  *
  * `status` is one of the backend's dispatch statuses (e.g. `admitted`,
  * `queued`, `skipped`). When an `Idempotency-Key` matches a previous request,
- * the API instead returns `{ status: "duplicate", run_id }` — see
+ * the API instead returns `{ status: "duplicate", run_id, queued_run_id }` — see
  * {@link DispatchResult}.
  */
 export interface DispatchOutcome {
@@ -159,6 +159,7 @@ export interface DispatchOutcome {
 export interface DuplicateDispatch {
   status: "duplicate";
   run_id: string | null;
+  queued_run_id: string | null;
 }
 
 /** Union of the two shapes a run/enqueue/dispatch call can return. */
