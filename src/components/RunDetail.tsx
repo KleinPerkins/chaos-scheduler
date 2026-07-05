@@ -16,7 +16,6 @@ import type {
   RunRelationship,
   RunTask,
 } from "../lib/commands";
-import { openExternalSafe } from "../lib/openExternalSafe";
 import { isActiveRunStatus, nextPollDelayMs } from "../lib/runPolling";
 import "./RunDetail.css";
 
@@ -55,9 +54,7 @@ function asStatsData(value: unknown): Record<string, number | string> | null {
   return Object.fromEntries(entries) as Record<string, number | string>;
 }
 
-function asItemList(
-  value: unknown,
-): Array<{
+function asItemList(value: unknown): Array<{
   name: string;
   detail?: string;
   url?: string;

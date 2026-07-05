@@ -145,8 +145,10 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
     noticeTimerRef.current = setTimeout(() => setRunNotice(null), 5000);
   };
 
-  const isPending = (w: Workflow, kind: "run" | "toggle" | "delete" | "enqueue") =>
-    pendingAction?.id === w.id && pendingAction.kind === kind;
+  const isPending = (
+    w: Workflow,
+    kind: "run" | "toggle" | "delete" | "enqueue",
+  ) => pendingAction?.id === w.id && pendingAction.kind === kind;
 
   // Environment options are sourced from the environments backend and unioned
   // with any environments observed on the current workflows (so a workflow in
@@ -353,11 +355,27 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
           disabled={
             isPending(w, "run") ||
             isPending(w, "toggle") ||
-            isPending(w, "delete")
+            isPending(w, "delete") ||
+            pendingEnqueueId === w.id
           }
-          title="Run now"
+          title="Run now (immediate)"
+          aria-label={`Run ${w.name} now`}
         >
           {isPending(w, "run") ? "Running…" : "▶ Run"}
+        </button>
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={() => void handleEnqueue(w)}
+          disabled={
+            isPending(w, "run") ||
+            isPending(w, "toggle") ||
+            isPending(w, "delete") ||
+            pendingEnqueueId === w.id
+          }
+          title="Enqueue via admission queue"
+          aria-label={`Enqueue ${w.name}`}
+        >
+          {pendingEnqueueId === w.id ? "Enqueueing…" : "Enqueue"}
         </button>
         <button className="btn btn-ghost btn-sm" onClick={() => onHistory(w)}>
           History
