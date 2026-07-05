@@ -2547,13 +2547,37 @@ impl Database {
         if dry_run {
             return Ok(preview);
         }
-        let conn = self.conn()?;
-        let deleted = conn.execute(
+        // Explicit runs-FK deletion matrix. `queued_runs.run_id` and
+        // `workflow_mutex_locks.run_id` reference `runs(id)` with no `ON DELETE`
+        // action, so a bare `DELETE FROM runs` raises an FK violation the moment
+        // any doomed run still has a queued-run history row or a stale mutex
+        // lock, rolling the entire sweep back and letting the DB grow unbounded.
+        // Clear those two child tables for the doomed runs first, all inside one
+        // transaction so retention stays atomic. Every other `runs`-FK child
+        // (run_tasks, run_metrics, run_inputs/outputs, run_assets, run_lineage,
+        // run_relationships, scheduler_idempotency_keys/checkpoints/dead_letters,
+        // queue_events, resource/token telemetry) already declares
+        // `ON DELETE CASCADE`/`SET NULL` and is cleaned up implicitly.
+        const DOOMED_RUNS: &str = "SELECT id FROM runs \
+             WHERE datetime(COALESCE(finished_at, started_at)) < datetime(?1) \
+               AND NOT EXISTS (SELECT 1 FROM scheduler_dead_letters d WHERE d.run_id = runs.id)";
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            &format!("DELETE FROM workflow_mutex_locks WHERE run_id IN ({DOOMED_RUNS})"),
+            params![preview.cutoff],
+        )?;
+        tx.execute(
+            &format!("DELETE FROM queued_runs WHERE run_id IN ({DOOMED_RUNS})"),
+            params![preview.cutoff],
+        )?;
+        let deleted = tx.execute(
             "DELETE FROM runs
              WHERE datetime(COALESCE(finished_at, started_at)) < datetime(?1)
                AND NOT EXISTS (SELECT 1 FROM scheduler_dead_letters d WHERE d.run_id = runs.id)",
             params![preview.cutoff],
         )?;
+        tx.commit()?;
         preview.deleted_runs = deleted as i64;
         preview.dry_run = false;
         let details = serde_json::json!({
@@ -5508,6 +5532,126 @@ SUMMARY_JSON:{\"title\":\"current\"}
             .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, preserved.id);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn retention_cleanup_clears_run_fk_children_and_preserves_live_rows() {
+        // Regression for the runs-FK deletion matrix: an old run with a queued
+        // history row and a stale mutex lock must be prunable without an FK
+        // rollback, while queued rows for live runs and still-pending queue
+        // entries (run_id NULL) survive untouched.
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = db
+            .create_workflow(
+                "Retention FK Workflow",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "source",
+                Some("scheduler"),
+                None,
+                Some(r#"{"queue":"source-default"}"#),
+            )
+            .unwrap();
+        let doomed = db
+            .create_terminal_run_with_context(&workflow.id, "success", None, None, None, None, None)
+            .unwrap();
+        let keeper = db
+            .create_terminal_run_with_context(&workflow.id, "success", None, None, None, None, None)
+            .unwrap();
+
+        let conn = db.conn().unwrap();
+        // Queued-run history rows: one for each finished run, plus a still-queued
+        // row that has not been admitted yet (run_id NULL) and must be preserved.
+        conn.execute(
+            "INSERT INTO queued_runs (id, run_id, workflow_id, queue_name, status, queued_at, finished_at)
+             VALUES ('q-doomed', ?1, ?2, 'source-default', 'success', datetime('now', '-120 days'), datetime('now', '-120 days')),
+                    ('q-keeper', ?3, ?2, 'source-default', 'success', datetime('now', '-1 day'), datetime('now', '-1 day'))",
+            params![doomed.id, workflow.id, keeper.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO queued_runs (id, run_id, workflow_id, queue_name, status, queued_at)
+             VALUES ('q-pending', NULL, ?1, 'source-default', 'queued', datetime('now'))",
+            params![workflow.id],
+        )
+        .unwrap();
+        // Stale mutex lock left behind by the doomed run, plus a live lock held by
+        // the keeper run that must not be released by retention.
+        conn.execute(
+            "INSERT INTO workflow_mutex_locks (mutex_key, workflow_id, run_id, acquired_at)
+             VALUES ('lock-doomed', ?1, ?2, datetime('now', '-120 days')),
+                    ('lock-keeper', ?1, ?3, datetime('now', '-1 day'))",
+            params![workflow.id, doomed.id, keeper.id],
+        )
+        .unwrap();
+        // Age only the doomed run past the retention cutoff.
+        conn.execute(
+            "UPDATE runs SET started_at = datetime('now', '-120 days'), finished_at = datetime('now', '-120 days') WHERE id = ?1",
+            params![doomed.id],
+        )
+        .unwrap();
+
+        let dry = db.cleanup_retention(90, true).unwrap();
+        assert_eq!(dry.candidate_runs, 1);
+        assert_eq!(dry.deleted_runs, 0);
+
+        let applied = db.cleanup_retention(90, false).unwrap();
+        assert_eq!(applied.deleted_runs, 1, "the aged run should be pruned");
+
+        // The doomed run and its FK children are gone.
+        assert!(db.get_run(&doomed.id).is_err());
+        let doomed_queue: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM queued_runs WHERE id = 'q-doomed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            doomed_queue, 0,
+            "queued_runs row for pruned run must be deleted"
+        );
+        let doomed_lock: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_mutex_locks WHERE mutex_key = 'lock-doomed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            doomed_lock, 0,
+            "stale mutex lock for pruned run must be deleted"
+        );
+
+        // Live run, its queued row, the pending queue entry, and the live lock all survive.
+        assert!(db.get_run(&keeper.id).is_ok());
+        let survivors: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM queued_runs WHERE id IN ('q-keeper', 'q-pending')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            survivors, 2,
+            "live and pending queued_runs rows must be preserved"
+        );
+        let keeper_lock: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_mutex_locks WHERE mutex_key = 'lock-keeper'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(keeper_lock, 1, "mutex lock for live run must be preserved");
 
         let _ = std::fs::remove_dir_all(dir);
     }
