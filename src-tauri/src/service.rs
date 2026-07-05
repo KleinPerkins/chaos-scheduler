@@ -542,6 +542,57 @@ impl SchedulerService {
             .map_err(|_| ServiceError::NotFound(format!("workflow {id} not found")))
     }
 
+    /// Stable sentinel substituted for secret fields on read-scoped API/MCP
+    /// responses. Distinct from an empty string so callers can tell "redacted"
+    /// apart from "unset".
+    pub const READ_SCOPE_SECRET_SENTINEL: &str = "__redacted__";
+
+    /// Read scope (and anything narrower) gets secrets redacted; write/admin
+    /// scopes keep them so the round-trip edit flow works.
+    pub fn workflow_secrets_redacted_for_scopes(scopes: &[String]) -> bool {
+        !scopes.iter().any(|s| s == "write" || s == "admin")
+    }
+
+    /// Replace secret material inside a workflow's spec/trigger JSON with the
+    /// sentinel. Applied in the service layer so REST, MCP tools, and the
+    /// `chaos://workflows/{id}` resource all inherit identical redaction.
+    pub fn redact_workflow_secrets(mut wf: Workflow) -> Workflow {
+        if let Some(spec) = wf.spec_json.as_mut() {
+            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(spec) {
+                redact_secret_fields(&mut value);
+                *spec = value.to_string();
+            }
+        }
+        if let Some(trigger) = wf.trigger_config.as_mut() {
+            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(trigger) {
+                redact_secret_fields(&mut value);
+                *trigger = value.to_string();
+            }
+        }
+        wf
+    }
+
+    pub fn get_workflow_for_scopes(&self, id: &str, scopes: &[String]) -> ServiceResult<Workflow> {
+        let wf = self.get_workflow(id)?;
+        if Self::workflow_secrets_redacted_for_scopes(scopes) {
+            Ok(Self::redact_workflow_secrets(wf))
+        } else {
+            Ok(wf)
+        }
+    }
+
+    pub fn list_workflows_for_scopes(&self, scopes: &[String]) -> ServiceResult<Vec<Workflow>> {
+        let workflows = self.list_workflows()?;
+        if Self::workflow_secrets_redacted_for_scopes(scopes) {
+            Ok(workflows
+                .into_iter()
+                .map(Self::redact_workflow_secrets)
+                .collect())
+        } else {
+            Ok(workflows)
+        }
+    }
+
     /// Shared validation applied to every workflow registration.
     fn validate_draft(&self, draft: &WorkflowDraft) -> ServiceResult<()> {
         if draft.name.trim().is_empty() {
@@ -723,6 +774,35 @@ impl ApiIdentity {
     /// Whether this identity holds `required` (or the superuser `admin` scope).
     pub fn has_scope(&self, required: &str) -> bool {
         self.scopes.iter().any(|s| s == required || s == "admin")
+    }
+}
+
+/// Recursively replace known secret-bearing fields with the read-scope sentinel.
+/// Matches by key name so it covers webhook `secret`, operator `cursor_api_key`,
+/// SMTP `smtp_password`, and `signature_secret` wherever they nest in the JSON.
+fn redact_secret_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if matches!(
+                    key.as_str(),
+                    "secret" | "signature_secret" | "cursor_api_key" | "smtp_password"
+                ) && child.as_str().is_some_and(|s| !s.is_empty())
+                {
+                    *child = serde_json::Value::String(
+                        SchedulerService::READ_SCOPE_SECRET_SENTINEL.into(),
+                    );
+                } else {
+                    redact_secret_fields(child);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_secret_fields(item);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1163,6 +1243,34 @@ mod tests {
         d.queue_config = Some("{not json".to_string());
         let err = svc.create_workflow(d, false).unwrap_err();
         assert!(matches!(err, ServiceError::Validation(_)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn read_scope_workflow_redaction_hides_secrets_but_write_preserves() {
+        use crate::actions::ActionSpec;
+
+        let dir = tmpdir();
+        let svc = service(&dir);
+        let wf = svc.create_workflow(draft("wf", "instance"), false).unwrap();
+        let mut spec = spec();
+        spec.on_success = vec![ActionSpec::Webhook {
+            url: "https://example.com/h".into(),
+            secret: Some("topsecret".into()),
+            max_retries: 0,
+        }];
+        svc.set_workflow_spec(&wf.id, &spec, false).unwrap();
+
+        let read = svc
+            .get_workflow_for_scopes(&wf.id, &["read".to_string()])
+            .unwrap();
+        assert!(read.spec_json.as_ref().unwrap().contains("__redacted__"));
+        assert!(!read.spec_json.as_ref().unwrap().contains("topsecret"));
+
+        let write = svc
+            .get_workflow_for_scopes(&wf.id, &["write".to_string()])
+            .unwrap();
+        assert!(write.spec_json.as_ref().unwrap().contains("topsecret"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

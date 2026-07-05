@@ -406,8 +406,8 @@ async fn list_workflows(
     Extension(audit): Extension<AuditTrail>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&st, &headers, "read", "GET", "/api/v1/workflows", &audit)?;
-    let workflows = st.service.list_workflows()?;
+    let identity = authorize(&st, &headers, "read", "GET", "/api/v1/workflows", &audit)?;
+    let workflows = st.service.list_workflows_for_scopes(&identity.scopes)?;
     Ok(Json(json!({ "workflows": workflows })))
 }
 
@@ -417,7 +417,7 @@ async fn get_workflow(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(
+    let identity = authorize(
         &st,
         &headers,
         "read",
@@ -425,7 +425,7 @@ async fn get_workflow(
         "/api/v1/workflows/{id}",
         &audit,
     )?;
-    let wf = st.service.get_workflow(&id)?;
+    let wf = st.service.get_workflow_for_scopes(&id, &identity.scopes)?;
     Ok(Json(json!({ "workflow": wf })))
 }
 
@@ -1230,6 +1230,102 @@ mod tests {
         std::env::set_var("CHAOS_SCHEDULER_ALLOW_REMOTE_API", "1");
         assert!(validate_remote_api_bind("0.0.0.0:9618").is_ok());
         std::env::remove_var("CHAOS_SCHEDULER_ALLOW_REMOTE_API");
+    }
+
+    /// Seed a workflow whose spec carries a webhook secret, using the service
+    /// directly (the IPC/desktop path), so the REST redaction test has data.
+    fn seed_workflow_with_secret(state: &ApiState) -> String {
+        let draft = WorkflowDraft {
+            name: "Secretful".into(),
+            description: None,
+            script_path: "scripts/noop.py".into(),
+            cron_schedule: "0 0 * * *".into(),
+            async_mode: false,
+            email_on_failure: true,
+            timezone: "UTC".into(),
+            corpus: "instance".into(),
+            environment: Some("instance".into()),
+            domain: None,
+            trigger_config: None,
+            queue_config: None,
+        };
+        let wf = state.service.create_workflow(draft, false).unwrap();
+        let spec = WorkflowSpec {
+            kind: crate::workflow_spec::WorkflowKind::Generic,
+            environment: Some("instance".into()),
+            generic: Some(crate::workflow_spec::GenericSpec {
+                steps: vec![crate::workflow_spec::StepSpec {
+                    id: "s1".into(),
+                    command: Some("echo hi".into()),
+                    script: None,
+                    args: vec![],
+                    working_dir: None,
+                    depends_on: vec![],
+                    retry: None,
+                    timeout_seconds: None,
+                    continue_on_error: false,
+                }],
+            }),
+            typed: None,
+            on_success: vec![crate::actions::ActionSpec::Webhook {
+                url: "https://example.com/h".into(),
+                secret: Some("topsecret".into()),
+                max_retries: 0,
+            }],
+            on_failure: vec![],
+        };
+        state
+            .service
+            .set_workflow_spec(&wf.id, &spec, false)
+            .unwrap();
+        wf.id
+    }
+
+    #[tokio::test]
+    async fn rest_get_workflow_redacts_secret_for_read_scope_only() {
+        let (state, write_token) = test_state();
+        let read_token = state
+            .service
+            .create_api_key(Some("ro"), &["read"])
+            .unwrap()
+            .token;
+        let id = seed_workflow_with_secret(&state);
+        let app = router(state);
+
+        // Read-only scope: secret must be redacted and never present in bytes.
+        let (status, value) = body_json(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/workflows/{id}"))
+                        .header("authorization", format!("Bearer {read_token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let read_body = value.to_string();
+        assert!(read_body.contains("__redacted__"), "{read_body}");
+        assert!(!read_body.contains("topsecret"), "{read_body}");
+
+        // Write scope: round-trip edit flow keeps the real secret.
+        let (status, value) = body_json(
+            app.oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workflows/{id}"))
+                    .header("authorization", format!("Bearer {write_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(value.to_string().contains("topsecret"));
     }
 
     #[tokio::test]
