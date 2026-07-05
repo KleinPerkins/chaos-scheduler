@@ -467,6 +467,19 @@ export default function RunDetail({ runId, onBack }: Props) {
         </button>
       </div>
 
+      {loadError && (
+        <div className="rd-error" role="alert">
+          <span>Refresh failed: {loadError}</span>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => void loadRun()}
+            disabled={loading}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Run metadata bar */}
       <div className="rd-meta-bar">
         <span className={`status-badge ${run.status}`}>

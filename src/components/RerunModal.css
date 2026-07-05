@@ -6,10 +6,23 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
+}
+
+.rerun-modal-scrim {
+  position: absolute;
+  inset: 0;
+  border: none;
+  padding: 0;
+  margin: 0;
+  width: 100%;
+  height: 100%;
   background: rgba(0, 0, 0, 0.55);
+  cursor: default;
 }
 
 .rerun-modal {
+  position: relative;
+  z-index: 1;
   width: min(520px, 100%);
   padding: 20px;
   border-radius: var(--radius-lg);

@@ -1,4 +1,6 @@
-.rh-loading, .rh-empty, .rh-error {
+.rh-loading,
+.rh-empty,
+.rh-error {
   padding: 40px;
   text-align: center;
   color: var(--text-muted);
@@ -60,18 +62,18 @@
 }
 
 .rh-heatmap-cell.ok {
-  background: rgba(40, 167, 69, 0.18);
-  color: var(--success);
+  background: rgba(52, 168, 83, 0.2);
+  color: #5fd68a;
 }
 
 .rh-heatmap-cell.warn {
   background: rgba(255, 193, 7, 0.2);
-  color: #b58100;
+  color: #e8b339;
 }
 
 .rh-heatmap-cell.bad {
-  background: rgba(220, 53, 69, 0.18);
-  color: var(--error);
+  background: rgba(234, 67, 53, 0.2);
+  color: #f28b82;
 }
 
 .rh-table th {

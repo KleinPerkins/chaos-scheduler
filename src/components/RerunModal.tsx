@@ -49,14 +49,20 @@ export default function RerunModal({
   };
 
   return (
-    <div className="rerun-modal-backdrop" onClick={busy ? undefined : onCancel}>
+    <div className="rerun-modal-backdrop">
+      <button
+        type="button"
+        className="rerun-modal-scrim"
+        aria-label="Close dialog"
+        disabled={busy}
+        onClick={onCancel}
+      />
       <div
         className="rerun-modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={descId}
-        onClick={(e) => e.stopPropagation()}
       >
         <h2 id={titleId} className="rerun-modal-title">
           Rerun {workflowName}

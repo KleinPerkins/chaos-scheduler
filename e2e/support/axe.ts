@@ -6,9 +6,7 @@ export async function expectNoAxeViolations(
   page: Page,
   context?: string,
 ): Promise<void> {
-  const results = await new AxeBuilder({ page })
-    .disableRules(["color-contrast"])
-    .analyze();
+  const results = await new AxeBuilder({ page }).analyze();
 
   const serious = results.violations.filter((v) =>
     ["critical", "serious"].includes(v.impact ?? ""),
