@@ -385,6 +385,7 @@ pub fn run() {
             commands::check_for_update,
             commands::apply_update,
             commands::trigger_workflow,
+            commands::enqueue_workflow,
             commands::rerun_workflow,
             commands::plan_backfill,
             commands::dispatch_backfill,

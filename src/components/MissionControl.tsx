@@ -593,10 +593,13 @@ export default function MissionControl({
             ).map((item) => (
               <button
                 key={item}
+                id={`mc-tab-${item}`}
                 className={tab === item ? "active" : ""}
                 onClick={() => setTab(item)}
                 role="tab"
                 aria-selected={tab === item}
+                aria-controls={`mc-panel-${item}`}
+                tabIndex={tab === item ? 0 : -1}
               >
                 {item}
               </button>
@@ -643,7 +646,13 @@ export default function MissionControl({
         {error && <div className="mc-inline-error">{error}</div>}
 
         {tab === "overview" && (
-          <div className="mc-grid">
+          <div
+            id="mc-panel-overview"
+            role="tabpanel"
+            aria-labelledby="mc-tab-overview"
+            tabIndex={0}
+            className="mc-grid"
+          >
             <HeaderStatus snapshot={snapshot} />
             <SlaStrip
               snapshot={snapshot}
@@ -670,52 +679,80 @@ export default function MissionControl({
         )}
 
         {tab === "activity" && (
-          <ActivityList
-            title="Live Activity"
-            items={snapshot.live_activity}
-            onOpenRun={(runId, workflowId) =>
-              onOpenRun(runId, workflowId, returnState)
-            }
-          />
+          <div
+            id="mc-panel-activity"
+            role="tabpanel"
+            aria-labelledby="mc-tab-activity"
+            tabIndex={0}
+          >
+            <ActivityList
+              title="Live Activity"
+              items={snapshot.live_activity}
+              onOpenRun={(runId, workflowId) =>
+                onOpenRun(runId, workflowId, returnState)
+              }
+            />
+          </div>
         )}
 
         {tab === "freshness" && (
-          <FreshnessLedger items={snapshot.freshness_ledger} />
+          <div
+            id="mc-panel-freshness"
+            role="tabpanel"
+            aria-labelledby="mc-tab-freshness"
+            tabIndex={0}
+          >
+            <FreshnessLedger items={snapshot.freshness_ledger} />
+          </div>
         )}
 
         {tab === "telemetry" && (
-          <TelemetryCards items={snapshot.workflow_telemetry} />
+          <div
+            id="mc-panel-telemetry"
+            role="tabpanel"
+            aria-labelledby="mc-tab-telemetry"
+            tabIndex={0}
+          >
+            <TelemetryCards items={snapshot.workflow_telemetry} />
+          </div>
         )}
 
         {tab === "matrix" && (
-          <section className="mc-panel mc-panel-wide">
-            <div className="mc-panel-header">
-              <h2>Panel Availability Matrix</h2>
-              <span>v0 contract</span>
-            </div>
-            <table className="mc-matrix">
-              <thead>
-                <tr>
-                  <th>Panel</th>
-                  <th>Source Tables</th>
-                  <th>Filter Behavior</th>
-                  <th>Empty State</th>
-                  <th>Degraded State</th>
-                </tr>
-              </thead>
-              <tbody>
-                {snapshot.availability.map((item) => (
-                  <tr key={item.panel}>
-                    <th scope="row">{item.panel}</th>
-                    <td>{item.source_tables.join(", ")}</td>
-                    <td>{item.filter_behavior}</td>
-                    <td>{item.empty_state}</td>
-                    <td>{item.degraded_state}</td>
+          <div
+            id="mc-panel-matrix"
+            role="tabpanel"
+            aria-labelledby="mc-tab-matrix"
+            tabIndex={0}
+          >
+            <section className="mc-panel mc-panel-wide">
+              <div className="mc-panel-header">
+                <h2>Panel Availability Matrix</h2>
+                <span>v0 contract</span>
+              </div>
+              <table className="mc-matrix">
+                <thead>
+                  <tr>
+                    <th>Panel</th>
+                    <th>Source Tables</th>
+                    <th>Filter Behavior</th>
+                    <th>Empty State</th>
+                    <th>Degraded State</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
+                </thead>
+                <tbody>
+                  {snapshot.availability.map((item) => (
+                    <tr key={item.panel}>
+                      <th scope="row">{item.panel}</th>
+                      <td>{item.source_tables.join(", ")}</td>
+                      <td>{item.filter_behavior}</td>
+                      <td>{item.empty_state}</td>
+                      <td>{item.degraded_state}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          </div>
         )}
       </div>
     </MissionControlFiltersContext.Provider>

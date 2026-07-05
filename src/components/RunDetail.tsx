@@ -5,9 +5,9 @@ import {
   getRunMetrics,
   getRunRelationships,
   getRunTasks,
-  openUrl,
   analyzeRunError,
 } from "../lib/commands";
+import { openExternalSafe } from "../lib/openExternalSafe";
 import type {
   ErrorAnalysis,
   Run,
@@ -54,9 +54,7 @@ function asStatsData(value: unknown): Record<string, number | string> | null {
   return Object.fromEntries(entries) as Record<string, number | string>;
 }
 
-function asItemList(
-  value: unknown,
-): Array<{
+function asItemList(value: unknown): Array<{
   name: string;
   detail?: string;
   url?: string;
@@ -168,7 +166,7 @@ function ItemList({
           {item.url && (
             <button
               className="btn btn-ghost btn-sm"
-              onClick={() => openUrl(item.url!)}
+              onClick={() => openExternalSafe(item.url!)}
             >
               Open
             </button>
@@ -186,7 +184,7 @@ function LinkList({ data }: { data: Array<{ label: string; url: string }> }) {
         <button
           key={i}
           className="rd-link-button"
-          onClick={() => openUrl(link.url)}
+          onClick={() => openExternalSafe(link.url)}
         >
           {link.label}
         </button>
@@ -490,7 +488,7 @@ export default function RunDetail({ runId, onBack }: Props) {
         {run.result_url && (
           <button
             className="btn btn-ghost btn-sm"
-            onClick={() => openUrl(run.result_url!)}
+            onClick={() => openExternalSafe(run.result_url!)}
           >
             Open Result
           </button>

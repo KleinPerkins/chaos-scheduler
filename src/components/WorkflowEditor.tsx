@@ -28,6 +28,11 @@ import {
   defaultTypedSpec,
   defaultAction,
 } from "./workflow/specHelpers";
+import {
+  validateRunWorkflowActions,
+  validateWorkflowSteps,
+} from "../lib/workflowValidation";
+import Notice from "./ui/Notice";
 import "./WorkflowEditor.css";
 
 interface Props {
@@ -180,6 +185,27 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
     e.preventDefault();
     setError(null);
     setNotice(null);
+    const stepError = validateWorkflowSteps(kind, steps);
+    if (stepError) {
+      setError(stepError);
+      return;
+    }
+    const successActionError = validateRunWorkflowActions(
+      onSuccess,
+      "On-success",
+    );
+    if (successActionError) {
+      setError(successActionError);
+      return;
+    }
+    const failureActionError = validateRunWorkflowActions(
+      onFailure,
+      "On-failure",
+    );
+    if (failureActionError) {
+      setError(failureActionError);
+      return;
+    }
     setSaving(true);
     try {
       for (const value of [triggerConfig, queueConfig]) {
@@ -281,9 +307,9 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
 
       <form className="editor-form" onSubmit={handleSubmit}>
         {error && (
-          <div className="editor-error" role="alert">
+          <Notice variant="error" assertive>
             {error}
-          </div>
+          </Notice>
         )}
         {notice && (
           <div className="editor-hint editor-notice" role="status">

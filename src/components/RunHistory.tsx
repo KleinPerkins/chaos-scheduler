@@ -2,9 +2,10 @@ import { useState, useEffect, useCallback } from "react";
 import {
   getRunHistory,
   getWorkflowHistoryBuckets,
-  openUrl,
   rerunWorkflow,
 } from "../lib/commands";
+import { openExternalSafe } from "../lib/openExternalSafe";
+import RerunModal from "./RerunModal";
 import type { Run, Workflow, WorkflowHistoryBucket } from "../lib/commands";
 import "./RunHistory.css";
 
@@ -41,6 +42,8 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
   const [buckets, setBuckets] = useState<WorkflowHistoryBucket[]>([]);
   const [loading, setLoading] = useState(true);
   const [rerunning, setRerunning] = useState<string | null>(null);
+  const [rerunTarget, setRerunTarget] = useState<Run | null>(null);
+  const [rerunError, setRerunError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refreshRuns = useCallback(() => {
@@ -64,24 +67,16 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
     return () => clearTimeout(id);
   }, [refreshRuns]);
 
-  const handleRerun = async (run: Run) => {
-    const input = window.prompt(
-      "Optional input override JSON for this rerun",
-      run.input_json ?? "{}",
-    );
-    if (input === null) return;
+  const submitRerun = async (input: string) => {
+    if (!rerunTarget) return;
+    setRerunning(rerunTarget.id);
+    setRerunError(null);
     try {
-      JSON.parse(input || "{}");
-    } catch (err) {
-      window.alert(`Input override must be valid JSON: ${err}`);
-      return;
-    }
-    setRerunning(run.id);
-    try {
-      await rerunWorkflow(workflow.id, run.id, input || "{}");
+      await rerunWorkflow(workflow.id, rerunTarget.id, input);
+      setRerunTarget(null);
       await refreshRuns();
     } catch (e) {
-      window.alert(`Failed to rerun workflow: ${e}`);
+      setRerunError(String(e));
     } finally {
       setRerunning(null);
     }
@@ -176,7 +171,7 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
                       <button
                         className="btn btn-ghost btn-sm"
                         onClick={() => {
-                          openUrl(run.result_url!);
+                          void openExternalSafe(run.result_url!);
                         }}
                       >
                         Open
@@ -198,7 +193,10 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
                       disabled={
                         rerunning === run.id || run.status === "running"
                       }
-                      onClick={() => handleRerun(run)}
+                      onClick={() => {
+                        setRerunError(null);
+                        setRerunTarget(run);
+                      }}
                       aria-label={`Rerun ${run.status} run started ${formatDate(run.started_at)}`}
                     >
                       {rerunning === run.id ? "Rerunning..." : "Rerun"}
@@ -209,6 +207,21 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
             </tbody>
           </table>
         </>
+      )}
+      {rerunTarget && (
+        <RerunModal
+          workflowName={workflow.name}
+          initialJson={rerunTarget.input_json ?? "{}"}
+          busy={rerunning === rerunTarget.id}
+          error={rerunError}
+          onCancel={() => {
+            if (rerunning !== rerunTarget.id) {
+              setRerunTarget(null);
+              setRerunError(null);
+            }
+          }}
+          onSubmit={(input) => void submitRerun(input)}
+        />
       )}
     </div>
   );

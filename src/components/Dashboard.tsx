@@ -174,6 +174,7 @@ export default function Dashboard() {
         <nav className="sidebar-nav" aria-label="Primary navigation">
           <button
             className={`sidebar-link ${nav.view === "mission" ? "active" : ""}`}
+            aria-current={nav.view === "mission" ? "page" : undefined}
             onClick={() => setNav({ view: "mission" })}
           >
             <span className="sidebar-icon">&#9673;</span>
@@ -188,6 +189,7 @@ export default function Dashboard() {
           </button>
           <button
             className={`sidebar-link ${nav.view === "global_history" ? "active" : ""}`}
+            aria-current={nav.view === "global_history" ? "page" : undefined}
             onClick={() => setNav({ view: "global_history" })}
           >
             <span className="sidebar-icon">&#8635;</span>
@@ -195,6 +197,7 @@ export default function Dashboard() {
           </button>
           <button
             className={`sidebar-link ${nav.view === "queues" ? "active" : ""}`}
+            aria-current={nav.view === "queues" ? "page" : undefined}
             onClick={() => setNav({ view: "queues" })}
           >
             <span className="sidebar-icon">&#8644;</span>
@@ -202,6 +205,7 @@ export default function Dashboard() {
           </button>
           <button
             className={`sidebar-link ${nav.view === "environments" ? "active" : ""}`}
+            aria-current={nav.view === "environments" ? "page" : undefined}
             onClick={() => setNav({ view: "environments" })}
           >
             <span className="sidebar-icon">&#9709;</span>
@@ -209,6 +213,7 @@ export default function Dashboard() {
           </button>
           <button
             className={`sidebar-link ${nav.view === "integrations" ? "active" : ""}`}
+            aria-current={nav.view === "integrations" ? "page" : undefined}
             onClick={() => setNav({ view: "integrations" })}
           >
             <span className="sidebar-icon">&#128268;</span>
@@ -216,6 +221,7 @@ export default function Dashboard() {
           </button>
           <button
             className={`sidebar-link ${nav.view === "settings" ? "active" : ""}`}
+            aria-current={nav.view === "settings" ? "page" : undefined}
             onClick={() => setNav({ view: "settings" })}
           >
             <span className="sidebar-icon">&#9881;</span>

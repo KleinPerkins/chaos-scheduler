@@ -15,6 +15,7 @@ import {
   type UpdateStatus,
 } from "../lib/commands";
 import { PRODUCT_NAME, EMAIL_FROM_NAME, APP_VERSION } from "../lib/branding";
+import Notice from "./ui/Notice";
 import "./Settings.css";
 
 export default function Settings() {
@@ -47,6 +48,7 @@ export default function Settings() {
   const [emailDirty, setEmailDirty] = useState(false);
   const [emailSaving, setEmailSaving] = useState(false);
   const [emailTesting, setEmailTesting] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     getAppConfig()
@@ -56,19 +58,29 @@ export default function Settings() {
         );
         setPythonPath(config.python_path);
       })
-      .catch(() => {});
+      .catch((e) =>
+        setLoadError((prev) => prev ?? `App config failed to load: ${e}`),
+      );
     getEmailConfig()
       .then((config) => setEmailConfigState(config))
-      .catch(() => {});
+      .catch((e) =>
+        setLoadError((prev) => prev ?? `Email config failed to load: ${e}`),
+      );
     getNotificationPrefs()
       .then((prefs) => {
         setNotifyOnFailure(prefs.notify_on_failure);
         setNotifyOnSuccess(prefs.notify_on_success);
       })
-      .catch(() => {});
+      .catch((e) =>
+        setLoadError(
+          (prev) => prev ?? `Notification prefs failed to load: ${e}`,
+        ),
+      );
     getLaunchAtLogin()
       .then((enabled) => setLaunchAtLoginState(enabled))
-      .catch(() => {});
+      .catch((e) =>
+        setLoadError((prev) => prev ?? `Launch-at-login failed to load: ${e}`),
+      );
     return () => {
       if (statusTimerRef.current) {
         clearTimeout(statusTimerRef.current);
@@ -220,6 +232,12 @@ export default function Settings() {
           <p className="page-subtitle">Configure the scheduler</p>
         </div>
       </div>
+
+      {loadError && (
+        <Notice variant="error" assertive>
+          {loadError} Settings below may show defaults until you reload.
+        </Notice>
+      )}
 
       {status && (
         <div className={`settings-status settings-status--${statusType}`}>

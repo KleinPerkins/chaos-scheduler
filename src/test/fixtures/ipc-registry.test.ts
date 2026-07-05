@@ -31,6 +31,7 @@ describe("ipc fixture registry", () => {
       "check_for_update",
       "apply_update",
       "trigger_workflow",
+      "enqueue_workflow",
       "rerun_workflow",
       "plan_backfill",
       "dispatch_backfill",
