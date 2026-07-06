@@ -12,7 +12,7 @@ export const PRODUCT_SHORT_NAME = "Chaos Scheduler";
  * (see the `generic` extra-file entry in `release-please-config.json`); the
  * `x-release-please-version` marker below is what release-please rewrites.
  */
-export const APP_VERSION = "0.4.0"; // x-release-please-version
+export const APP_VERSION = "0.5.0"; // x-release-please-version
 
 /** Default email `from` display name (mirrors `EMAIL_FROM_NAME`). */
 export const EMAIL_FROM_NAME = "Chaos Scheduler";

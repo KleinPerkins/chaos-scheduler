@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v0.4.0...chaos-scheduler-v0.5.0) (2026-07-06)
+
+
+### Features
+
+* **email:** named email profiles for workflow failure alerts ([#95](https://github.com/KleinPerkins/chaos-scheduler/issues/95)) ([fd48423](https://github.com/KleinPerkins/chaos-scheduler/commit/fd48423a16cfae410a4ef5d40603d21ff20d8cc8))
+* **ui:** add light/dark design-system tokens and a real icon set ([#93](https://github.com/KleinPerkins/chaos-scheduler/issues/93)) ([ef75978](https://github.com/KleinPerkins/chaos-scheduler/commit/ef75978376cd0fc1bb5c4b4b2d914c9c7b144f9b))
+* **ui:** unified per-workflow detail hub ([#97](https://github.com/KleinPerkins/chaos-scheduler/issues/97)) ([2d18bf4](https://github.com/KleinPerkins/chaos-scheduler/commit/2d18bf4cddf381bd01092e88bd25c2655740eede))
+
+
+### Bug Fixes
+
+* **ui:** surface revoked state so API-key revoke visibly persists ([#96](https://github.com/KleinPerkins/chaos-scheduler/issues/96)) ([0d61fc0](https://github.com/KleinPerkins/chaos-scheduler/commit/0d61fc02b8ed1d58c8482424b677f45122e86935))
+
 ## [0.4.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v0.3.1...chaos-scheduler-v0.4.0) (2026-07-06)
 
 
