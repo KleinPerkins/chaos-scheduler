@@ -765,7 +765,7 @@ pub fn get_global_run_history(
     state: State<AppState>,
     status_filter: Option<String>,
     trigger_kind: Option<String>,
-    corpus_filter: Option<String>,
+    environment_filter: Option<String>,
     domain_filter: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<Run>, String> {
@@ -774,7 +774,7 @@ pub fn get_global_run_history(
         .get_global_run_history(
             status_filter.as_deref(),
             trigger_kind.as_deref(),
-            corpus_filter.as_deref(),
+            environment_filter.as_deref(),
             domain_filter.as_deref(),
             limit.unwrap_or(100),
         )
@@ -948,7 +948,7 @@ fn normalize_time_bucket(value: Option<&str>) -> Result<String, String> {
 /// Normalize a mission-control environment filter. Environments are
 /// user-managed, so any non-empty value is passed through as the partition to
 /// filter on; empty / "all" means no environment filter.
-fn normalize_mission_corpus_filter(value: Option<String>, default: &str) -> String {
+fn normalize_mission_environment_filter(value: Option<String>, default: &str) -> String {
     let raw = value.unwrap_or_else(|| default.to_string());
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
@@ -1033,7 +1033,7 @@ fn mission_control_availability() -> Vec<MissionControlPanelAvailability> {
                 "queued_runs".to_string(),
             ],
             command: "get_mission_control_snapshot".to_string(),
-            filter_behavior: "corpus/domain filters apply before counting".to_string(),
+            filter_behavior: "environment/domain filters apply before counting".to_string(),
             empty_state: "No workflows match the current filters".to_string(),
             degraded_state: "Counts omit unavailable scheduler.db rows".to_string(),
             click_through_target: Some("Dashboard workflows".to_string()),
@@ -1107,7 +1107,7 @@ fn mission_control_availability() -> Vec<MissionControlPanelAvailability> {
                     .to_string(),
             empty_state: "No stale assets for this filter".to_string(),
             degraded_state:
-                "Unattributed assets are labeled and withheld from corpus/domain filters"
+                "Unattributed assets are labeled and withheld from environment/domain filters"
                     .to_string(),
             click_through_target: None,
             persistence_required: false,
@@ -1143,19 +1143,19 @@ pub fn get_mission_control_preferences(
 pub fn set_mission_control_preferences(
     state: State<AppState>,
     default_landing: String,
-    corpus_filter: String,
+    environment_filter: String,
     domain_filter: String,
 ) -> Result<MissionControlPreferences, String> {
     state
         .db
-        .set_mission_control_preferences(&default_landing, &corpus_filter, &domain_filter)
+        .set_mission_control_preferences(&default_landing, &environment_filter, &domain_filter)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn get_mission_control_snapshot(
     state: State<AppState>,
-    corpus_filter: Option<String>,
+    environment_filter: Option<String>,
     domain_filter: Option<String>,
 ) -> Result<MissionControlSnapshot, String> {
     let preferences = state
@@ -1163,12 +1163,13 @@ pub fn get_mission_control_snapshot(
         .get_mission_control_preferences()
         .map_err(|e| e.to_string())?;
     let explicit_domain_filter = domain_filter.is_some();
-    let corpus_filter = normalize_mission_corpus_filter(corpus_filter, &preferences.corpus_filter);
+    let environment_filter =
+        normalize_mission_environment_filter(environment_filter, &preferences.environment_filter);
     let requested_domain_filter =
         normalize_mission_domain_filter(domain_filter, &preferences.domain_filter);
     let domains = state
         .db
-        .mission_control_domains(&corpus_filter)
+        .mission_control_domains(&environment_filter)
         .map_err(|e| e.to_string())?;
     let known_domains: HashSet<String> =
         domains.iter().map(|domain| domain.value.clone()).collect();
@@ -1180,7 +1181,7 @@ pub fn get_mission_control_snapshot(
         if !explicit_domain_filter {
             let _ = state.db.set_mission_control_preferences(
                 &preferences.default_landing,
-                &corpus_filter,
+                &environment_filter,
                 "all",
             );
         }
@@ -1189,7 +1190,7 @@ pub fn get_mission_control_snapshot(
 
     let workflows = state
         .db
-        .list_workflows_filtered(&corpus_filter, &domain_filter)
+        .list_workflows_filtered(&environment_filter, &domain_filter)
         .map_err(|e| e.to_string())?;
     let visible_workflow_ids: HashSet<String> = workflows
         .iter()
@@ -1206,35 +1207,39 @@ pub fn get_mission_control_snapshot(
 
     let header = state
         .db
-        .mission_control_header(&corpus_filter, &domain_filter)
+        .mission_control_header(&environment_filter, &domain_filter)
         .map_err(|e| e.to_string())?;
     let sla = state
         .db
-        .mission_control_sla_summary(&corpus_filter, &domain_filter, sla_violations.len() as i64)
+        .mission_control_sla_summary(
+            &environment_filter,
+            &domain_filter,
+            sla_violations.len() as i64,
+        )
         .map_err(|e| e.to_string())?;
     let recent_runs = state
         .db
-        .mission_control_recent_runs(&corpus_filter, &domain_filter, 12)
+        .mission_control_recent_runs(&environment_filter, &domain_filter, 12)
         .map_err(|e| e.to_string())?;
     let failed_runs = state
         .db
-        .mission_control_failed_runs(&corpus_filter, &domain_filter, 4)
+        .mission_control_failed_runs(&environment_filter, &domain_filter, 4)
         .map_err(|e| e.to_string())?;
     let failed_run_count = state
         .db
-        .mission_control_failed_run_count(&corpus_filter, &domain_filter)
+        .mission_control_failed_run_count(&environment_filter, &domain_filter)
         .map_err(|e| e.to_string())?;
     let live_activity = state
         .db
-        .mission_control_live_activity(&corpus_filter, &domain_filter, 10)
+        .mission_control_live_activity(&environment_filter, &domain_filter, 10)
         .map_err(|e| e.to_string())?;
     let freshness_ledger = state
         .db
-        .mission_control_freshness_ledger(&corpus_filter, &domain_filter, 24 * 60 * 60, 12)
+        .mission_control_freshness_ledger(&environment_filter, &domain_filter, 24 * 60 * 60, 12)
         .map_err(|e| e.to_string())?;
     let workflow_telemetry = state
         .db
-        .mission_control_workflow_telemetry(&corpus_filter, &domain_filter, "-24 hours", 12)
+        .mission_control_workflow_telemetry(&environment_filter, &domain_filter, "-24 hours", 12)
         .map_err(|e| e.to_string())?;
 
     let mut upcoming_runs = workflows
@@ -1319,7 +1324,7 @@ pub fn get_mission_control_snapshot(
     Ok(MissionControlSnapshot {
         preferences: MissionControlPreferences {
             default_landing: preferences.default_landing,
-            corpus_filter,
+            environment_filter,
             domain_filter,
         },
         domains,

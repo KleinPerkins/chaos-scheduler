@@ -26,13 +26,13 @@ export type MissionTab =
   "overview" | "activity" | "freshness" | "telemetry" | "matrix";
 export interface MissionControlReturnState {
   tab: MissionTab;
-  corpus: MissionControlPreferences["corpus_filter"];
+  environmentFilter: MissionControlPreferences["environment_filter"];
   domain: string;
 }
 
 interface MissionControlProps {
   initialTab?: MissionTab;
-  initialCorpus?: MissionControlPreferences["corpus_filter"];
+  initialEnvironment?: MissionControlPreferences["environment_filter"];
   initialDomain?: string;
   onOpenRun: (
     runId: string,
@@ -47,12 +47,12 @@ interface MissionControlProps {
 }
 
 interface MissionControlFilters {
-  corpus: MissionControlPreferences["corpus_filter"];
+  environmentFilter: MissionControlPreferences["environment_filter"];
   domain: string;
 }
 
 const MissionControlFiltersContext = createContext<MissionControlFilters>({
-  corpus: "all",
+  environmentFilter: "all",
   domain: "all",
 });
 
@@ -101,7 +101,7 @@ function EmptyPanel({ children }: { children: string }) {
 }
 
 function HeaderStatus({ snapshot }: { snapshot: MissionControlSnapshot }) {
-  const { corpus, domain } = useMissionControlFilters();
+  const { environmentFilter, domain } = useMissionControlFilters();
   const cards = [
     ["Active workflows", snapshot.header.active_workflows],
     ["Running now", snapshot.header.running_count],
@@ -114,7 +114,7 @@ function HeaderStatus({ snapshot }: { snapshot: MissionControlSnapshot }) {
         <p className="mc-kicker">Mission Control</p>
         <h1>Scheduler operations by environment and owner</h1>
         <p className="mc-hero-copy">
-          Durable scheduler.db state only. Filtered by {corpus} /{" "}
+          Durable scheduler.db state only. Filtered by {environmentFilter} /{" "}
           {domain === "__unowned__" ? "Unowned" : domain}.
         </p>
       </div>
@@ -456,7 +456,7 @@ function TelemetryCards({
 
 export default function MissionControl({
   initialTab = "overview",
-  initialCorpus,
+  initialEnvironment,
   initialDomain,
   onOpenRun,
   onOpenQueues,
@@ -465,9 +465,9 @@ export default function MissionControl({
   const { environments } = useEnvironments();
   const [snapshot, setSnapshot] = useState<MissionControlSnapshot | null>(null);
   const [tab, setTab] = useState<MissionTab>(initialTab);
-  const [corpus, setCorpus] = useState<
-    MissionControlPreferences["corpus_filter"]
-  >(initialCorpus ?? "all");
+  const [environmentFilter, setEnvironmentFilter] = useState<
+    MissionControlPreferences["environment_filter"]
+  >(initialEnvironment ?? "all");
   const [domain, setDomain] = useState(initialDomain ?? "all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -478,7 +478,7 @@ export default function MissionControl({
 
   const loadSnapshot = useCallback(
     async (
-      nextCorpus?: MissionControlPreferences["corpus_filter"],
+      nextEnvironment?: MissionControlPreferences["environment_filter"],
       nextDomain?: string,
       persist = false,
     ) => {
@@ -488,10 +488,13 @@ export default function MissionControl({
       setLoading(true);
       setError(null);
       try {
-        const next = await getMissionControlSnapshot(nextCorpus, nextDomain);
+        const next = await getMissionControlSnapshot(
+          nextEnvironment,
+          nextDomain,
+        );
         if (requestId !== latestRequestId.current) return;
         setSnapshot(next);
-        setCorpus(next.preferences.corpus_filter);
+        setEnvironmentFilter(next.preferences.environment_filter);
         setDomain(next.preferences.domain_filter);
         if (persist) {
           const writeId = latestPreferenceWriteId.current + 1;
@@ -502,7 +505,7 @@ export default function MissionControl({
               if (writeId !== latestPreferenceWriteId.current) return;
               await setMissionControlPreferences(
                 next.preferences.default_landing,
-                next.preferences.corpus_filter,
+                next.preferences.environment_filter,
                 next.preferences.domain_filter,
               );
             })
@@ -529,25 +532,28 @@ export default function MissionControl({
   // react-hooks/set-state-in-effect). Mirrors useSchedulerStatus.
   useEffect(() => {
     const id = setTimeout(
-      () => void loadSnapshot(initialCorpus, initialDomain, false),
+      () => void loadSnapshot(initialEnvironment, initialDomain, false),
       0,
     );
     return () => clearTimeout(id);
-  }, [initialCorpus, initialDomain, loadSnapshot]);
+  }, [initialEnvironment, initialDomain, loadSnapshot]);
 
   useEffect(() => {
     if (!snapshot) return;
     const timer = window.setInterval(() => {
       if (persistentRequestInFlight.current) return;
-      void loadSnapshot(corpus, domain, false);
+      void loadSnapshot(environmentFilter, domain, false);
     }, 15000);
     return () => window.clearInterval(timer);
-  }, [loadSnapshot, corpus, domain, snapshot]);
+  }, [loadSnapshot, environmentFilter, domain, snapshot]);
 
-  const filters = useMemo(() => ({ corpus, domain }), [corpus, domain]);
+  const filters = useMemo(
+    () => ({ environmentFilter, domain }),
+    [environmentFilter, domain],
+  );
   const returnState = useMemo(
-    () => ({ tab, corpus, domain }),
-    [tab, corpus, domain],
+    () => ({ tab, environmentFilter, domain }),
+    [tab, environmentFilter, domain],
   );
 
   // Environment filter options are sourced from the environments backend and
@@ -556,9 +562,9 @@ export default function MissionControl({
   const envFilterOptions = useMemo(() => {
     const names = new Set<string>(["all"]);
     for (const env of environments) names.add(env.name);
-    if (corpus) names.add(corpus);
+    if (environmentFilter) names.add(environmentFilter);
     return Array.from(names);
-  }, [environments, corpus]);
+  }, [environments, environmentFilter]);
 
   if (loading && !snapshot) {
     return <div className="mc-loading">Loading Mission Control...</div>;
@@ -613,11 +619,11 @@ export default function MissionControl({
               {envFilterOptions.map((item) => (
                 <button
                   key={item}
-                  className={corpus === item ? "active" : ""}
+                  className={environmentFilter === item ? "active" : ""}
                   onClick={() => {
                     void loadSnapshot(item, domain, true);
                   }}
-                  aria-pressed={corpus === item}
+                  aria-pressed={environmentFilter === item}
                 >
                   {item}
                 </button>
@@ -626,7 +632,7 @@ export default function MissionControl({
             <select
               value={domain}
               onChange={(event) => {
-                void loadSnapshot(corpus, event.target.value, true);
+                void loadSnapshot(environmentFilter, event.target.value, true);
               }}
               aria-label="Domain filter"
             >

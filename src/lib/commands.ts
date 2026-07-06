@@ -286,9 +286,8 @@ export interface DomainOption {
 
 export interface MissionControlPreferences {
   default_landing: "mission_control" | "dashboard";
-  /** "all" or an environment name. Named `corpus_filter` for backend
-   * wire-compat during the environments migration. */
-  corpus_filter: string;
+  /** "all" or an environment name (the active partition filter). */
+  environment_filter: string;
   domain_filter: string;
 }
 
@@ -714,14 +713,14 @@ export function getRunHistory(
 export function getGlobalRunHistory(
   statusFilter = "all",
   triggerKind = "all",
-  corpusFilter = "all",
+  environmentFilter = "all",
   domainFilter = "all",
   limit = 100,
 ): Promise<Run[]> {
   return invoke("get_global_run_history", {
     statusFilter,
     triggerKind,
-    corpusFilter,
+    environmentFilter,
     domainFilter,
     limit,
   });
@@ -775,21 +774,24 @@ export function getMissionControlPreferences(): Promise<MissionControlPreference
 
 export function setMissionControlPreferences(
   defaultLanding: MissionControlPreferences["default_landing"],
-  corpusFilter: MissionControlPreferences["corpus_filter"],
+  environmentFilter: MissionControlPreferences["environment_filter"],
   domainFilter: string,
 ): Promise<MissionControlPreferences> {
   return invoke("set_mission_control_preferences", {
     defaultLanding,
-    corpusFilter,
+    environmentFilter,
     domainFilter,
   });
 }
 
 export function getMissionControlSnapshot(
-  corpusFilter?: MissionControlPreferences["corpus_filter"],
+  environmentFilter?: MissionControlPreferences["environment_filter"],
   domainFilter?: string,
 ): Promise<MissionControlSnapshot> {
-  return invoke("get_mission_control_snapshot", { corpusFilter, domainFilter });
+  return invoke("get_mission_control_snapshot", {
+    environmentFilter,
+    domainFilter,
+  });
 }
 
 export function listQueues(): Promise<QueueInfo[]> {
