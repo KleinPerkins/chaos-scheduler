@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   createApiKey,
   listApiKeys,
@@ -21,6 +22,13 @@ import { openExternalSafe } from "../lib/openExternalSafe";
 import "./Integrations.css";
 
 const ALL_SCOPES: ApiKeyScope[] = ["read", "write", "admin"];
+
+// Mirrors the Rust-side `mcp::MCP_STATUS_EVENT` constant — Rust emits this
+// whenever provision/remove completes or the background startup
+// re-provision hook finishes, so this card stays live even when that
+// background thread completes after the page has already mounted and
+// fetched its initial status.
+const MCP_STATUS_EVENT = "mcp-status-changed";
 
 function mcpConfigSnippet(token: string): string {
   return JSON.stringify(
@@ -149,6 +157,24 @@ export default function Integrations() {
     }, 0);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Stay live if the managed integration's status changes on the Rust side
+  // without this component driving it — most notably the background
+  // startup re-provision hook, which can complete after this card has
+  // already mounted and fetched its initial (now-stale) status.
+  useEffect(() => {
+    const unlisten = listen<McpIntegrationStatus>(MCP_STATUS_EVENT, (event) => {
+      setMcpStatus(event.payload);
+      setMcpUnavailable(false);
+    });
+    return () => {
+      // Best-effort: if the unlisten resolves after test/teardown mocks (or,
+      // in principle, a real Tauri event bridge) have already gone away,
+      // swallow it rather than surfacing an unhandled rejection — a stray
+      // listener reference is harmless once the component is unmounted.
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
   }, []);
 
   const handleMcpProvision = async (force = false) => {

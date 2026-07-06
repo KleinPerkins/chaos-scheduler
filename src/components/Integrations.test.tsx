@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -7,12 +8,14 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { mockIPC, clearMocks } from "@tauri-apps/api/mocks";
+import { emit } from "@tauri-apps/api/event";
 import Integrations from "./Integrations";
 import type { ApiKey } from "../lib/commands";
 import {
   createDefaultIpcRegistry,
   resolveIpcInvoke,
 } from "../test/fixtures/ipc-registry";
+import { defaultMcpIntegrationStatus } from "../test/fixtures/data";
 
 function installStrictIpcMocks(): void {
   const registry = createDefaultIpcRegistry();
@@ -106,5 +109,51 @@ describe("Integrations API keys", () => {
     expect(
       screen.queryByRole("button", { name: /Revoke API key|Confirm revoke/ }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("Integrations managed MCP live refresh", () => {
+  afterEach(() => {
+    cleanup();
+    clearMocks();
+    delete window.__CHAOS_IPC_OVERRIDES__;
+  });
+
+  // Regression test for the "no live-refresh path after the startup
+  // re-provision hook completes" finding: the card must pick up a status
+  // change that originates entirely on the Rust side (no button click, no
+  // re-fetch triggered by this component) via the `mcp-status-changed`
+  // event, exactly like the background startup hook would emit after this
+  // component has already mounted and fetched its (now-stale) status.
+  it("refreshes the managed MCP status when an mcp-status-changed event arrives, with no user action", async () => {
+    installStrictIpcMocks();
+    render(<Integrations />);
+
+    // Initial fetch reflects the default (not-installed) status.
+    await waitFor(() =>
+      expect(screen.getByText("Not installed")).toBeInTheDocument(),
+    );
+
+    const healedStatus = {
+      ...defaultMcpIntegrationStatus,
+      enabled: true,
+      install_status: "installed" as const,
+      provisioned_version: defaultMcpIntegrationStatus.pinned_version,
+      registered_in_cursor: true,
+      api_reachable: true,
+      managed_key_id: "mcp-key-healed",
+      matches: true,
+    };
+
+    await act(async () => {
+      await emit("mcp-status-changed", healedStatus);
+    });
+
+    // No click, no re-fetch call from the test — the event alone must drive
+    // the visible status update.
+    await waitFor(() =>
+      expect(screen.getByText("Installed")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("Healthy")).toBeInTheDocument();
   });
 });
