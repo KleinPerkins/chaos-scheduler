@@ -128,11 +128,24 @@ impl UpdateState {
 fn try_begin_check(snapshot: &mut UpdateSnapshot) -> bool {
     if matches!(
         snapshot.phase,
-        UpdatePhase::Checking | UpdatePhase::Downloading
+        UpdatePhase::Checking | UpdatePhase::Downloading | UpdatePhase::ReadyToRestart
     ) {
         return false;
     }
     snapshot.phase = UpdatePhase::Checking;
+    true
+}
+
+/// Attempts to move the snapshot into `Downloading`. Returns `false` (no-op)
+/// if a download is already in flight — the single-flight guard for
+/// [`apply`], claimed atomically under the lock before any `.await` point
+/// (mirrors [`try_begin_check`]) so two concurrent `apply_update` calls can
+/// never both proceed past this point into a duplicate download/install.
+fn try_begin_apply(snapshot: &mut UpdateSnapshot) -> bool {
+    if snapshot.phase == UpdatePhase::Downloading {
+        return false;
+    }
+    snapshot.phase = UpdatePhase::Downloading;
     true
 }
 
@@ -343,16 +356,23 @@ pub async fn apply(
     let state = app.state::<UpdateState>();
 
     {
-        let snapshot = state
+        let mut snapshot = state
             .snapshot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if snapshot.phase == UpdatePhase::Downloading {
+        if !try_begin_apply(&mut snapshot) {
             return Err("An update is already downloading.".to_string());
         }
     }
 
-    let updater = app.updater().map_err(|e| e.to_string())?;
+    // From here on the phase is claimed as `Downloading`; every early-return
+    // path below must revert it (via `fail_with` or a direct snapshot write)
+    // so a failed/aborted apply never leaves the snapshot stuck reporting an
+    // in-progress download.
+    let updater = match app.updater() {
+        Ok(updater) => updater,
+        Err(err) => return Err(fail_with(app, &state, UpdatePhase::Idle, &err)),
+    };
     let update = match updater.check().await {
         Ok(Some(update)) => update,
         Ok(None) => {
@@ -398,6 +418,9 @@ pub async fn apply(
             .snapshot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // `phase` is already `Downloading` from the atomic claim above; this
+        // block just fills in the version/notes/progress now that they're
+        // known and re-affirms the phase for readability.
         snapshot.phase = UpdatePhase::Downloading;
         snapshot.latest_version = Some(update.version.clone());
         snapshot.notes = update.body.clone();
@@ -509,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn single_flight_guard_blocks_while_checking_or_downloading() {
+    fn single_flight_guard_blocks_while_checking_downloading_or_ready_to_restart() {
         let mut checking = snapshot_with_phase(UpdatePhase::Checking);
         assert!(!try_begin_check(&mut checking));
         assert_eq!(checking.phase, UpdatePhase::Checking);
@@ -517,6 +540,12 @@ mod tests {
         let mut downloading = snapshot_with_phase(UpdatePhase::Downloading);
         assert!(!try_begin_check(&mut downloading));
         assert_eq!(downloading.phase, UpdatePhase::Downloading);
+
+        // A background/launch check must never overwrite the snapshot during
+        // the pre-restart drain window (moments before `app.restart()`).
+        let mut ready = snapshot_with_phase(UpdatePhase::ReadyToRestart);
+        assert!(!try_begin_check(&mut ready));
+        assert_eq!(ready.phase, UpdatePhase::ReadyToRestart);
     }
 
     #[test]
@@ -530,6 +559,77 @@ mod tests {
             assert!(try_begin_check(&mut snapshot));
             assert_eq!(snapshot.phase, UpdatePhase::Checking);
         }
+    }
+
+    #[test]
+    fn apply_single_flight_guard_blocks_while_downloading() {
+        let mut downloading = snapshot_with_phase(UpdatePhase::Downloading);
+        assert!(!try_begin_apply(&mut downloading));
+        assert_eq!(downloading.phase, UpdatePhase::Downloading);
+    }
+
+    #[test]
+    fn apply_single_flight_guard_admits_from_idle_available_or_error() {
+        for phase in [
+            UpdatePhase::Idle,
+            UpdatePhase::Available,
+            UpdatePhase::Error,
+            UpdatePhase::ReadyToRestart,
+        ] {
+            let mut snapshot = snapshot_with_phase(phase);
+            assert!(try_begin_apply(&mut snapshot));
+            assert_eq!(snapshot.phase, UpdatePhase::Downloading);
+        }
+    }
+
+    /// Regression test for the `apply()` race: two concurrent callers racing
+    /// on the same `Mutex<UpdateSnapshot>` — one performing the atomic
+    /// check-and-set `try_begin_apply` does under the lock, the other
+    /// stalled on a simulated `.await` (mirroring `updater.check().await` in
+    /// the real `apply()`) before it can even attempt its own claim. Proves
+    /// only one caller ever wins the claim, which is the exact mechanism
+    /// `apply()` now relies on to stop duplicate concurrent
+    /// downloads/installs/restarts.
+    #[test]
+    fn apply_claim_is_atomic_across_concurrent_callers() {
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            let state = std::sync::Arc::new(Mutex::new(UpdateSnapshot::new(
+                "1.0.0".to_string(),
+                true,
+                None,
+            )));
+
+            let claim = |state: std::sync::Arc<Mutex<UpdateSnapshot>>, delay_ms: u64| async move {
+                // Simulate work that happens before a real caller would reach
+                // its own lock acquisition (e.g. the `updater.check().await`
+                // network round-trip in `apply()`).
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                let mut snapshot = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                try_begin_apply(&mut snapshot)
+            };
+
+            let (first, second) = tokio::join!(
+                tokio::spawn(claim(state.clone(), 0)),
+                tokio::spawn(claim(state.clone(), 0)),
+            );
+            let results = [first.unwrap(), second.unwrap()];
+
+            assert_eq!(
+                results.iter().filter(|won| **won).count(),
+                1,
+                "exactly one concurrent caller should win the Downloading claim"
+            );
+            assert_eq!(
+                state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .phase,
+                UpdatePhase::Downloading
+            );
+        });
     }
 
     #[test]
