@@ -103,6 +103,39 @@ describe("useAppUpdate", () => {
     expect(result.current.snapshot?.skipped_version).toBeNull();
   });
 
+  it("checkNow() triggers check_for_update then re-hydrates the snapshot", async () => {
+    let checkForUpdateCalls = 0;
+    const registry = createDefaultIpcRegistry();
+    mockIPC(
+      (cmd, args) => {
+        if (cmd === "check_for_update") checkForUpdateCalls += 1;
+        return resolveIpcInvoke(
+          cmd,
+          (args ?? {}) as Record<string, unknown>,
+          registry,
+        );
+      },
+      { shouldMockEvents: true },
+    );
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_app_update_status: () => availableUpdateSnapshot,
+    };
+
+    const { result } = renderHook(() => useAppUpdate());
+    await waitFor(() => expect(result.current.snapshot).not.toBeNull());
+
+    let returned: unknown;
+    await act(async () => {
+      returned = await result.current.checkNow();
+    });
+
+    expect(checkForUpdateCalls).toBe(1);
+    expect(returned).toEqual(availableUpdateSnapshot);
+    expect(result.current.snapshot).toEqual(availableUpdateSnapshot);
+
+    delete window.__CHAOS_IPC_OVERRIDES__;
+  });
+
   it("install() delegates to apply_update with the expected version", async () => {
     const registry = createDefaultIpcRegistry();
     let receivedArgs: Record<string, unknown> | undefined;

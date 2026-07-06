@@ -76,6 +76,53 @@ describe("Settings updater controls", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows Install and Restart sourced from useAppUpdate() without requiring a manual check first", async () => {
+    installStrictIpcMocks();
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_app_update_status: () => availableUpdateSnapshot,
+    };
+
+    render(<Settings />);
+
+    await screen.findByRole("button", {
+      name: `Install and Restart v${availableUpdateSnapshot.latest_version}`,
+    });
+    // The Skip affordance must coexist with (not contradict) the install
+    // affordance — both read from the same `useAppUpdate()` snapshot, so
+    // there is exactly one update-status/action surface.
+    expect(
+      screen.getByRole("button", { name: /Skip this version/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", { name: /Install and Restart/ }),
+    ).toHaveLength(1);
+  });
+
+  it("passes the exact offered version as expectedVersion when installing", async () => {
+    installStrictIpcMocks();
+    let receivedArgs: Record<string, unknown> | undefined;
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_app_update_status: () => availableUpdateSnapshot,
+      apply_update: (args) => {
+        receivedArgs = args;
+        return availableUpdateSnapshot;
+      },
+    };
+
+    render(<Settings />);
+
+    const installBtn = await screen.findByRole("button", {
+      name: /Install and Restart/,
+    });
+    fireEvent.click(installBtn);
+
+    await waitFor(() =>
+      expect(receivedArgs).toEqual({
+        expectedVersion: availableUpdateSnapshot.latest_version,
+      }),
+    );
+  });
+
   it("skip then clear round-trips through Settings", async () => {
     installStrictIpcMocks();
     const snapshot: UpdateSnapshot = { ...availableUpdateSnapshot };
