@@ -1,6 +1,6 @@
 [package]
 name = "chaos-labs-scheduler"
-version = "0.6.0"
+version = "0.6.1"
 description = "Chaos Labs Scheduler - PM workflow automation for macOS"
 authors = ["Laurence Duggan"]
 license = "MIT"
