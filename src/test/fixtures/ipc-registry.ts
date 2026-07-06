@@ -186,7 +186,13 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       // setters) may rely on referential inequality to detect the change.
       return { ...updateSnapshot };
     },
-    get_mcp_integration_status: () => defaultMcpIntegrationStatus,
+    // A fresh object, not the shared module-level constant: real IPC
+    // round-trips always deserialize a new object, and mutating the
+    // returned value (directly, or via a caller's React state setter)
+    // must never leak back into defaultMcpIntegrationStatus for later tests
+    // or other callers. Mirrors the already-fixed set_updater_preferences
+    // pattern above.
+    get_mcp_integration_status: () => ({ ...defaultMcpIntegrationStatus }),
     provision_mcp_integration: () => ({
       ...defaultMcpIntegrationStatus,
       enabled: true,

@@ -5,6 +5,7 @@ import {
   resolveIpcInvoke,
   type IpcCommand,
 } from "./ipc-registry";
+import { defaultMcpIntegrationStatus } from "./data";
 
 describe("ipc fixture registry", () => {
   afterEach(() => {
@@ -101,6 +102,29 @@ describe("ipc fixture registry", () => {
     expect(() => resolveIpcInvoke("not_a_command", {}, registry)).toThrow(
       /Unhandled IPC invoke/,
     );
+  });
+
+  // Regression test for the "IPC test-fixture reference-mutation" finding:
+  // get_mcp_integration_status previously returned the raw shared/constant
+  // defaultMcpIntegrationStatus object directly rather than a fresh copy,
+  // unlike the already-fixed set_updater_preferences pattern — so mutating
+  // one call's result (directly, or via a caller's React state setter)
+  // could silently leak into every other test or consumer that reads the
+  // same constant.
+  it("get_mcp_integration_status returns a fresh copy, not the shared constant", () => {
+    const registry = createDefaultIpcRegistry();
+
+    const first = registry.get_mcp_integration_status({});
+    expect(first).toEqual(defaultMcpIntegrationStatus);
+    expect(first).not.toBe(defaultMcpIntegrationStatus);
+
+    // Mutating the first call's result must not affect a later call or the
+    // module-level constant itself.
+    (first as { enabled: boolean }).enabled = true;
+
+    const second = registry.get_mcp_integration_status({});
+    expect(second.enabled).toBe(false);
+    expect(defaultMcpIntegrationStatus.enabled).toBe(false);
   });
 
   it("honors per-test overrides", () => {
