@@ -296,6 +296,7 @@ pub fn run() {
                 python_path: python_path.clone(),
             });
             app.manage(mcp::McpState::default());
+            mcp::sweep_orphaned_staging_dirs_on_startup(app.handle());
             mcp::spawn_reprovision_on_startup(app.handle().clone());
 
             let current_version = app.package_info().version.to_string();
