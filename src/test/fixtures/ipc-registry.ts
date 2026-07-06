@@ -1,4 +1,9 @@
-import type { MissionControlSnapshot, Run, Workflow } from "../../lib/commands";
+import type {
+  MissionControlSnapshot,
+  Run,
+  UpdateSnapshot,
+  Workflow,
+} from "../../lib/commands";
 import {
   defaultEmailConfig,
   defaultMissionControlPreferences,
@@ -6,6 +11,7 @@ import {
   emptyApiKeys,
   emptyMissionControlSnapshot,
   emptySchedulerStatus,
+  idleUpdateSnapshot,
   sampleEnvironments,
   sampleRun,
   sampleWorkflow,
@@ -29,6 +35,8 @@ export type IpcCommand =
   | "revoke_api_key"
   | "check_for_update"
   | "apply_update"
+  | "get_app_update_status"
+  | "set_updater_preferences"
   | "trigger_workflow"
   | "enqueue_workflow"
   | "rerun_workflow"
@@ -112,6 +120,7 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
   const snapshot: MissionControlSnapshot = {
     ...emptyMissionControlSnapshot,
   };
+  const updateSnapshot: UpdateSnapshot = { ...idleUpdateSnapshot };
 
   return {
     get_app_config: () => ({
@@ -157,7 +166,19 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       available: false,
       current_version: "0.1.0",
     }),
-    apply_update: () => undefined,
+    apply_update: () => updateSnapshot,
+    get_app_update_status: () => updateSnapshot,
+    set_updater_preferences: (args) => {
+      if (typeof args.backgroundCheckEnabled === "boolean") {
+        updateSnapshot.background_check_enabled = args.backgroundCheckEnabled;
+      }
+      if (args.clearSkip === true) {
+        updateSnapshot.skipped_version = null;
+      } else if (typeof args.skippedVersion === "string") {
+        updateSnapshot.skipped_version = args.skippedVersion;
+      }
+      return updateSnapshot;
+    },
     trigger_workflow: () => sampleRun.id,
     enqueue_workflow: () => ({
       workflow_id: sampleWorkflow.id,

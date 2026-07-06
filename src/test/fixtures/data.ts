@@ -7,6 +7,7 @@ import type {
   QueueInfo,
   Run,
   SchedulerStatus,
+  UpdateSnapshot,
   Workflow,
 } from "../../lib/commands";
 
@@ -143,3 +144,24 @@ export const defaultQueues: QueueInfo[] = [
 ];
 
 export const emptyApiKeys: ApiKey[] = [];
+
+export const idleUpdateSnapshot: UpdateSnapshot = {
+  updater_available: true,
+  phase: "idle",
+  current_version: "0.1.0",
+  latest_version: null,
+  notes: null,
+  last_checked_at: null,
+  last_error: null,
+  progress: null,
+  background_check_enabled: true,
+  skipped_version: null,
+};
+
+export const availableUpdateSnapshot: UpdateSnapshot = {
+  ...idleUpdateSnapshot,
+  phase: "available",
+  latest_version: "0.2.0",
+  notes: "Bug fixes and improvements.",
+  last_checked_at: NOW,
+};

@@ -30,6 +30,8 @@ describe("ipc fixture registry", () => {
       "revoke_api_key",
       "check_for_update",
       "apply_update",
+      "get_app_update_status",
+      "set_updater_preferences",
       "trigger_workflow",
       "enqueue_workflow",
       "rerun_workflow",

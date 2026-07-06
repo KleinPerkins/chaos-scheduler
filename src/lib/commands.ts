@@ -139,6 +139,48 @@ export interface UpdateStatus {
   notes?: string | null;
 }
 
+export type UpdatePhase =
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "ready_to_restart"
+  | "error";
+
+export interface UpdateErrorInfo {
+  /** One of "network" | "endpoint" | "verification" | "install" | "unknown". */
+  kind: string;
+  message: string;
+}
+
+export interface UpdateProgress {
+  percent?: number | null;
+}
+
+/** Mirrors `src-tauri/src/update.rs`'s `UpdateSnapshot` — the single source
+ * of truth for updater state, hydrated on mount and pushed on every
+ * `update-status` event (see `useAppUpdate`). */
+export interface UpdateSnapshot {
+  updater_available: boolean;
+  phase: UpdatePhase;
+  current_version: string;
+  latest_version?: string | null;
+  notes?: string | null;
+  last_checked_at?: string | null;
+  last_error?: UpdateErrorInfo | null;
+  progress?: UpdateProgress | null;
+  background_check_enabled: boolean;
+  skipped_version?: string | null;
+}
+
+export interface UpdaterPreferencesPatch {
+  backgroundCheckEnabled?: boolean;
+  /** Sets the skipped version. Ignored if `clearSkip` is also `true`. */
+  skippedVersion?: string;
+  /** Clears any previously skipped version. */
+  clearSkip?: boolean;
+}
+
 export interface Run {
   id: string;
   workflow_id: string;
@@ -996,8 +1038,35 @@ export function checkForUpdate(): Promise<UpdateStatus> {
   return invokeOptional("check_for_update");
 }
 
-/** Download + install the pending update and relaunch. Registered on the
- * backend; guarded via {@link invokeOptional} for older builds. */
-export function applyUpdate(): Promise<void> {
-  return invokeOptional("apply_update");
+/** Hydrates the current updater snapshot without touching the network —
+ * used on mount, before the first `update-status` event arrives. */
+export function getAppUpdateStatus(): Promise<UpdateSnapshot> {
+  return invokeOptional("get_app_update_status");
+}
+
+/** Persists background-check / skip preferences and returns the resulting
+ * snapshot. `clearSkip: true` takes precedence over `skippedVersion`. */
+export function setUpdaterPreferences(
+  patch: UpdaterPreferencesPatch,
+): Promise<UpdateSnapshot> {
+  return invokeOptional("set_updater_preferences", {
+    backgroundCheckEnabled: patch.backgroundCheckEnabled,
+    skippedVersion: patch.skippedVersion,
+    clearSkip: patch.clearSkip,
+  });
+}
+
+/**
+ * Download + install the pending update and relaunch. `expectedVersion`
+ * should be the version the user was shown when they clicked "Install" —
+ * the backend refuses the call (Section 6 consent guard) if a newer version
+ * has since replaced it. Registered on the backend; guarded via
+ * {@link invokeOptional} for older builds.
+ *
+ * Resolves with the snapshot only for the "nothing to install" case; a real
+ * install restarts the app, so the underlying `invoke` call never gets a
+ * response.
+ */
+export function applyUpdate(expectedVersion?: string): Promise<UpdateSnapshot> {
+  return invokeOptional("apply_update", { expectedVersion });
 }
