@@ -1551,6 +1551,13 @@ fn operator_run_terminal_status(
 /// worker's other queued tasks to a fresh thread while `f` blocks); otherwise
 /// run `f` directly. `block_in_place` panics if there is no current runtime
 /// or the runtime is single-threaded, so both are guarded against.
+///
+/// Do not call this from inside a `tokio::task::spawn_blocking` closure:
+/// `Handle::try_current()` still reports the ambient runtime there, but
+/// `block_in_place`'s own internal state isn't set up on the blocking pool,
+/// so it panics anyway (tokio issue #2327). No `spawn_blocking` call exists
+/// in this codebase today, so this is currently unreachable — keep it that
+/// way for any future caller of this helper.
 fn run_possibly_blocking<T>(f: impl FnOnce() -> T) -> T {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {

@@ -512,9 +512,9 @@ impl CursorAgentOperator {
             Some(p) if !p.trim().is_empty() => p.to_string(),
             _ => return OperatorOutcome::failure("cursor_agent: `prompt` is required"),
         };
-        let repository = match config.get("repository").and_then(|v| v.as_str()) {
-            Some(r) if !r.trim().is_empty() => r.to_string(),
-            _ => {
+        let repository = match cursor_repository_value(config) {
+            Some(r) => r.to_string(),
+            None => {
                 return OperatorOutcome::failure("cursor_agent cloud mode requires a `repository`")
             }
         };
@@ -616,16 +616,24 @@ impl CursorAgentOperator {
         let mut terminal_status = status_str(&last_body);
         if !is_terminal(&terminal_status) {
             let mut consecutive_poll_failures: u32 = 0;
+            // Set after a retry's backoff sleep so the *next* iteration's
+            // normal top-of-loop interval sleep is skipped. Without this, a
+            // retried poll sleeps once for its backoff and then immediately
+            // again for `poll_interval_ms` on the next iteration, roughly
+            // doubling the effective wait after a retry versus what
+            // `poll_attempts * poll_interval_ms` leads a user to expect.
+            let mut skip_next_interval_sleep = false;
             for attempt in 0..poll_attempts {
                 if crate::scheduler::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                     terminal_status = "POLL_EXHAUSTED".to_string();
                     break;
                 }
-                if attempt > 0 && poll_interval_ms > 0 {
+                if attempt > 0 && poll_interval_ms > 0 && !skip_next_interval_sleep {
                     crate::scheduler::sleep_interruptible(std::time::Duration::from_millis(
                         poll_interval_ms,
                     ));
                 }
+                skip_next_interval_sleep = false;
                 match ctx.http.get_json(&status_url, &headers) {
                     Ok(resp) if resp.is_success() => {
                         consecutive_poll_failures = 0;
@@ -649,6 +657,7 @@ impl CursorAgentOperator {
                         crate::scheduler::sleep_interruptible(std::time::Duration::from_millis(
                             poll_retry_backoff_ms(poll_interval_ms, consecutive_poll_failures),
                         ));
+                        skip_next_interval_sleep = true;
                     }
                     Ok(resp) => {
                         return OperatorOutcome::failure(format!(
@@ -666,6 +675,7 @@ impl CursorAgentOperator {
                         crate::scheduler::sleep_interruptible(std::time::Duration::from_millis(
                             poll_retry_backoff_ms(poll_interval_ms, consecutive_poll_failures),
                         ));
+                        skip_next_interval_sleep = true;
                     }
                 }
             }
@@ -801,6 +811,26 @@ fn poll_retry_backoff_ms(poll_interval_ms: u64, consecutive_failures: u32) -> u6
         .min(CURSOR_MAX_POLL_INTERVAL_MS)
 }
 
+/// Read the `cursor_agent` `repository` config value, falling back to the
+/// legacy `repo` key when `repository` is absent or empty. This operator's
+/// repository key was renamed `repo` -> `repository` to match the field this
+/// operator actually reads; specs saved before that rename still have their
+/// value sitting under the old key. Rather than a DB migration, fall back to
+/// it here — editing the workflow in the UI naturally migrates it forward
+/// since writes only ever go to `repository`.
+fn cursor_repository_value(config: &Value) -> Option<&str> {
+    config
+        .get("repository")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            config
+                .get("repo")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+        })
+}
+
 /// Sanity-check a `cursor_agent` `repository` value before it's sent to
 /// Cursor's API. Cursor's own API is the real trust boundary (it only acts on
 /// GitHub repos it has installed access to) — this is cheap local hygiene,
@@ -855,9 +885,9 @@ impl Operator for CursorAgentOperator {
             _ => return Err("cursor_agent: `prompt` is required".into()),
         }
         if mode == "cloud" {
-            match config.get("repository").and_then(|v| v.as_str()) {
-                Some(r) if !r.trim().is_empty() => validate_cursor_repository(r)?,
-                _ => return Err("cursor_agent cloud mode requires a `repository`".into()),
+            match cursor_repository_value(config) {
+                Some(r) => validate_cursor_repository(r)?,
+                None => return Err("cursor_agent cloud mode requires a `repository`".into()),
             }
             if let Some(v) = config.get("ref") {
                 if !v.is_string() {
@@ -1319,6 +1349,69 @@ mod tests {
     }
 
     #[test]
+    fn cursor_agent_validate_falls_back_to_legacy_repo_key() {
+        let op = CursorAgentOperator;
+        // A spec saved before the `repo` -> `repository` rename has its value
+        // sitting under the old key only; it must still validate.
+        assert!(op
+            .validate(&serde_json::json!({"mode": "cloud", "prompt": "fix", "repo": "acme/legacy"}))
+            .is_ok());
+        // An empty/blank `repository` alongside a populated legacy `repo`
+        // still falls back rather than treating the field as present-but-bad.
+        assert!(op
+            .validate(
+                &serde_json::json!({"mode": "cloud", "prompt": "fix", "repository": "", "repo": "acme/legacy"})
+            )
+            .is_ok());
+        // A legacy value that fails repository hygiene still fails.
+        assert!(op
+            .validate(&serde_json::json!({"mode": "cloud", "prompt": "fix", "repo": "not-a-repo-shorthand"}))
+            .is_err());
+        // Neither key present still fails with the standard message.
+        assert!(op
+            .validate(&serde_json::json!({"mode": "cloud", "prompt": "fix"}))
+            .is_err());
+    }
+
+    #[test]
+    fn cursor_agent_cloud_launches_with_legacy_repo_key_only() {
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let http = MockHttp {
+            launch: serde_json::json!({"agent": {"id": "bc_legacy"}, "run": {"id": "run_legacy", "status": "FINISHED", "result": "done"}}),
+            polls: Mutex::new(vec![]),
+            get_count: Mutex::new(0),
+            posted: Mutex::new(vec![]),
+        };
+        let mut m = HashMap::new();
+        m.insert("cursor_api_key".to_string(), "k".to_string());
+        let secrets = MapSecrets(m);
+        let ctx = cursor_ctx(&runner, &http, &secrets);
+        // Config has only the legacy `repo` key (no `repository`), mirroring
+        // a workflow spec saved before the rename — it must still launch.
+        let outcome = CursorAgentOperator.execute(
+            &ctx,
+            &serde_json::json!({
+                "mode": "cloud",
+                "prompt": "fix the bug",
+                "repo": "acme/legacy-app"
+            }),
+        );
+        assert!(
+            outcome.success,
+            "legacy `repo`-only config must still launch: {}",
+            outcome.summary
+        );
+        let posted = http.posted.lock().unwrap();
+        assert_eq!(
+            posted[0].1["repos"][0]["url"],
+            serde_json::json!("https://github.com/acme/legacy-app")
+        );
+    }
+
+    #[test]
     fn cursor_agent_cloud_launches_polls_and_reports_pr() {
         let runner = FakeRunner {
             code: 0,
@@ -1597,6 +1690,69 @@ mod tests {
         );
         assert!(outcome.success, "a single flaky GET must not fail the run");
         assert_eq!(*http.get_count.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn cursor_agent_poll_retry_backoff_does_not_double_with_next_interval_sleep() {
+        use crate::scheduler::lock_shutdown_test_state;
+        use std::time::{Duration, Instant};
+
+        // Guards against the process-global SHUTDOWN flag leaking `true` from
+        // another test (e.g. `shutdown_interrupts_cursor_agent_poll_promptly`)
+        // into this one, which otherwise exhausts the poll loop on its first
+        // iteration regardless of the fix under test.
+        let _guard = lock_shutdown_test_state();
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        // One retryable 5xx (triggers a backoff sleep seeded from
+        // poll_interval_ms), then a terminal status on the very next poll.
+        let http = FlakyMockHttp {
+            launch: serde_json::json!({"agent": {"id": "bc_dedup"}, "run": {"id": "run_dedup", "status": "RUNNING"}}),
+            gets: Mutex::new(vec![
+                ScriptedGet::Status(503, Value::Null),
+                ScriptedGet::Status(
+                    200,
+                    serde_json::json!({"id": "run_dedup", "status": "FINISHED", "result": "done"}),
+                ),
+            ]),
+            get_count: Mutex::new(0),
+        };
+        let mut m = HashMap::new();
+        m.insert("cursor_api_key".to_string(), "k".to_string());
+        let secrets = MapSecrets(m);
+        let ctx = cursor_ctx(&runner, &http, &secrets);
+
+        let poll_interval_ms: u64 = 200;
+        let start = Instant::now();
+        let outcome = CursorAgentOperator.execute(
+            &ctx,
+            &serde_json::json!({
+                "mode": "cloud",
+                "prompt": "p",
+                "repository": "acme/repo",
+                "poll_interval_ms": poll_interval_ms
+            }),
+        );
+        let elapsed = start.elapsed();
+
+        assert!(outcome.success, "{}", outcome.summary);
+        assert_eq!(*http.get_count.lock().unwrap(), 2);
+        // Exactly one sleep should occur between the two GETs: the retry's
+        // own backoff (here equal to poll_interval_ms, since this is the
+        // first consecutive failure). Before the dedup fix, the very next
+        // iteration's unconditional top-of-loop interval sleep would fire
+        // too, roughly doubling this to ~2x poll_interval_ms.
+        assert!(
+            elapsed < Duration::from_millis(poll_interval_ms * 3 / 2),
+            "expected a single deduped sleep (~{poll_interval_ms}ms), got {elapsed:?} \
+             (looks like the backoff sleep and the next interval sleep both fired)"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(poll_interval_ms / 2),
+            "expected the backoff sleep to still occur, got {elapsed:?}"
+        );
     }
 
     #[test]

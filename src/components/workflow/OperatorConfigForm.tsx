@@ -12,6 +12,20 @@ function str(config: Record<string, unknown>, key: string): string {
   return v == null ? "" : String(v);
 }
 
+/** Like `str`, but falls back to a legacy key when the primary key is
+ * absent/empty. Used for `cursor_agent`'s `repository` field, which was
+ * renamed from `repo` — workflows saved before the rename still have their
+ * value stored under the old key, so display it instead of an empty field.
+ * Writes still only ever go to the primary key. */
+function strWithLegacyFallback(
+  config: Record<string, unknown>,
+  key: string,
+  legacyKey: string,
+): string {
+  const primary = str(config, key);
+  return primary === "" ? str(config, legacyKey) : primary;
+}
+
 /** Typed-operator configuration form. Renders known fields per operator and a
  * raw-JSON fallback so operators without a bespoke form (or extra keys) remain
  * editable. */
@@ -145,7 +159,7 @@ export default function OperatorConfigForm({
             <span className="editor-label">Repository</span>
             <input
               type="text"
-              value={str(config, "repository")}
+              value={strWithLegacyFallback(config, "repository", "repo")}
               disabled={disabled}
               onChange={(e) => setConfig({ repository: e.target.value })}
               placeholder="org/repo"
