@@ -7,8 +7,11 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   target: "node18",
-  // Bundle the workspace SDK so the published server is self-contained; keep the
-  // MCP SDK and zod as regular externals (declared dependencies).
-  noExternal: ["@chaos-scheduler/sdk"],
+  // Bundle every runtime dependency so the published server ships with zero
+  // runtime npm dependencies: an unpinned transitive dep (a compromised
+  // patch to @modelcontextprotocol/sdk or zod, say) can never be silently
+  // pulled onto a user's machine by the app's own re-provision/npm-install
+  // flow, since there is nothing left for npm to resolve at install time.
+  noExternal: ["@chaos-scheduler/sdk", "@modelcontextprotocol/sdk", "zod"],
   banner: { js: "" },
 });
