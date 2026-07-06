@@ -7,8 +7,12 @@ export const PRODUCT_NAME = "Chaos Scheduler";
 /** Short name used in tight spaces (menu-bar popup header, sidebar brand). */
 export const PRODUCT_SHORT_NAME = "Chaos Scheduler";
 
-/** Current desktop app version. Kept in step with `tauri.conf.json`. */
-export const APP_VERSION = "0.1.0";
+/**
+ * Current desktop app version. Auto-bumped on release by release-please
+ * (see the `generic` extra-file entry in `release-please-config.json`); the
+ * `x-release-please-version` marker below is what release-please rewrites.
+ */
+export const APP_VERSION = "0.3.1"; // x-release-please-version
 
 /** Default email `from` display name (mirrors `EMAIL_FROM_NAME`). */
 export const EMAIL_FROM_NAME = "Chaos Scheduler";
