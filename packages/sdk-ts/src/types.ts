@@ -198,6 +198,49 @@ export interface RegisterWorkflowInput {
   spec?: WorkflowSpec;
 }
 
+/**
+ * A named, reusable email-delivery profile (`db.rs::EmailProfile`).
+ *
+ * `smtp_password` is always masked (`"••••••••"`) on read; a blank value means
+ * no password is stored. Echo the mask back on update to keep the stored
+ * secret unchanged, or send a new value to replace it.
+ */
+export interface EmailProfile {
+  id: string;
+  name: string;
+  enabled: boolean;
+  alert_email: string;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_user: string;
+  /** Masked on read (`"••••••••"`) when a password is stored. */
+  smtp_password: string;
+  from_address: string;
+  from_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The masking sentinel returned/accepted for a stored SMTP password. */
+export const MASKED_SECRET = "••••••••";
+
+/**
+ * Input for creating/updating an email profile. Mirrors {@link EmailProfile}
+ * minus the server-assigned id/timestamps. On update, echo the masked password
+ * back to preserve the stored secret.
+ */
+export interface EmailProfileInput {
+  name: string;
+  enabled: boolean;
+  alert_email: string;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_user: string;
+  smtp_password: string;
+  from_address: string;
+  from_name: string;
+}
+
 /** Run log payload (`api.rs::get_run_logs`). */
 export interface RunLogs {
   run_id: string;

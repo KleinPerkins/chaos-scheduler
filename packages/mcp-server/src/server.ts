@@ -521,6 +521,97 @@ export function buildServer(deps: ServerDeps): McpServer {
     async () => jsonResult(await client.listQueuedRuns()),
   );
 
+  // ---- Email profiles ----
+
+  const emailProfileFields = {
+    name: z.string().describe("Display name for the profile"),
+    enabled: z.boolean().describe("Whether the profile is active"),
+    alert_email: z.string().describe("Recipient address for alerts"),
+    smtp_host: z.string().describe("SMTP server host"),
+    smtp_port: z.number().int().describe("SMTP server port (e.g. 587)"),
+    smtp_user: z.string().describe("SMTP username"),
+    smtp_password: z
+      .string()
+      .describe(
+        "SMTP password. On update, pass '••••••••' to keep the stored secret.",
+      ),
+    from_address: z.string().describe("Envelope from address"),
+    from_name: z.string().describe("Display name for the sender"),
+  };
+
+  tool(
+    "list_email_profiles",
+    {
+      title: "List email profiles",
+      description:
+        "List named SMTP delivery profiles. Passwords are masked ('••••••••').",
+      readOnly: true,
+    },
+    async () => jsonResult(await client.listEmailProfiles()),
+  );
+
+  tool(
+    "create_email_profile",
+    {
+      title: "Create email profile",
+      description:
+        "Create a named SMTP delivery profile. The server assigns the id.",
+      inputSchema: emailProfileFields,
+    },
+    async (args) => jsonResult(await client.createEmailProfile(args)),
+  );
+
+  tool(
+    "update_email_profile",
+    {
+      title: "Update email profile",
+      description:
+        "Update an existing email profile. Echo the masked password ('••••••••') " +
+        "to keep the stored secret, or pass a new value to replace it.",
+      inputSchema: {
+        id: z.string().describe("Email profile id"),
+        ...emailProfileFields,
+      },
+    },
+    async (args) => {
+      const { id, ...input } = args;
+      return jsonResult(await client.updateEmailProfile(id, input));
+    },
+  );
+
+  tool(
+    "delete_email_profile",
+    {
+      title: "Delete email profile",
+      description:
+        "Delete an email profile by id. Workflows using it fall back to the global config.",
+      inputSchema: { id: z.string().describe("Email profile id") },
+      destructive: true,
+    },
+    async (args) => jsonResult(await client.deleteEmailProfile(args.id)),
+  );
+
+  tool(
+    "set_workflow_email_profile",
+    {
+      title: "Select workflow email profile",
+      description:
+        "Select the email profile a workflow uses for failure alerts. Pass profile_id: null to clear " +
+        "(the workflow then uses the global email config).",
+      inputSchema: {
+        workflow_id: z.string().describe("Workflow id"),
+        profile_id: z
+          .string()
+          .nullable()
+          .describe("Email profile id, or null to clear the selection"),
+      },
+    },
+    async (args) =>
+      jsonResult(
+        await client.setWorkflowEmailProfile(args.workflow_id, args.profile_id),
+      ),
+  );
+
   // ---- Resources (read-only state for @-referencing) ----
 
   server.registerResource(
@@ -554,6 +645,17 @@ export function buildServer(deps: ServerDeps): McpServer {
       mimeType: "application/json",
     },
     async (uri) => jsonResource(uri, await client.listWorkflows()),
+  );
+
+  server.registerResource(
+    "email-profiles",
+    "chaos://email-profiles",
+    {
+      title: "Email profiles",
+      description: "All named SMTP delivery profiles (passwords masked)",
+      mimeType: "application/json",
+    },
+    async (uri) => jsonResource(uri, await client.listEmailProfiles()),
   );
 
   server.registerResource(

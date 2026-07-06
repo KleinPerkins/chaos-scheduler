@@ -124,6 +124,61 @@ const ROUTES: Record<string, unknown> = {
     queued_run_id: null,
     queue_name: "instance-default",
   },
+  "GET /api/v1/email-profiles": {
+    email_profiles: [
+      {
+        id: "ep1",
+        name: "Primary",
+        enabled: true,
+        alert_email: "alerts@example.com",
+        smtp_host: "smtp.example.com",
+        smtp_port: 587,
+        smtp_user: "mailer",
+        smtp_password: "••••••••",
+        from_address: "from@example.com",
+        from_name: "Chaos",
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+    ],
+  },
+  "POST /api/v1/email-profiles": {
+    email_profile: {
+      id: "ep2",
+      name: "Primary",
+      enabled: true,
+      alert_email: "alerts@example.com",
+      smtp_host: "smtp.example.com",
+      smtp_port: 587,
+      smtp_user: "mailer",
+      smtp_password: "••••••••",
+      from_address: "from@example.com",
+      from_name: "Chaos",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    },
+  },
+  "PATCH /api/v1/email-profiles/ep1": {
+    email_profile: {
+      id: "ep1",
+      name: "Renamed",
+      enabled: true,
+      alert_email: "alerts@example.com",
+      smtp_host: "smtp.example.com",
+      smtp_port: 587,
+      smtp_user: "mailer",
+      smtp_password: "••••••••",
+      from_address: "from@example.com",
+      from_name: "Chaos",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    },
+  },
+  "DELETE /api/v1/email-profiles/ep1": { deleted: "ep1" },
+  "POST /api/v1/workflows/w1/email-profile": {
+    workflow_id: "w1",
+    email_profile_id: "ep1",
+  },
 };
 
 async function connectedPair(
@@ -166,7 +221,9 @@ describe("Chaos MCP server", () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
+        "create_email_profile",
         "create_environment",
+        "delete_email_profile",
         "delete_workflow",
         "dispatch_workflow",
         "enqueue_workflow",
@@ -177,6 +234,7 @@ describe("Chaos MCP server", () => {
         "get_version",
         "get_workflow",
         "health_check",
+        "list_email_profiles",
         "list_environments",
         "list_queued_runs",
         "list_queues",
@@ -184,8 +242,10 @@ describe("Chaos MCP server", () => {
         "list_workflows",
         "register_workflow",
         "run_workflow_now",
+        "set_workflow_email_profile",
         "set_workflow_spec",
         "rerun_workflow",
+        "update_email_profile",
         "update_workflow",
       ].sort(),
     );
@@ -196,6 +256,7 @@ describe("Chaos MCP server", () => {
     const { resources } = await client.listResources();
     expect(resources.map((r) => r.uri)).toContain("chaos://environments");
     expect(resources.map((r) => r.uri)).toContain("chaos://workflows");
+    expect(resources.map((r) => r.uri)).toContain("chaos://email-profiles");
 
     const { prompts } = await client.listPrompts();
     expect(prompts.map((p) => p.name).sort()).toEqual(
@@ -413,6 +474,66 @@ describe("Chaos MCP server", () => {
     };
     expect(result.isError).toBeFalsy();
     expect(JSON.parse(textOf(result))[0].id).toBe("q1");
+  });
+
+  it("list_email_profiles proxies through the SDK (masked)", async () => {
+    const { client } = await connectedPair();
+    const result = (await client.callTool({
+      name: "list_email_profiles",
+      arguments: {},
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    const profiles = JSON.parse(textOf(result));
+    expect(profiles[0].id).toBe("ep1");
+    expect(profiles[0].smtp_password).toBe("••••••••");
+  });
+
+  it("create_email_profile proxies through the SDK", async () => {
+    const { client } = await connectedPair();
+    const result = (await client.callTool({
+      name: "create_email_profile",
+      arguments: {
+        name: "Primary",
+        enabled: true,
+        alert_email: "alerts@example.com",
+        smtp_host: "smtp.example.com",
+        smtp_port: 587,
+        smtp_user: "mailer",
+        smtp_password: "realpw",
+        from_address: "from@example.com",
+        from_name: "Chaos",
+      },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    const created = JSON.parse(textOf(result));
+    expect(created.id).toBe("ep2");
+    expect(created.smtp_password).toBe("••••••••");
+  });
+
+  it("set_workflow_email_profile proxies through the SDK", async () => {
+    const { client } = await connectedPair();
+    const result = (await client.callTool({
+      name: "set_workflow_email_profile",
+      arguments: { workflow_id: "w1", profile_id: "ep1" },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(textOf(result)).email_profile_id).toBe("ep1");
+  });
+
+  it("reads the email-profiles resource", async () => {
+    const { client } = await connectedPair();
+    const res = await client.readResource({ uri: "chaos://email-profiles" });
+    const text = (res.contents[0] as { text: string }).text;
+    expect(JSON.parse(text)[0].id).toBe("ep1");
   });
 
   it("dispatch_workflow proxies through the SDK with signature header", async () => {

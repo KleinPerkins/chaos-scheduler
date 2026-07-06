@@ -171,6 +171,7 @@ Run the MCP server and add it to Cursor (see the
 [mcp-server README](./mcp-server/README.md) and the repo's `.cursor/mcp.json`).
 The agent then uses tools like `register_workflow`, `update_workflow`,
 `enqueue_workflow`, `rerun_workflow`, `get_run`, `get_run_logs`, `list_queues`,
+`list_email_profiles` / `create_email_profile` / `set_workflow_email_profile`,
 and `chaos://` resources — the same operations as above, but
 conversational, with prod-write guardrails.
 
@@ -196,6 +197,45 @@ const rerun = await client.rerunWorkflow(wf.id, {
 `updateWorkflow` maps to `PATCH /api/v1/workflows/{id}`; `rerunWorkflow` maps to
 `POST /api/v1/workflows/{id}/rerun` and supports the same idempotent-replay shape
 as run/enqueue.
+
+## 9. Email delivery profiles (CRUD + selection)
+
+Named, reusable SMTP profiles let a workflow send failure alerts through a
+specific mailbox instead of the single global email config. The same CRUD +
+selection surface the desktop app uses is exposed over REST, the SDK, and MCP.
+
+```ts
+const profile = await client.createEmailProfile({
+  name: "Ops mailbox",
+  enabled: true,
+  alert_email: "ops@example.com",
+  smtp_host: "smtp.example.com",
+  smtp_port: 587,
+  smtp_user: "mailer",
+  smtp_password: "app-password",
+  from_address: "alerts@example.com",
+  from_name: "Chaos Scheduler",
+});
+
+// Point a workflow at it (pass null to clear and fall back to the global config).
+await client.setWorkflowEmailProfile(wf.id, profile.id);
+```
+
+| SDK method                               | HTTP                                        | Scope |
+| ---------------------------------------- | ------------------------------------------- | ----- |
+| `listEmailProfiles()`                    | `GET /api/v1/email-profiles`                | read  |
+| `createEmailProfile(input)`              | `POST /api/v1/email-profiles`               | write |
+| `updateEmailProfile(id, input)`          | `PATCH /api/v1/email-profiles/{id}`         | write |
+| `deleteEmailProfile(id)`                 | `DELETE /api/v1/email-profiles/{id}`        | write |
+| `setWorkflowEmailProfile(id, profileId)` | `POST /api/v1/workflows/{id}/email-profile` | write |
+
+**Password masking** — `smtp_password` is always returned as the mask
+`••••••••` (exported as `MASKED_SECRET`). Echo the mask back on update to keep
+the stored password unchanged, or send a new value to replace it. A blank
+password means none is stored. The MCP tools (`list_email_profiles`,
+`create_email_profile`, `update_email_profile`, `delete_email_profile`,
+`set_workflow_email_profile`) and the `chaos://email-profiles` resource wrap the
+same calls with the standard prod-write guardrails.
 
 ## Error handling
 

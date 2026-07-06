@@ -14,6 +14,8 @@ import { ChaosApiError } from "./errors.js";
 import type {
   CreateEnvironmentInput,
   DispatchResult,
+  EmailProfile,
+  EmailProfileInput,
   Environment,
   QueueInfo,
   QueuedRun,
@@ -403,6 +405,76 @@ export class ChaosSchedulerClient {
       "/api/v1/queued-runs",
     );
     return res.queued_runs;
+  }
+
+  /**
+   * `GET /api/v1/email-profiles` — list named SMTP delivery profiles
+   * (scope: read). Each profile's `smtp_password` is masked.
+   */
+  async listEmailProfiles(): Promise<EmailProfile[]> {
+    const res = await this.request<{ email_profiles: EmailProfile[] }>(
+      "GET",
+      "/api/v1/email-profiles",
+    );
+    return res.email_profiles;
+  }
+
+  /**
+   * `POST /api/v1/email-profiles` — create a new email profile (scope: write).
+   * The server assigns the id. Returns the created profile (password masked).
+   */
+  async createEmailProfile(input: EmailProfileInput): Promise<EmailProfile> {
+    const res = await this.request<{ email_profile: EmailProfile }>(
+      "POST",
+      "/api/v1/email-profiles",
+      { body: input },
+    );
+    return res.email_profile;
+  }
+
+  /**
+   * `PATCH /api/v1/email-profiles/{id}` — update an existing profile
+   * (scope: write). Echo the masked password (`MASKED_SECRET`) to keep the
+   * stored secret, or pass a new value to replace it. Returns the updated
+   * profile (password masked).
+   */
+  async updateEmailProfile(
+    id: string,
+    input: EmailProfileInput,
+  ): Promise<EmailProfile> {
+    const res = await this.request<{ email_profile: EmailProfile }>(
+      "PATCH",
+      `/api/v1/email-profiles/${encodeURIComponent(id)}`,
+      { body: input },
+    );
+    return res.email_profile;
+  }
+
+  /** `DELETE /api/v1/email-profiles/{id}` — delete a profile (scope: write). */
+  async deleteEmailProfile(id: string): Promise<{ deleted: string }> {
+    return this.request<{ deleted: string }>(
+      "DELETE",
+      `/api/v1/email-profiles/${encodeURIComponent(id)}`,
+    );
+  }
+
+  /**
+   * `POST /api/v1/workflows/{id}/email-profile` — select (or clear, with
+   * `null`) the email profile a workflow uses for failure alerts (scope:
+   * write).
+   */
+  async setWorkflowEmailProfile(
+    workflowId: string,
+    profileId: string | null,
+  ): Promise<{ workflow_id: string; email_profile_id: string | null }> {
+    return this.request<{
+      workflow_id: string;
+      email_profile_id: string | null;
+    }>(
+      "POST",
+      `/api/v1/workflows/${encodeURIComponent(workflowId)}/email-profile`,
+      { body: { profile_id: profileId } },
+    );
   }
 
   /**

@@ -5,7 +5,7 @@
 //! and reuses [`SchedulerService`] for **all** governance/validation so
 //! there is no duplicated business logic vs the Tauri commands.
 
-use crate::db::{Database, IdempotencyReservation};
+use crate::db::{Database, EmailProfile, IdempotencyReservation};
 use crate::scheduler::{dispatch_non_cron_workflow, NonCronDispatchOptions};
 use crate::service::{ApiIdentity, SchedulerService, ServiceError, WorkflowDraft};
 use crate::workflow_spec::WorkflowSpec;
@@ -14,7 +14,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use serde::Deserialize;
@@ -332,6 +332,18 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/runs/{id}/metrics", get(get_run_metrics))
         .route("/api/v1/queues", get(list_queues))
         .route("/api/v1/queued-runs", get(list_queued_runs))
+        .route(
+            "/api/v1/email-profiles",
+            get(list_email_profiles).post(create_email_profile),
+        )
+        .route(
+            "/api/v1/email-profiles/{id}",
+            patch(update_email_profile).delete(delete_email_profile),
+        )
+        .route(
+            "/api/v1/workflows/{id}/email-profile",
+            post(set_workflow_email_profile),
+        )
         .route("/api/v1/integrations/cursor/webhook", post(cursor_webhook))
         .layer(RequestBodyLimitLayer::new(256 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), request_guard));
@@ -934,6 +946,111 @@ async fn list_queued_runs(
     Ok(Json(json!({ "queued_runs": queued })))
 }
 
+async fn list_email_profiles(
+    State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(
+        &st,
+        &headers,
+        "read",
+        "GET",
+        "/api/v1/email-profiles",
+        &audit,
+    )?;
+    let profiles = st.service.list_email_profiles()?;
+    Ok(Json(json!({ "email_profiles": profiles })))
+}
+
+async fn create_email_profile(
+    State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
+    headers: HeaderMap,
+    Json(mut profile): Json<EmailProfile>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(
+        &st,
+        &headers,
+        "write",
+        "POST",
+        "/api/v1/email-profiles",
+        &audit,
+    )?;
+    // Ignore any client-supplied id on create; the store assigns one.
+    profile.id = String::new();
+    let saved = st.service.save_email_profile(profile)?;
+    Ok(Json(json!({ "email_profile": saved })))
+}
+
+async fn update_email_profile(
+    State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(mut profile): Json<EmailProfile>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(
+        &st,
+        &headers,
+        "write",
+        "PATCH",
+        "/api/v1/email-profiles/{id}",
+        &audit,
+    )?;
+    // The path is authoritative for which profile is updated.
+    profile.id = id;
+    let saved = st.service.save_email_profile(profile)?;
+    Ok(Json(json!({ "email_profile": saved })))
+}
+
+async fn delete_email_profile(
+    State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(
+        &st,
+        &headers,
+        "write",
+        "DELETE",
+        "/api/v1/email-profiles/{id}",
+        &audit,
+    )?;
+    st.service.delete_email_profile(&id)?;
+    Ok(Json(json!({ "deleted": id })))
+}
+
+#[derive(Deserialize)]
+struct SetWorkflowEmailProfileBody {
+    #[serde(default)]
+    profile_id: Option<String>,
+}
+
+async fn set_workflow_email_profile(
+    State(st): State<ApiState>,
+    Extension(audit): Extension<AuditTrail>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<SetWorkflowEmailProfileBody>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(
+        &st,
+        &headers,
+        "write",
+        "POST",
+        "/api/v1/workflows/{id}/email-profile",
+        &audit,
+    )?;
+    st.service
+        .set_workflow_email_profile(&id, body.profile_id.as_deref())?;
+    Ok(Json(json!({
+        "workflow_id": id,
+        "email_profile_id": body.profile_id,
+    })))
+}
+
 /// Cursor Cloud Agent completion webhook receiver.
 ///
 /// v1 uses SSE + polling as the primary completion channel (Cursor's v1
@@ -1370,6 +1487,212 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(value.to_string().contains("topsecret"));
+    }
+
+    #[tokio::test]
+    async fn rest_email_profile_crud_and_selection_roundtrip() {
+        let (state, token) = test_state();
+        let db = state.db.clone();
+        // A workflow to select the profile onto.
+        let wf_id = seed_workflow_with_secret(&state);
+        let app = router(state);
+        let auth = format!("Bearer {token}");
+
+        let post = |body: serde_json::Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/email-profiles")
+                .header("authorization", &auth)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        // Create: the real password is stored but never returned.
+        let (status, value) = body_json(
+            app.clone()
+                .oneshot(post(json!({
+                    "name": "Primary",
+                    "enabled": true,
+                    "alert_email": "alerts@example.com",
+                    "smtp_host": "smtp.example.com",
+                    "smtp_port": 587,
+                    "smtp_user": "mailer",
+                    "smtp_password": "realpw",
+                    "from_address": "from@example.com",
+                    "from_name": "Chaos"
+                })))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = value["email_profile"]["id"].as_str().unwrap().to_string();
+        assert_eq!(value["email_profile"]["smtp_password"], "••••••••");
+        assert_eq!(db.get_email_profile(&id).unwrap().smtp_password, "realpw");
+
+        // List: masked, never leaks the stored secret.
+        let (status, value) = body_json(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/email-profiles")
+                        .header("authorization", &auth)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let list_str = value.to_string();
+        assert!(!list_str.contains("realpw"), "{list_str}");
+        assert!(list_str.contains("••••••••"), "{list_str}");
+
+        let patch = |body: serde_json::Value| {
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/v1/email-profiles/{id}"))
+                .header("authorization", &auth)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        // Update echoing the mask keeps the stored password; other fields change.
+        let (status, _) = body_json(
+            app.clone()
+                .oneshot(patch(json!({
+                    "name": "Renamed",
+                    "enabled": false,
+                    "alert_email": "alerts@example.com",
+                    "smtp_host": "smtp.example.com",
+                    "smtp_port": 587,
+                    "smtp_user": "mailer",
+                    "smtp_password": "••••••••",
+                    "from_address": "from@example.com",
+                    "from_name": "Chaos"
+                })))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let stored = db.get_email_profile(&id).unwrap();
+        assert_eq!(stored.smtp_password, "realpw", "mask echo preserves secret");
+        assert_eq!(stored.name, "Renamed");
+        assert!(!stored.enabled);
+
+        // Update with a fresh password replaces the stored secret.
+        let (status, _) = body_json(
+            app.clone()
+                .oneshot(patch(json!({
+                    "name": "Renamed",
+                    "enabled": false,
+                    "alert_email": "alerts@example.com",
+                    "smtp_host": "smtp.example.com",
+                    "smtp_port": 587,
+                    "smtp_user": "mailer",
+                    "smtp_password": "newpw",
+                    "from_address": "from@example.com",
+                    "from_name": "Chaos"
+                })))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(db.get_email_profile(&id).unwrap().smtp_password, "newpw");
+
+        // Select the profile onto the workflow, then clear it.
+        let select = |body: serde_json::Value| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/workflows/{wf_id}/email-profile"))
+                .header("authorization", &auth)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let (status, _) = body_json(
+            app.clone()
+                .oneshot(select(json!({ "profile_id": id })))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            db.get_workflow(&wf_id).unwrap().email_profile_id.as_deref(),
+            Some(id.as_str())
+        );
+        let (status, _) = body_json(
+            app.clone()
+                .oneshot(select(json!({ "profile_id": null })))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(db.get_workflow(&wf_id).unwrap().email_profile_id.is_none());
+
+        // Delete.
+        let (status, _) = body_json(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/api/v1/email-profiles/{id}"))
+                        .header("authorization", &auth)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(db.get_email_profile(&id).is_err());
+    }
+
+    #[tokio::test]
+    async fn rest_email_profile_write_requires_write_scope() {
+        let (state, _) = test_state();
+        let read_token = state
+            .service
+            .create_api_key(Some("ro"), &["read"])
+            .unwrap()
+            .token;
+        let app = router(state);
+        let (status, _) = body_json(
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/email-profiles")
+                    .header("authorization", format!("Bearer {read_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "name": "X",
+                            "enabled": true,
+                            "alert_email": "a@e.com",
+                            "smtp_host": "h",
+                            "smtp_port": 25,
+                            "smtp_user": "u",
+                            "smtp_password": "p",
+                            "from_address": "f@e.com",
+                            "from_name": "N"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
