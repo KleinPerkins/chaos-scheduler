@@ -191,6 +191,26 @@ button.popup-item:focus-visible {
   padding: 4px 8px;
 }
 
+.popup-update-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: rgba(var(--accent-rgb), 0.08);
+  flex-shrink: 0;
+}
+
+.popup-update-text {
+  font-size: 12px;
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .popup-footer {
   margin-top: auto;
   padding: 12px 16px;

@@ -11,6 +11,7 @@ import {
   CalendarClock,
   type LucideIcon,
 } from "lucide-react";
+import UpdateBanner from "./UpdateBanner";
 import WorkflowList from "./WorkflowList";
 import ThemeToggle from "./ThemeToggle";
 import WorkflowEditor from "./WorkflowEditor";
@@ -223,6 +224,7 @@ export default function Dashboard() {
       </aside>
 
       <main className="dashboard-main">
+        <UpdateBanner />
         {nav.view === "mission" && (
           <MissionControl
             initialTab={nav.missionTab}

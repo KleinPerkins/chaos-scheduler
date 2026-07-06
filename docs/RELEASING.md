@@ -154,6 +154,26 @@ release. The `guard-latest-for-package-only-release` job in
 to the most recent `chaos-scheduler-v*` release if it drifted. It is a no-op
 (and needs no secrets) when "Latest" already points at the desktop release.
 
+### `latest.json` release smoke check
+
+A green build + a green "Latest" re-pin still don't prove the **live**
+updater endpoint actually works — the pitfall above shows a passing release
+can leave `/releases/latest/download/latest.json` 404ing or serving a stale
+version (GitHub CDN-caches the redirect for a few minutes after a re-pin).
+`build-macos`'s last step, [`scripts/smoke-latest-json.mjs`](../scripts/smoke-latest-json.mjs),
+fetches that exact URL after the "Latest" pin and asserts:
+
+- the request returns **HTTP 200**;
+- the manifest's `version` matches the desktop tag just released;
+- every `platforms.*` entry has both a `url` and a `signature` (i.e. the
+  updater has something installable and verifiable to offer).
+
+It retries with backoff (6 attempts, 20s apart) to ride out the CDN-cache
+propagation delay before failing the job. This is the release-side half of
+the in-app updater UX (`useAppUpdate()` + the dashboard/tray affordances) —
+it exists to catch exactly the failure mode that would otherwise leave every
+installed user silently stuck on an old version with no error to look at.
+
 ## Release ordering + package-installability gate (managed MCP/SDK)
 
 The desktop app is the lifecycle owner of a managed, npm-provisioned

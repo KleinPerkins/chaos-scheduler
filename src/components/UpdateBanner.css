@@ -1,0 +1,44 @@
+.update-banner {
+  align-items: center;
+}
+
+.update-banner__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  flex-wrap: wrap;
+}
+
+.update-banner__text {
+  min-width: 0;
+}
+
+.update-banner__notes {
+  margin-top: 2px;
+  color: var(--text-secondary);
+  max-width: 60ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.update-banner__progress {
+  margin-top: 4px;
+  font-weight: 500;
+}
+
+.update-banner__error {
+  margin-top: 4px;
+  color: var(--error);
+}
+
+.update-banner__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}

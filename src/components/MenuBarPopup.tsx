@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Play } from "lucide-react";
 import { useSchedulerStatus } from "../hooks/useSchedulerStatus";
+import { useAppUpdate } from "../hooks/useAppUpdate";
 import {
   triggerWorkflow,
   quitApp,
@@ -38,11 +39,39 @@ function formatTime(isoTime: string): string {
 
 export default function MenuBarPopup() {
   const { status, error, refresh } = useSchedulerStatus(30000);
+  const { snapshot: updateSnapshot, install: installUpdate } = useAppUpdate();
   const showTime = useRef(0);
   const [actionError, setActionError] = useState<string | null>(null);
   const [runningWorkflowId, setRunningWorkflowId] = useState<string | null>(
     null,
   );
+  const [updating, setUpdating] = useState(false);
+
+  const updatePhase = updateSnapshot?.phase;
+  const updateDownloading =
+    updatePhase === "downloading" || updatePhase === "ready_to_restart";
+  // Instant skip feedback — see UpdateBanner for why `phase` alone lags.
+  const updateJustSkipped =
+    updatePhase === "available" &&
+    !!updateSnapshot?.latest_version &&
+    updateSnapshot.latest_version === updateSnapshot.skipped_version;
+  const showUpdateRow =
+    !updateJustSkipped &&
+    (updatePhase === "available" ||
+      updatePhase === "downloading" ||
+      updatePhase === "ready_to_restart");
+
+  const handleUpdate = async () => {
+    setActionError(null);
+    setUpdating(true);
+    try {
+      await installUpdate(updateSnapshot?.latest_version ?? undefined);
+    } catch (e) {
+      setActionError(`Update failed: ${String(e)}`);
+    } finally {
+      setUpdating(false);
+    }
+  };
 
   useEffect(() => {
     const onFocus = () => {
@@ -197,6 +226,26 @@ export default function MenuBarPopup() {
           )}
         </div>
       </div>
+
+      {showUpdateRow && (
+        <div
+          className="popup-update-row"
+          aria-busy={updateDownloading || undefined}
+        >
+          <span className="popup-update-text">
+            {updateDownloading
+              ? "Updating…"
+              : `Update available: v${updateSnapshot?.latest_version ?? "?"}`}
+          </span>
+          <button
+            className="btn btn-primary btn-sm"
+            disabled={updateDownloading || updating}
+            onClick={handleUpdate}
+          >
+            Update
+          </button>
+        </div>
+      )}
 
       <div className="popup-footer">
         <button

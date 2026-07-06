@@ -181,7 +181,10 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       } else if (typeof args.skippedVersion === "string") {
         updateSnapshot.skipped_version = args.skippedVersion;
       }
-      return updateSnapshot;
+      // A fresh object, not the mutated reference: real IPC round-trips
+      // always deserialize a new object, and callers (e.g. React state
+      // setters) may rely on referential inequality to detect the change.
+      return { ...updateSnapshot };
     },
     get_mcp_integration_status: () => defaultMcpIntegrationStatus,
     provision_mcp_integration: () => ({
