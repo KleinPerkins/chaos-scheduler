@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v0.6.0...chaos-scheduler-v0.6.1) (2026-07-06)
+
+
+### Bug Fixes
+
+* **cursor_agent:** backward-compat repo field fallback + review follow-ups ([#106](https://github.com/KleinPerkins/chaos-scheduler/issues/106)) ([7212663](https://github.com/KleinPerkins/chaos-scheduler/commit/7212663a29d0ea00600a9eb6c80788be16851e42))
+
 ## [0.6.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v0.5.0...chaos-scheduler-v0.6.0) (2026-07-06)
 
 
