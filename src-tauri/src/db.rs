@@ -65,16 +65,13 @@ pub struct Workflow {
     pub enabled: bool,
     pub async_mode: bool,
     pub email_on_failure: bool,
-    #[serde(default = "default_source_corpus")]
-    pub corpus: String,
-    /// First-class environment (partition/queue-scope/filter). Additive over
-    /// `corpus`, which is retained as a shadow for one migration cycle; both
-    /// carry the same value today.
+    /// First-class environment name (partition / queue-scope / filter). May be
+    /// any registered environment; seeded with `source` / `instance`.
     #[serde(default = "default_source_corpus")]
     pub environment: String,
     /// Governance flag: whether this workflow's definition is owned by an
     /// external source of truth and therefore read-only in the UI/API.
-    /// Decoupled from `corpus`; backfilled from `corpus == 'source'`.
+    /// Decoupled from the environment name and set explicitly by the service.
     #[serde(default)]
     pub managed_externally: bool,
     /// Execution model: `generic` (step-flow) or `typed` (operator).
@@ -365,7 +362,7 @@ pub struct AssetUpdateRecord {
 pub struct QueueEvent {
     pub id: String,
     pub queue_name: String,
-    pub corpus: String,
+    pub environment: String,
     pub workflow_id: Option<String>,
     pub run_id: Option<String>,
     pub event_type: String,
@@ -410,8 +407,6 @@ pub struct WorkflowTokenUsage {
 pub struct WorkflowTokenUsageRollup {
     pub time_bucket: Option<String>,
     pub workflow_id: Option<String>,
-    pub corpus: Option<String>,
-    #[serde(default)]
     pub environment: Option<String>,
     pub domain: Option<String>,
     pub queue_name: Option<String>,
@@ -470,8 +465,6 @@ pub struct MissionControlActivityItem {
     pub id: String,
     pub workflow_id: String,
     pub workflow_name: String,
-    pub corpus: String,
-    #[serde(default)]
     pub environment: String,
     pub domain: String,
     pub status: String,
@@ -490,8 +483,6 @@ pub struct MissionControlFreshnessItem {
     pub last_written_at: Option<String>,
     pub workflow_id: Option<String>,
     pub workflow_name: Option<String>,
-    pub corpus: Option<String>,
-    #[serde(default)]
     pub environment: Option<String>,
     pub domain: String,
     pub attribution: String,
@@ -501,8 +492,6 @@ pub struct MissionControlFreshnessItem {
 pub struct MissionControlWorkflowTelemetry {
     pub workflow_id: String,
     pub workflow_name: String,
-    pub corpus: String,
-    #[serde(default)]
     pub environment: String,
     pub domain: String,
     pub max_cpu_percent: Option<f64>,
@@ -516,8 +505,6 @@ pub struct MissionControlWorkflowTelemetry {
 pub struct MissionControlUpcomingRun {
     pub workflow_id: String,
     pub workflow_name: String,
-    pub corpus: String,
-    #[serde(default)]
     pub environment: String,
     pub domain: String,
     pub trigger_kind: String,
@@ -558,8 +545,6 @@ pub struct MissionControlSnapshot {
 pub struct NextRun {
     pub workflow_id: String,
     pub workflow_name: String,
-    pub corpus: String,
-    #[serde(default)]
     pub environment: String,
     pub next_time: String,
 }
@@ -1567,9 +1552,6 @@ impl Database {
     /// Shared projection decoder for the standard workflow column list used by
     /// `list_workflows`, `get_workflow`, and `list_workflows_filtered`.
     fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
-        let corpus = row
-            .get::<_, String>(12)
-            .unwrap_or_else(|_| "source".to_string());
         Ok(Workflow {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -1585,13 +1567,14 @@ impl Database {
             timezone: row
                 .get::<_, String>(11)
                 .unwrap_or_else(|_| "UTC".to_string()),
-            environment: row.get::<_, String>(16).unwrap_or_else(|_| corpus.clone()),
+            environment: row
+                .get::<_, String>(16)
+                .unwrap_or_else(|_| "source".to_string()),
             managed_externally: row.get::<_, i32>(17).unwrap_or(0) != 0,
             kind: row
                 .get::<_, String>(18)
                 .unwrap_or_else(|_| "generic".to_string()),
             spec_json: row.get(19).unwrap_or(None),
-            corpus,
             domain: row.get(13).unwrap_or(None),
             trigger_config: row.get(14).unwrap_or(None),
             queue_config: row.get(15).unwrap_or(None),
@@ -3413,13 +3396,11 @@ impl Database {
         )?;
         let rows = stmt.query_map(params![corpus_filter, domain_filter, limit], |row| {
             let run_id: String = row.get(0)?;
-            let corpus: String = row.get(3)?;
             Ok(MissionControlActivityItem {
                 id: run_id.clone(),
                 workflow_id: row.get(1)?,
                 workflow_name: row.get(2)?,
-                environment: corpus.clone(),
-                corpus,
+                environment: row.get(3)?,
                 domain: owner_label(row.get(4)?),
                 status: row.get(5)?,
                 started_at: row.get(6)?,
@@ -3473,7 +3454,6 @@ impl Database {
                     workflow_id: workflow_id.clone(),
                     workflow_name: row.get(7)?,
                     environment: row.get(8)?,
-                    corpus: row.get(8)?,
                     domain: owner_label(row.get(9)?),
                     attribution: if workflow_id.is_some() {
                         "last_writer_run".to_string()
@@ -3541,12 +3521,10 @@ impl Database {
         let rows = stmt.query_map(
             params![corpus_filter, domain_filter, window_modifier, limit],
             |row| {
-                let corpus: String = row.get(2)?;
                 Ok(MissionControlWorkflowTelemetry {
                     workflow_id: row.get(0)?,
                     workflow_name: row.get(1)?,
-                    environment: corpus.clone(),
-                    corpus,
+                    environment: row.get(2)?,
                     domain: owner_label(row.get(3)?),
                     max_cpu_percent: row.get(4)?,
                     max_memory_rss_bytes: row.get(5)?,
@@ -3627,8 +3605,10 @@ impl Database {
         } else {
             "NULL".to_string()
         };
-        let corpus_expr = if selected.contains("corpus") {
-            "json_extract(labels_json, '$.corpus')".to_string()
+        let environment_expr = if selected.contains("environment") {
+            // Prefer the `environment` label; fall back to the legacy `corpus`
+            // label so pre-rename telemetry still groups correctly.
+            "COALESCE(json_extract(labels_json, '$.environment'), json_extract(labels_json, '$.corpus'))".to_string()
         } else {
             "NULL".to_string()
         };
@@ -3661,7 +3641,7 @@ impl Database {
         let sql = format!(
             "SELECT {time_expr} AS time_bucket,
                     {workflow_expr} AS workflow_id,
-                    {corpus_expr} AS corpus,
+                    {environment_expr} AS environment,
                     {domain_expr} AS domain,
                     {queue_expr} AS queue_name,
                     {provider_expr} AS provider,
@@ -3681,7 +3661,6 @@ impl Database {
                 time_bucket: row.get(0)?,
                 workflow_id: row.get(1)?,
                 environment: row.get(2)?,
-                corpus: row.get(2)?,
                 domain: row.get(3)?,
                 queue_name: row.get(4)?,
                 provider: row.get(5)?,
@@ -6283,7 +6262,6 @@ SUMMARY_JSON:{\"title\":\"current\"}
             .unwrap();
         assert_eq!(rewritten_asset.attribution, "unattributed_all_only");
         assert!(rewritten_asset.workflow_id.is_none());
-        assert!(rewritten_asset.corpus.is_none());
 
         assert_eq!(instance_run.status, "failed");
 
@@ -7465,6 +7443,8 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 token_count,
                 emitted_at: chrono::Utc::now().to_rfc3339(),
                 labels: Some(serde_json::json!({
+                    // Legacy `corpus` label: exercises the COALESCE fallback so
+                    // the `environment` dimension still groups pre-rename telemetry.
                     "corpus": "source",
                     "domain": "scheduler",
                     "queue_name": "source-default",
@@ -7478,7 +7458,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
             .query_token_usage_rollup(
                 &[
                     "workflow_id".to_string(),
-                    "corpus".to_string(),
+                    "environment".to_string(),
                     "domain".to_string(),
                     "queue_name".to_string(),
                     "provider".to_string(),
@@ -7494,7 +7474,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
             rollups[0].workflow_id.as_deref(),
             Some(workflow.id.as_str())
         );
-        assert_eq!(rollups[0].corpus.as_deref(), Some("source"));
+        assert_eq!(rollups[0].environment.as_deref(), Some("source"));
         assert_eq!(rollups[0].domain.as_deref(), Some("scheduler"));
         assert_eq!(rollups[0].queue_name.as_deref(), Some("source-default"));
         assert_eq!(rollups[0].total_tokens, 18);

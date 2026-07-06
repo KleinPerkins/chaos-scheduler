@@ -237,7 +237,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           asyncMode: isManaged ? workflow.async_mode : asyncMode,
           emailOnFailure,
           timezone: LOCAL_TZ,
-          corpus: workflow.corpus ?? "instance",
+          environment: workflow.environment,
           domain: workflow.domain,
           triggerConfig: isManaged
             ? workflow.trigger_config || undefined
@@ -257,7 +257,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           timezone: LOCAL_TZ,
           // New UI workflows always land in the instance partition; a custom
           // environment name is preserved in the spec below.
-          corpus: "instance",
+          environment: "instance",
           triggerConfig: triggerConfig || undefined,
           queueConfig: queueConfig || undefined,
         });

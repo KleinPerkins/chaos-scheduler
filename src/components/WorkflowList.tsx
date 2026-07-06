@@ -210,7 +210,7 @@ export default function WorkflowList({
         asyncMode: w.async_mode,
         emailOnFailure: w.email_on_failure,
         timezone: w.timezone,
-        corpus: w.corpus ?? "source",
+        environment: w.environment,
         domain: w.domain,
       });
       await refresh();

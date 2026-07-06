@@ -21,7 +21,6 @@ export const sampleWorkflow: Workflow = {
   enabled: true,
   async_mode: false,
   email_on_failure: false,
-  corpus: "source",
   environment: "source",
   managed_externally: false,
   kind: "generic",
@@ -41,7 +40,6 @@ export const sampleManagedWorkflow: Workflow = {
   name: "Managed import",
   managed_externally: true,
   environment: "instance",
-  corpus: "instance",
 };
 
 export const sampleRun: Run = {
@@ -133,7 +131,6 @@ export const defaultEmailConfig: EmailConfig = {
 export const defaultQueues: QueueInfo[] = [
   {
     name: "default",
-    corpus: "source",
     environment: "source",
     capacity: 2,
     tag_cap: null,

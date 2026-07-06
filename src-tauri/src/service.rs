@@ -1152,8 +1152,6 @@ mod tests {
         let d = draft("wf", "staging");
         let wf = svc.create_workflow(d, false).unwrap();
         assert_eq!(wf.environment, "staging");
-        // `corpus` mirrors `environment` during the migration window.
-        assert_eq!(wf.corpus, "staging");
         assert!(!wf.managed_externally);
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -1,13 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 
-/**
- * Legacy partition value. Superseded by the first-class `environment` string
- * (which can be any user-defined name) plus the `managed_externally` governance
- * flag. Retained because the backend read model still emits `corpus` on run /
- * queue / status rows during the environments migration.
- */
-export type WorkflowCorpus = "source" | "instance";
-
 /** Which execution model a workflow uses (mirrors `workflow_spec::WorkflowKind`). */
 export type WorkflowKind = "generic" | "typed";
 
@@ -20,8 +12,6 @@ export interface Workflow {
   enabled: boolean;
   async_mode: boolean;
   email_on_failure: boolean;
-  /** Legacy partition; prefer `environment`. */
-  corpus: WorkflowCorpus;
   /** First-class environment name (dynamic; seeded `source`/`instance`). */
   environment: string;
   /** True when the definition is owned by an external source of truth (git /
@@ -44,13 +34,9 @@ export interface Workflow {
   updated_at: string;
 }
 
-/** Read the effective environment of a workflow / run / queue row, tolerating
- * the migration window where only `corpus` is populated. */
-export function environmentOf(row: {
-  environment?: string | null;
-  corpus?: string | null;
-}): string {
-  return (row.environment ?? row.corpus ?? "default").toString();
+/** Read the effective environment of a workflow / run / queue row. */
+export function environmentOf(row: { environment?: string | null }): string {
+  return (row.environment ?? "default").toString();
 }
 
 // --- Environments (Phase 3) ---
@@ -234,7 +220,7 @@ export interface WorkflowResourceSample {
   run_id?: string | null;
   workflow_id: string;
   queue_name?: string | null;
-  corpus: WorkflowCorpus;
+  environment: string;
   pid?: number | null;
   sampled_at: string;
   cpu_percent?: number | null;
@@ -247,7 +233,7 @@ export interface WorkflowResourceSample {
 export interface WorkflowTokenUsageRollup {
   time_bucket?: string | null;
   workflow_id?: string | null;
-  corpus?: string | null;
+  environment?: string | null;
   domain?: string | null;
   queue_name?: string | null;
   provider?: string | null;
@@ -271,7 +257,7 @@ export interface SchedulerAsset {
 export type TokenRollupDimension =
   | "time_bucket"
   | "workflow_id"
-  | "corpus"
+  | "environment"
   | "domain"
   | "queue_name"
   | "provider"
@@ -281,8 +267,7 @@ export type TokenRollupDimension =
 export interface NextRun {
   workflow_id: string;
   workflow_name: string;
-  corpus: WorkflowCorpus;
-  environment?: string | null;
+  environment: string;
   next_time: string;
 }
 
@@ -337,8 +322,7 @@ export interface MissionControlActivityItem {
   id: string;
   workflow_id: string;
   workflow_name: string;
-  corpus: WorkflowCorpus;
-  environment?: string | null;
+  environment: string;
   domain: string;
   status: string;
   started_at: string;
@@ -349,8 +333,7 @@ export interface MissionControlActivityItem {
 export interface MissionControlUpcomingRun {
   workflow_id: string;
   workflow_name: string;
-  corpus: WorkflowCorpus;
-  environment?: string | null;
+  environment: string;
   domain: string;
   trigger_kind: string;
   trigger_label: string;
@@ -366,7 +349,7 @@ export interface MissionControlFreshnessItem {
   last_written_at?: string | null;
   workflow_id?: string | null;
   workflow_name?: string | null;
-  corpus?: WorkflowCorpus | null;
+  environment?: string | null;
   domain: string;
   attribution: string;
 }
@@ -374,8 +357,7 @@ export interface MissionControlFreshnessItem {
 export interface MissionControlWorkflowTelemetry {
   workflow_id: string;
   workflow_name: string;
-  corpus: WorkflowCorpus;
-  environment?: string | null;
+  environment: string;
   domain: string;
   max_cpu_percent?: number | null;
   max_memory_rss_bytes?: number | null;
@@ -413,8 +395,7 @@ export interface MissionControlSnapshot {
 
 export interface QueueInfo {
   name: string;
-  corpus: WorkflowCorpus;
-  environment?: string | null;
+  environment: string;
   capacity: number;
   tag_cap?: number | null;
   max_queued?: number | null;
@@ -430,8 +411,7 @@ export interface QueuedRun {
   workflow_id: string;
   workflow_name?: string | null;
   queue_name: string;
-  corpus: WorkflowCorpus;
-  environment?: string | null;
+  environment: string;
   priority: number;
   status: string;
   queued_at: string;
@@ -563,7 +543,7 @@ export interface WorkflowPayload {
   asyncMode?: boolean;
   emailOnFailure?: boolean;
   timezone?: string;
-  corpus?: WorkflowCorpus;
+  environment?: string;
   domain?: string | null;
   triggerConfig?: string;
   queueConfig?: string;
@@ -818,12 +798,18 @@ export function listQueues(): Promise<QueueInfo[]> {
 
 export function updateQueue(
   name: string,
-  corpus: WorkflowCorpus,
+  environment: string,
   capacity: number,
   tagCap?: number | null,
   maxQueued?: number | null,
 ): Promise<QueueInfo> {
-  return invoke("update_queue", { name, corpus, capacity, tagCap, maxQueued });
+  return invoke("update_queue", {
+    name,
+    environment,
+    capacity,
+    tagCap,
+    maxQueued,
+  });
 }
 
 export function listQueuedRuns(limit?: number): Promise<QueuedRun[]> {

@@ -96,8 +96,6 @@ export interface Workflow {
   enabled: boolean;
   async_mode: boolean;
   email_on_failure: boolean;
-  /** Legacy partition/governance selector; retained as a shadow of `environment`. */
-  corpus: string;
   /** First-class environment (partition/queue-scope/filter). */
   environment: string;
   /** Governance flag: definition owned by an external source of truth. */
