@@ -19,6 +19,7 @@ import Notice from "./ui/Notice";
 import EmailProfiles from "./EmailProfiles";
 import ThemeToggle from "./ThemeToggle";
 import { useTheme } from "../hooks/useTheme";
+import { useAppUpdate } from "../hooks/useAppUpdate";
 import "./Settings.css";
 
 export default function Settings() {
@@ -39,6 +40,13 @@ export default function Settings() {
   const [updateChecking, setUpdateChecking] = useState(false);
   const [updateApplying, setUpdateApplying] = useState(false);
   const [updaterUnavailable, setUpdaterUnavailable] = useState(false);
+  const {
+    snapshot: updateSnapshot,
+    setBackgroundCheckEnabled,
+    skipVersion,
+    clearSkippedVersion,
+  } = useAppUpdate();
+  const [prefsBusy, setPrefsBusy] = useState(false);
 
   const [emailConfig, setEmailConfigState] = useState<EmailConfig>({
     enabled: false,
@@ -161,6 +169,42 @@ export default function Settings() {
       }
     } finally {
       setUpdateApplying(false);
+    }
+  };
+
+  const handleBackgroundCheckToggle = async (enabled: boolean) => {
+    setPrefsBusy(true);
+    try {
+      await setBackgroundCheckEnabled(enabled);
+    } catch (e) {
+      showStatus(`Error: ${e}`, "error");
+    } finally {
+      setPrefsBusy(false);
+    }
+  };
+
+  const handleSkipVersion = async () => {
+    const version = updateSnapshot?.latest_version;
+    if (!version) return;
+    setPrefsBusy(true);
+    try {
+      await skipVersion(version);
+      showStatus(`Skipping v${version}`, "info");
+    } catch (e) {
+      showStatus(`Error: ${e}`, "error");
+    } finally {
+      setPrefsBusy(false);
+    }
+  };
+
+  const handleClearSkip = async () => {
+    setPrefsBusy(true);
+    try {
+      await clearSkippedVersion();
+    } catch (e) {
+      showStatus(`Error: ${e}`, "error");
+    } finally {
+      setPrefsBusy(false);
     }
   };
 
@@ -599,6 +643,17 @@ export default function Settings() {
               readOnly
             />
           </div>
+          <div className="settings-row">
+            <label className="settings-check">
+              <input
+                type="checkbox"
+                checked={updateSnapshot?.background_check_enabled ?? true}
+                disabled={prefsBusy}
+                onChange={(e) => handleBackgroundCheckToggle(e.target.checked)}
+              />
+              Check for updates automatically
+            </label>
+          </div>
           <div className="settings-row settings-update-row">
             <button
               className="btn btn-ghost btn-sm"
@@ -615,7 +670,7 @@ export default function Settings() {
               >
                 {updateApplying
                   ? "Installing..."
-                  : `Install v${updateInfo.latest_version ?? ""} & relaunch`}
+                  : `Install and Restart v${updateInfo.latest_version ?? ""}`}
               </button>
             )}
           </div>
@@ -623,6 +678,33 @@ export default function Settings() {
             <div className="settings-hint settings-release-notes">
               {updateInfo.notes}
             </div>
+          )}
+          {updateSnapshot?.skipped_version ? (
+            <div className="settings-row settings-update-row">
+              <span className="settings-hint">
+                Skipping v{updateSnapshot.skipped_version}
+              </span>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={handleClearSkip}
+                disabled={prefsBusy}
+              >
+                Clear skip
+              </button>
+            </div>
+          ) : (
+            updateSnapshot?.phase === "available" &&
+            updateSnapshot.latest_version && (
+              <div className="settings-row settings-update-row">
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={handleSkipVersion}
+                  disabled={prefsBusy}
+                >
+                  Skip this version (v{updateSnapshot.latest_version})
+                </button>
+              </div>
+            )
           )}
           <span className="settings-hint">
             {updaterUnavailable

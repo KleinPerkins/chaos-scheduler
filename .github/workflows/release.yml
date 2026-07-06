@@ -295,6 +295,18 @@ jobs:
             --repo "${{ github.repository }}" \
             --latest
 
+      # Section 7 release smoke gate: a green build + a green "Latest" re-pin
+      # can still leave the live updater endpoint 404ing or stale (GitHub CDN
+      # caches the redirect for a few minutes — see docs/RELEASING.md). Prove
+      # the actual endpoint, not just the release metadata, serves this exact
+      # version with a downloadable + signed artifact before calling the
+      # release done.
+      - name: Smoke-check the live latest.json updater endpoint
+        run: |
+          version="${{ inputs.desktop_tag }}"
+          version="${version#chaos-scheduler-v}"
+          node scripts/smoke-latest-json.mjs "$version"
+
   # ---------------------------------------------------------------------------
   # Guard against a package-only release (sdk-ts / mcp-server, no desktop bump)
   # stealing GitHub's "Latest" flag. build-macos only re-pins "Latest" when it

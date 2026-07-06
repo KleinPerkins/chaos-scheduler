@@ -172,9 +172,37 @@ pub fn classify_updater_error(err: &tauri_plugin_updater::Error) -> &'static str
     }
 }
 
+/// Tray tooltip text for the current phase (Section 3: native tray affordance
+/// alongside the dashboard banner and popup row). Falls back to the plain
+/// product tooltip once the phase clears (idle/checking/error), matching how
+/// the banner/popup rows disappear.
+fn tooltip_for(snapshot: &UpdateSnapshot) -> String {
+    match (snapshot.phase, snapshot.latest_version.as_deref()) {
+        (UpdatePhase::Available, Some(v)) => {
+            format!("{} — update available: v{v}", crate::branding::TRAY_TOOLTIP)
+        }
+        (UpdatePhase::Downloading, Some(v)) => {
+            format!(
+                "{} — downloading update v{v}…",
+                crate::branding::TRAY_TOOLTIP
+            )
+        }
+        (UpdatePhase::ReadyToRestart, Some(v)) => {
+            format!(
+                "{} — installing update v{v}, restarting…",
+                crate::branding::TRAY_TOOLTIP
+            )
+        }
+        _ => crate::branding::TRAY_TOOLTIP.to_string(),
+    }
+}
+
 fn emit_snapshot(app: &AppHandle, snapshot: &UpdateSnapshot) {
     if let Err(e) = app.emit(UPDATE_STATUS_EVENT, snapshot) {
         log::warn!("Failed to emit {UPDATE_STATUS_EVENT}: {e}");
+    }
+    if let Some(tray) = app.tray_by_id(crate::branding::TRAY_ID) {
+        let _ = tray.set_tooltip(Some(tooltip_for(snapshot)));
     }
 }
 
