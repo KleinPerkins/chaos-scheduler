@@ -148,13 +148,27 @@ jobs:
       - name: Validate PR commit messages
         run: npx commitlint --from "${{ github.event.pull_request.base.sha }}" --to "${{ github.event.pull_request.head.sha }}" --verbose
 
+  # Pre-release guard: the Rust `tauri` crate and the JS `@tauri-apps/*` packages
+  # must share a major.minor or `tauri build` aborts in the release job (root
+  # cause of the 0.3.0 desktop build failure). Compile-free lockfile check.
+  tauri-versions:
+    name: Tauri version parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+      - name: Check Rust crate vs @tauri-apps/* parity
+        run: node scripts/check-tauri-versions.mjs
+
   # Single required status check for branch protection on `main`.
   # Configure "ci-required" as the sole required check; it fans in from every
   # other job so adding/removing jobs never requires editing branch protection.
   ci-required:
     name: ci-required
     if: always()
-    needs: [changes, frontend, e2e, rust, packages, commitlint]
+    needs: [changes, frontend, e2e, rust, packages, commitlint, tauri-versions]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all required jobs passed
