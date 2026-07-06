@@ -156,28 +156,102 @@ fn node_candidates(home: Option<&str>) -> Vec<PathBuf> {
 
 /// `nvm` has no fixed absolute path for "the current default node" — it's a
 /// shell function, not a real binary. Its `alias/default` file records which
-/// version that shell function would resolve to, so we can read that intent
-/// and construct the real absolute path ourselves, without invoking `nvm`.
+/// version (or alias) that shell function would resolve to, so we can read
+/// that intent and construct the real absolute path ourselves, without
+/// invoking `nvm`.
+///
+/// `alias/default` doesn't always contain a literal version string — nvm
+/// also accepts (and `nvm alias default <x>` commonly gets set to) the
+/// aliases `node`/`stable` (latest installed), `lts/*` or a named LTS
+/// codename like `lts/hydrogen`, and `system` (defer to the system/PATH
+/// `node`, i.e. the candidates already ahead of this one in
+/// [`node_candidates`]). Previously only a literal version string was
+/// handled — any of these common alias forms would be treated as a literal
+/// version, build a non-existent path, and silently fall through to
+/// `NodeUnavailable` even though a working Node install exists.
 fn resolve_nvm_default_node(home: &Path) -> Option<PathBuf> {
     let alias_path = home.join(".nvm").join("alias").join("default");
     let raw = std::fs::read_to_string(&alias_path).ok()?;
-    let version = raw.trim();
-    if version.is_empty() {
+    let content = raw.trim();
+    if content.is_empty() {
         return None;
     }
+    resolve_nvm_alias(home, content)
+}
+
+fn nvm_versions_dir(home: &Path) -> PathBuf {
+    home.join(".nvm").join("versions").join("node")
+}
+
+/// Every installed `~/.nvm/versions/node/v<major>.<minor>.<patch>` entry,
+/// parsed for ordering. Filesystem-driven (rather than trusting any alias
+/// file) since "latest installed" can only be answered by actually looking.
+fn installed_nvm_node_versions(home: &Path) -> Vec<((u32, u32, u32), PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(nvm_versions_dir(home)) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let stripped = name.strip_prefix('v').unwrap_or(&name);
+            let mut parts = stripped.split('.');
+            let major: u32 = parts.next()?.parse().ok()?;
+            let minor: u32 = parts.next().unwrap_or("0").parse().ok()?;
+            let patch: u32 = parts.next().unwrap_or("0").parse().ok()?;
+            Some(((major, minor, patch), entry.path().join("bin").join("node")))
+        })
+        .collect()
+}
+
+/// The highest installed version, optionally restricted to Node's
+/// even-major-number LTS convention (Node has released only even majors as
+/// LTS since v4; this is a filesystem-only heuristic — no network call —
+/// consistent with this module never invoking `nvm`/`npm view` at
+/// detection time).
+fn latest_installed_nvm_node(home: &Path, lts_only: bool) -> Option<PathBuf> {
+    installed_nvm_node_versions(home)
+        .into_iter()
+        .filter(|((major, _, _), _)| !lts_only || major % 2 == 0)
+        .max_by_key(|(version, _)| *version)
+        .map(|(_, path)| path)
+}
+
+fn literal_version_node_path(home: &Path, version: &str) -> PathBuf {
     let version = if version.starts_with('v') {
         version.to_string()
     } else {
         format!("v{version}")
     };
-    Some(
-        home.join(".nvm")
-            .join("versions")
-            .join("node")
-            .join(version)
-            .join("bin")
-            .join("node"),
-    )
+    nvm_versions_dir(home)
+        .join(version)
+        .join("bin")
+        .join("node")
+}
+
+/// Resolve one `alias/default`-style content string to an absolute `node`
+/// path. Handles the literal-version case plus the common alias forms
+/// documented on [`resolve_nvm_default_node`].
+fn resolve_nvm_alias(home: &Path, content: &str) -> Option<PathBuf> {
+    match content {
+        // "system" explicitly defers to the system/PATH node — there is
+        // nothing nvm-specific to resolve, so returning None here correctly
+        // lets the non-nvm candidates already in `node_candidates` win.
+        "system" => None,
+        "node" | "stable" => latest_installed_nvm_node(home, false),
+        _ if content == "lts/*" => latest_installed_nvm_node(home, true),
+        _ if content.starts_with("lts/") => {
+            // A named LTS codename (e.g. "lts/hydrogen") is itself another
+            // nvm alias file, one level down, that ultimately contains a
+            // literal version.
+            let codename = &content["lts/".len()..];
+            let named_alias_path = home.join(".nvm").join("alias").join("lts").join(codename);
+            let raw = std::fs::read_to_string(named_alias_path).ok()?;
+            let literal = raw.trim();
+            (!literal.is_empty()).then(|| literal_version_node_path(home, literal))
+        }
+        literal => Some(literal_version_node_path(home, literal)),
+    }
 }
 
 fn node_version_of(node_path: &Path) -> Option<String> {
@@ -1267,6 +1341,128 @@ exit 0
         write_fake_node(&node_path, "v20.0.0");
 
         assert_eq!(npm_candidate_for(&node_path), None);
+    }
+
+    // --- nvm alias resolution -------------------------------------------
+
+    fn write_nvm_default_alias(home: &Path, content: &str) {
+        let alias_dir = home.join(".nvm").join("alias");
+        std::fs::create_dir_all(&alias_dir).unwrap();
+        std::fs::write(alias_dir.join("default"), content).unwrap();
+    }
+
+    fn touch_installed_nvm_version(home: &Path, version: &str) {
+        std::fs::create_dir_all(nvm_versions_dir(home).join(version).join("bin")).unwrap();
+    }
+
+    #[test]
+    fn resolve_nvm_default_node_handles_a_literal_version() {
+        let home = tmpdir();
+        write_nvm_default_alias(&home, "20.11.0");
+
+        assert_eq!(
+            resolve_nvm_default_node(&home),
+            Some(
+                nvm_versions_dir(&home)
+                    .join("v20.11.0")
+                    .join("bin")
+                    .join("node")
+            )
+        );
+    }
+
+    /// Regression test: `alias/default` containing the common `node`/`stable`
+    /// alias form (not a literal version) must resolve to the latest
+    /// installed version, rather than being treated as a literal version
+    /// string that builds a non-existent path.
+    #[test]
+    fn resolve_nvm_default_node_resolves_node_alias_to_latest_installed() {
+        let home = tmpdir();
+        touch_installed_nvm_version(&home, "v18.20.0");
+        touch_installed_nvm_version(&home, "v22.1.0");
+        touch_installed_nvm_version(&home, "v20.11.0");
+        write_nvm_default_alias(&home, "node");
+
+        assert_eq!(
+            resolve_nvm_default_node(&home),
+            Some(
+                nvm_versions_dir(&home)
+                    .join("v22.1.0")
+                    .join("bin")
+                    .join("node")
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_nvm_default_node_resolves_stable_alias_the_same_as_node() {
+        let home = tmpdir();
+        touch_installed_nvm_version(&home, "v20.11.0");
+        write_nvm_default_alias(&home, "stable");
+
+        assert_eq!(
+            resolve_nvm_default_node(&home),
+            Some(
+                nvm_versions_dir(&home)
+                    .join("v20.11.0")
+                    .join("bin")
+                    .join("node")
+            )
+        );
+    }
+
+    /// Regression test: `lts/*` must resolve to the latest installed
+    /// *even-major* (LTS) version, skipping a newer odd-major (current,
+    /// non-LTS) install.
+    #[test]
+    fn resolve_nvm_default_node_resolves_lts_star_to_latest_even_major() {
+        let home = tmpdir();
+        touch_installed_nvm_version(&home, "v21.5.0"); // current, non-LTS (odd)
+        touch_installed_nvm_version(&home, "v20.11.0"); // LTS (even)
+        touch_installed_nvm_version(&home, "v18.20.0"); // older LTS
+        write_nvm_default_alias(&home, "lts/*");
+
+        assert_eq!(
+            resolve_nvm_default_node(&home),
+            Some(
+                nvm_versions_dir(&home)
+                    .join("v20.11.0")
+                    .join("bin")
+                    .join("node")
+            )
+        );
+    }
+
+    /// Regression test: a named LTS codename (e.g. `lts/hydrogen`) is
+    /// itself another nvm alias file one level down that contains the
+    /// literal version.
+    #[test]
+    fn resolve_nvm_default_node_resolves_named_lts_codename() {
+        let home = tmpdir();
+        let lts_alias_dir = home.join(".nvm").join("alias").join("lts");
+        std::fs::create_dir_all(&lts_alias_dir).unwrap();
+        std::fs::write(lts_alias_dir.join("hydrogen"), "v18.20.0").unwrap();
+        write_nvm_default_alias(&home, "lts/hydrogen");
+
+        assert_eq!(
+            resolve_nvm_default_node(&home),
+            Some(
+                nvm_versions_dir(&home)
+                    .join("v18.20.0")
+                    .join("bin")
+                    .join("node")
+            )
+        );
+    }
+
+    /// Regression test: `system` must defer to the system/PATH node (return
+    /// `None` here) rather than being misinterpreted as a literal version.
+    #[test]
+    fn resolve_nvm_default_node_returns_none_for_system_alias() {
+        let home = tmpdir();
+        write_nvm_default_alias(&home, "system");
+
+        assert_eq!(resolve_nvm_default_node(&home), None);
     }
 
     // --- mcp.json merge ---------------------------------------------------
