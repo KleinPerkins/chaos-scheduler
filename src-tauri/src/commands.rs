@@ -356,10 +356,7 @@ pub fn provision_mcp_integration(
     force: Option<bool>,
 ) -> Result<crate::mcp::McpIntegrationStatus, String> {
     use tauri::Manager;
-    let _guard = mcp_state
-        .lock
-        .try_lock()
-        .map_err(|_| "MCP provisioning is already in progress".to_string())?;
+    let _guard = crate::mcp::try_lock_recovering(&mcp_state).map_err(|e| e.to_string())?;
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let config_path = crate::mcp::cursor_mcp_config_path()?;
     crate::mcp::provision(
@@ -382,10 +379,7 @@ pub fn remove_mcp_integration(
     prepare_to_uninstall: Option<bool>,
 ) -> Result<crate::mcp::McpIntegrationStatus, String> {
     use tauri::Manager;
-    let _guard = mcp_state
-        .lock
-        .try_lock()
-        .map_err(|_| "MCP provisioning is already in progress".to_string())?;
+    let _guard = crate::mcp::try_lock_recovering(&mcp_state).map_err(|e| e.to_string())?;
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let config_path = crate::mcp::cursor_mcp_config_path()?;
     crate::mcp::remove(
