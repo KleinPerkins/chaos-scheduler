@@ -469,8 +469,7 @@ async fn register_workflow(
         async_mode: body.async_mode.unwrap_or(false),
         email_on_failure: body.email_on_failure.unwrap_or(true),
         timezone: body.timezone.unwrap_or_else(|| "UTC".to_string()),
-        corpus: environment.clone(),
-        environment: Some(environment),
+        environment,
         domain: body.domain,
         trigger_config: body.trigger_config,
         queue_config: body.queue_config,
@@ -544,7 +543,7 @@ async fn update_workflow(
     let environment = body
         .environment
         .clone()
-        .or_else(|| Some(existing.environment.clone()));
+        .unwrap_or_else(|| existing.environment.clone());
     let draft = WorkflowDraft {
         name: body.name.unwrap_or(existing.name),
         description: body.description.or(existing.description),
@@ -553,9 +552,6 @@ async fn update_workflow(
         async_mode: body.async_mode.unwrap_or(existing.async_mode),
         email_on_failure: body.email_on_failure.unwrap_or(existing.email_on_failure),
         timezone: body.timezone.unwrap_or(existing.timezone),
-        corpus: environment
-            .clone()
-            .unwrap_or_else(|| existing.corpus.clone()),
         environment,
         domain: body.domain.or(existing.domain),
         trigger_config: body.trigger_config.or(existing.trigger_config),
@@ -1292,8 +1288,7 @@ mod tests {
             async_mode: false,
             email_on_failure: true,
             timezone: "UTC".into(),
-            corpus: "instance".into(),
-            environment: Some("instance".into()),
+            environment: "instance".into(),
             domain: None,
             trigger_config: None,
             queue_config: None,

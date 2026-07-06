@@ -78,11 +78,10 @@ pub fn create_workflow(
     trigger_config: Option<String>,
     queue_config: Option<String>,
 ) -> Result<Workflow, String> {
-    // Back-compat: accept `environment` (preferred) or legacy `corpus`; each
-    // defaults from the other so older frontends keep working.
-    let environment = environment.or_else(|| corpus.clone());
-    let corpus = corpus
-        .or_else(|| environment.clone())
+    // Back-compat: accept `environment` (preferred) or legacy `corpus` as an
+    // alias so older frontends keep working; defaults to `instance`.
+    let environment = environment
+        .or(corpus)
         .unwrap_or_else(|| "instance".to_string());
     let draft = WorkflowDraft {
         name,
@@ -92,7 +91,6 @@ pub fn create_workflow(
         async_mode: async_mode.unwrap_or(false),
         email_on_failure: email_on_failure.unwrap_or(true),
         timezone: timezone.unwrap_or_else(|| "UTC".to_string()),
-        corpus,
         environment,
         domain,
         trigger_config,
@@ -125,9 +123,11 @@ pub fn update_workflow(
     queue_config: Option<String>,
 ) -> Result<Workflow, String> {
     let existing = state.db.get_workflow(&id).map_err(|e| e.to_string())?;
+    // Back-compat: accept `environment` (preferred) or legacy `corpus` alias,
+    // falling back to the existing partition.
     let environment = environment
-        .or_else(|| corpus.clone())
-        .or_else(|| Some(existing.environment.clone()));
+        .or(corpus)
+        .unwrap_or_else(|| existing.environment.clone());
     let draft = WorkflowDraft {
         name,
         description,
@@ -136,7 +136,6 @@ pub fn update_workflow(
         async_mode: async_mode.unwrap_or(existing.async_mode),
         email_on_failure: email_on_failure.unwrap_or(true),
         timezone: timezone.unwrap_or_else(|| "UTC".to_string()),
-        corpus: corpus.unwrap_or_else(|| existing.corpus.clone()),
         environment,
         domain: domain.or_else(|| existing.domain.clone()),
         trigger_config: trigger_config.or_else(|| existing.trigger_config.clone()),
