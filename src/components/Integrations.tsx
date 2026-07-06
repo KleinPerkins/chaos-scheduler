@@ -267,26 +267,33 @@ export default function Integrations() {
             </thead>
             <tbody>
               {keys.map((key) => (
-                <tr key={key.id}>
+                <tr
+                  key={key.id}
+                  className={key.revoked ? "intg-key-row--revoked" : undefined}
+                >
                   <td>{key.name ?? key.id}</td>
                   <td>{key.scopes}</td>
                   <td>{key.created_at ?? "—"}</td>
                   <td>{key.last_used_at ?? "never"}</td>
                   <td>
-                    <button
-                      className="btn btn-danger btn-sm"
-                      onClick={() => handleRevoke(key.id)}
-                      disabled={busy}
-                      aria-label={
-                        revokePendingId === key.id
-                          ? "Confirm revoke API key"
-                          : "Revoke API key"
-                      }
-                    >
-                      {revokePendingId === key.id
-                        ? "Confirm revoke?"
-                        : "Revoke"}
-                    </button>
+                    {key.revoked ? (
+                      <span className="intg-revoked-badge">Revoked</span>
+                    ) : (
+                      <button
+                        className="btn btn-danger btn-sm"
+                        onClick={() => handleRevoke(key.id)}
+                        disabled={busy}
+                        aria-label={
+                          revokePendingId === key.id
+                            ? "Confirm revoke API key"
+                            : "Revoke API key"
+                        }
+                      >
+                        {revokePendingId === key.id
+                          ? "Confirm revoke?"
+                          : "Revoke"}
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
