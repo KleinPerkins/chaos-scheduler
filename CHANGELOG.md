@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.6.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v0.5.0...chaos-scheduler-v0.6.0) (2026-07-06)
+
+
+### Features
+
+* expose email profiles over REST, SDK, and MCP ([#104](https://github.com/KleinPerkins/chaos-scheduler/issues/104)) ([6be9e0d](https://github.com/KleinPerkins/chaos-scheduler/commit/6be9e0d67126566478f10938e80d56ed5dff437b))
+
+
+### Bug Fixes
+
+* **cursor_agent:** correct Cloud Agents v1 schema and harden execution ([#105](https://github.com/KleinPerkins/chaos-scheduler/issues/105)) ([ae1ca39](https://github.com/KleinPerkins/chaos-scheduler/commit/ae1ca3994b6833e131978a8fc087c2fe199f22f4))
+
+
+### Refactors
+
+* **db:** drop the vestigial corpus column from workflows ([#102](https://github.com/KleinPerkins/chaos-scheduler/issues/102)) ([107cc69](https://github.com/KleinPerkins/chaos-scheduler/commit/107cc692bbef4b57cadbb7ed21fef6646f913e8a))
+* rename mission-control corpus_filter to environment_filter ([#103](https://github.com/KleinPerkins/chaos-scheduler/issues/103)) ([1b80ed2](https://github.com/KleinPerkins/chaos-scheduler/commit/1b80ed2df3d1a7b306fe3054833bd1d0b77bfb06))
+* **scheduler:** drop corpus from the serialized read contract ([#101](https://github.com/KleinPerkins/chaos-scheduler/issues/101)) ([ea52ca3](https://github.com/KleinPerkins/chaos-scheduler/commit/ea52ca3a5fdacbab3999057c3e674c066069d1d4))
+* **scheduler:** make environment the authoritative workflow partition ([#99](https://github.com/KleinPerkins/chaos-scheduler/issues/99)) ([683263c](https://github.com/KleinPerkins/chaos-scheduler/commit/683263ce7bf067167ea5e70eacae2f7ad9620c91))
+
 ## [0.5.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v0.4.0...chaos-scheduler-v0.5.0) (2026-07-06)
 
 
