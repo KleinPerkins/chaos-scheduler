@@ -475,6 +475,20 @@ fn read_existing_managed_token(config_path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Build a backup path for invalid-JSON config content. A timestamp alone is
+/// only second-granular, so two invalid-JSON encounters within the same
+/// second (e.g. two rapid re-provision retries) would collide and silently
+/// overwrite each other's backup; a uuid suffix guarantees uniqueness
+/// regardless of timing while the timestamp keeps the filename
+/// human-sortable.
+fn invalid_json_backup_path(config_path: &Path) -> PathBuf {
+    config_path.with_extension(format!(
+        "json.invalid-{}-{}",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S"),
+        uuid::Uuid::new_v4()
+    ))
+}
+
 /// Non-destructively merge the managed `chaos-scheduler` entry into
 /// `~/.cursor/mcp.json`: preserves every other entry, backs up before
 /// writing, writes atomically, and refuses to clobber a pre-existing
@@ -493,10 +507,7 @@ pub fn merge_mcp_config(
 ) -> Result<MergeOutcome, String> {
     let mut root: serde_json::Value = match std::fs::read_to_string(config_path) {
         Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| {
-            let backup = config_path.with_extension(format!(
-                "json.invalid-{}",
-                chrono::Utc::now().format("%Y%m%dT%H%M%S")
-            ));
+            let backup = invalid_json_backup_path(config_path);
             let _ = std::fs::copy(config_path, &backup);
             serde_json::json!({})
         }),
@@ -1687,6 +1698,62 @@ exit 0
         let after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
         assert!(is_managed_entry(&after["mcpServers"]["chaos-scheduler"]));
+    }
+
+    /// Regression test for the "invalid-JSON backup filenames collide at
+    /// 1-second granularity" finding: two separate invalid-JSON encounters
+    /// landing within the same wall-clock second (entirely plausible for two
+    /// rapid-fire re-provision attempts) must each get their own backup file
+    /// rather than the second silently overwriting the first.
+    #[test]
+    fn merge_never_collides_invalid_json_backups_within_the_same_second() {
+        let dir = tmpdir();
+        let config = dir.join("mcp.json");
+
+        std::fs::write(&config, "{ not valid json (first)").unwrap();
+        merge_mcp_config(
+            &config,
+            "id",
+            "/bin/node",
+            "/cli.js",
+            "http://x",
+            "tok",
+            false,
+        )
+        .unwrap();
+
+        // Force the config back into an invalid state so the second merge
+        // call hits the same invalid-JSON backup path again.
+        std::fs::write(&config, "{ not valid json (second)").unwrap();
+        merge_mcp_config(
+            &config,
+            "id",
+            "/bin/node",
+            "/cli.js",
+            "http://x",
+            "tok",
+            false,
+        )
+        .unwrap();
+
+        let mut backups: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains("invalid"))
+            .collect();
+        assert_eq!(
+            backups.len(),
+            2,
+            "two separate invalid-JSON encounters must produce two distinct backups, \
+             not silently overwrite each other"
+        );
+        backups.sort_by_key(|e| e.file_name());
+        let contents: Vec<String> = backups
+            .iter()
+            .map(|e| std::fs::read_to_string(e.path()).unwrap())
+            .collect();
+        assert!(contents.contains(&"{ not valid json (first)".to_string()));
+        assert!(contents.contains(&"{ not valid json (second)".to_string()));
     }
 
     #[test]
