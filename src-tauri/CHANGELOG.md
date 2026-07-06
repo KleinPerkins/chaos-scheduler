@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v0.4.0...chaos-scheduler-tauri-v0.5.0) (2026-07-06)
+
+
+### Features
+
+* **email:** named email profiles for workflow failure alerts ([#95](https://github.com/KleinPerkins/chaos-scheduler/issues/95)) ([fd48423](https://github.com/KleinPerkins/chaos-scheduler/commit/fd48423a16cfae410a4ef5d40603d21ff20d8cc8))
+
 ## [0.4.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v0.3.1...chaos-scheduler-tauri-v0.4.0) (2026-07-06)
 
 
