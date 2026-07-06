@@ -8,12 +8,26 @@
 //! trait, and time/process side effects are abstracted via [`Clock`] and
 //! [`ProcessRunner`] so the core is testable in isolation.
 
-use crate::db::{Database, Workflow};
+use crate::db::{Database, EmailProfile, Workflow};
 use crate::operators::OperatorRegistry;
 use crate::workflow_spec::{WorkflowKind, WorkflowSpec};
 use chrono::{DateTime, Utc};
 use std::process::Output;
 use std::sync::Arc;
+
+/// Sentinel that replaces a stored SMTP password whenever a profile leaves the
+/// service boundary. Clients echo it back unchanged to keep the existing
+/// secret; any other value is treated as a new password.
+pub const MASKED_SECRET: &str = "••••••••";
+
+/// Mask a profile's SMTP password for read/return paths. A blank password is
+/// left blank so clients can distinguish "no secret set" from "secret hidden".
+fn mask_email_profile(mut profile: EmailProfile) -> EmailProfile {
+    if !profile.smtp_password.is_empty() {
+        profile.smtp_password = MASKED_SECRET.to_string();
+    }
+    profile
+}
 
 /// Desktop notification sink. `DesktopNotifier` bridges to Tauri; tests and
 /// headless contexts use `NoopNotifier`.
@@ -532,6 +546,67 @@ impl SchedulerService {
             .map_err(|e| ServiceError::Internal(e.to_string()))
     }
 
+    // --- Email profiles (named, reusable SMTP delivery configs) -------------
+    //
+    // Business logic (password masking on read + mask-echo restoration on
+    // write) lives here so every adapter — Tauri IPC, REST, SDK, MCP — shares
+    // one implementation instead of reimplementing the secret handling.
+
+    pub fn list_email_profiles(&self) -> ServiceResult<Vec<EmailProfile>> {
+        Ok(self
+            .db
+            .list_email_profiles()?
+            .into_iter()
+            .map(mask_email_profile)
+            .collect())
+    }
+
+    /// Upsert a profile. A profile whose `smtp_password` is the mask sentinel
+    /// keeps its previously-stored password (so clients can round-trip a masked
+    /// profile without leaking or clobbering the secret). The returned profile
+    /// is masked.
+    pub fn save_email_profile(&self, mut profile: EmailProfile) -> ServiceResult<EmailProfile> {
+        if profile.name.trim().is_empty() {
+            return Err(ServiceError::Validation(
+                "email profile name is required".into(),
+            ));
+        }
+        if profile.smtp_password == MASKED_SECRET {
+            profile.smtp_password = if profile.id.trim().is_empty() {
+                String::new()
+            } else {
+                self.db
+                    .get_email_profile(&profile.id)
+                    .map(|p| p.smtp_password)
+                    .unwrap_or_default()
+            };
+        }
+        let saved = self
+            .db
+            .upsert_email_profile(&profile)
+            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+        Ok(mask_email_profile(saved))
+    }
+
+    pub fn delete_email_profile(&self, id: &str) -> ServiceResult<()> {
+        self.db
+            .delete_email_profile(id)
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
+    /// Select (or clear, with `None`/blank) the email profile a workflow uses
+    /// for failure alerts.
+    pub fn set_workflow_email_profile(
+        &self,
+        workflow_id: &str,
+        profile_id: Option<&str>,
+    ) -> ServiceResult<()> {
+        let profile_id = profile_id.filter(|s| !s.trim().is_empty());
+        self.db
+            .set_workflow_email_profile(workflow_id, profile_id)
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
     pub fn list_workflows(&self) -> ServiceResult<Vec<Workflow>> {
         Ok(self.db.list_workflows()?)
     }
@@ -924,6 +999,93 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("chaos-core-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn email_profile(name: &str, password: &str) -> EmailProfile {
+        EmailProfile {
+            id: String::new(),
+            name: name.to_string(),
+            enabled: true,
+            alert_email: "alerts@example.com".to_string(),
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 587,
+            smtp_user: "mailer".to_string(),
+            smtp_password: password.to_string(),
+            from_address: "from@example.com".to_string(),
+            from_name: "Chaos".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn email_profile_masks_on_read_and_preserves_secret_on_mask_echo() {
+        let dir = tmpdir();
+        let svc = service(&dir);
+
+        // Save with a real password: the returned profile is masked, but the
+        // stored secret is intact.
+        let saved = svc
+            .save_email_profile(email_profile("Primary", "realpw"))
+            .unwrap();
+        assert_eq!(saved.smtp_password, MASKED_SECRET);
+        assert_eq!(
+            svc.db().get_email_profile(&saved.id).unwrap().smtp_password,
+            "realpw"
+        );
+
+        // List is masked and never leaks the secret.
+        let listed = svc.list_email_profiles().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].smtp_password, MASKED_SECRET);
+
+        // Echoing the mask back keeps the stored secret; a real value replaces it.
+        let mut echo = saved.clone();
+        echo.name = "Renamed".to_string();
+        echo.smtp_password = MASKED_SECRET.to_string();
+        svc.save_email_profile(echo).unwrap();
+        let stored = svc.db().get_email_profile(&saved.id).unwrap();
+        assert_eq!(stored.smtp_password, "realpw");
+        assert_eq!(stored.name, "Renamed");
+
+        let mut replace = saved.clone();
+        replace.smtp_password = "newpw".to_string();
+        svc.save_email_profile(replace).unwrap();
+        assert_eq!(
+            svc.db().get_email_profile(&saved.id).unwrap().smtp_password,
+            "newpw"
+        );
+
+        // A blank-name profile is rejected.
+        assert!(matches!(
+            svc.save_email_profile(email_profile("  ", "x")),
+            Err(ServiceError::Validation(_))
+        ));
+
+        // Selection + delete round-trip.
+        let wf = svc.create_workflow(draft("wf", "instance"), false).unwrap();
+        svc.set_workflow_email_profile(&wf.id, Some(&saved.id))
+            .unwrap();
+        assert_eq!(
+            svc.db()
+                .get_workflow(&wf.id)
+                .unwrap()
+                .email_profile_id
+                .as_deref(),
+            Some(saved.id.as_str())
+        );
+        svc.set_workflow_email_profile(&wf.id, None).unwrap();
+        assert!(svc
+            .db()
+            .get_workflow(&wf.id)
+            .unwrap()
+            .email_profile_id
+            .is_none());
+
+        svc.delete_email_profile(&saved.id).unwrap();
+        assert!(svc.list_email_profiles().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn spec() -> crate::workflow_spec::WorkflowSpec {

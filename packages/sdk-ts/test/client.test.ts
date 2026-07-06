@@ -300,6 +300,109 @@ describe("ChaosSchedulerClient", () => {
     expect(calls[0]!.url).toBe(`${BASE}/api/v1/workflows/w1`);
   });
 
+  it("lists and creates email profiles, unwrapping the envelopes", async () => {
+    const masked = {
+      id: "ep1",
+      name: "Primary",
+      enabled: true,
+      alert_email: "a@e.com",
+      smtp_host: "smtp.e.com",
+      smtp_port: 587,
+      smtp_user: "u",
+      smtp_password: "••••••••",
+      from_address: "f@e.com",
+      from_name: "N",
+      created_at: "",
+      updated_at: "",
+    };
+    const { fetch, calls } = fakeFetch((req) => {
+      if (req.method === "POST") {
+        return {
+          status: 200,
+          json: { email_profile: { ...masked, id: "ep2" } },
+        };
+      }
+      return { status: 200, json: { email_profiles: [masked] } };
+    });
+    const client = new ChaosSchedulerClient({
+      baseUrl: BASE,
+      apiKey: "id.secret",
+      fetch,
+    });
+
+    const listed = await client.listEmailProfiles();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]!.smtp_password).toBe("••••••••");
+    expect(calls[0]!.url).toBe(`${BASE}/api/v1/email-profiles`);
+
+    const created = await client.createEmailProfile({
+      name: "Primary",
+      enabled: true,
+      alert_email: "a@e.com",
+      smtp_host: "smtp.e.com",
+      smtp_port: 587,
+      smtp_user: "u",
+      smtp_password: "realpw",
+      from_address: "f@e.com",
+      from_name: "N",
+    });
+    expect(created.id).toBe("ep2");
+    expect(calls[1]!.method).toBe("POST");
+    expect(JSON.parse(calls[1]!.body!).smtp_password).toBe("realpw");
+  });
+
+  it("updates and deletes an email profile and selects it onto a workflow", async () => {
+    const { fetch, calls } = fakeFetch((req) => {
+      if (req.method === "DELETE")
+        return { status: 200, json: { deleted: "ep1" } };
+      if (req.url.endsWith("/email-profile")) {
+        return {
+          status: 200,
+          json: { workflow_id: "w1", email_profile_id: "ep1" },
+        };
+      }
+      return {
+        status: 200,
+        json: {
+          email_profile: {
+            id: "ep1",
+            name: "Renamed",
+            smtp_password: "••••••••",
+          },
+        },
+      };
+    });
+    const client = new ChaosSchedulerClient({
+      baseUrl: BASE,
+      apiKey: "id.secret",
+      fetch,
+    });
+
+    await client.updateEmailProfile("ep1", {
+      name: "Renamed",
+      enabled: true,
+      alert_email: "a@e.com",
+      smtp_host: "smtp.e.com",
+      smtp_port: 587,
+      smtp_user: "u",
+      smtp_password: "••••••••",
+      from_address: "f@e.com",
+      from_name: "N",
+    });
+    expect(calls[0]!.method).toBe("PATCH");
+    expect(calls[0]!.url).toBe(`${BASE}/api/v1/email-profiles/ep1`);
+
+    const sel = await client.setWorkflowEmailProfile("w1", "ep1");
+    expect(sel.email_profile_id).toBe("ep1");
+    expect(calls[1]!.method).toBe("POST");
+    expect(calls[1]!.url).toBe(`${BASE}/api/v1/workflows/w1/email-profile`);
+    expect(JSON.parse(calls[1]!.body!).profile_id).toBe("ep1");
+
+    const del = await client.deleteEmailProfile("ep1");
+    expect(del.deleted).toBe("ep1");
+    expect(calls[2]!.method).toBe("DELETE");
+  });
+
   it("reruns a workflow with source run and idempotency key", async () => {
     const { fetch, calls } = fakeFetch(() => ({
       status: 200,

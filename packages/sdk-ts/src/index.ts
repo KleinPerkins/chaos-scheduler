@@ -43,7 +43,7 @@ export type {
   InboundDispatchHeaderOptions,
   SignaturePayload,
 } from "./webhook.js";
-export { isDuplicateDispatch } from "./types.js";
+export { isDuplicateDispatch, MASKED_SECRET } from "./types.js";
 export type {
   ActionSpec,
   ApiScope,
@@ -51,6 +51,8 @@ export type {
   DispatchOutcome,
   DispatchResult,
   DuplicateDispatch,
+  EmailProfile,
+  EmailProfileInput,
   Environment,
   GenericSpec,
   QueueInfo,

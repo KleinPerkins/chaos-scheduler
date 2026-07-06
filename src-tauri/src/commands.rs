@@ -1857,47 +1857,29 @@ pub fn test_email_config(state: State<AppState>) -> Result<serde_json::Value, St
     send_email_alert(&config, None, "test")
 }
 
-fn mask_profile_password(mut profile: EmailProfile) -> EmailProfile {
-    if !profile.smtp_password.is_empty() {
-        profile.smtp_password = "••••••••".to_string();
-    }
-    profile
-}
-
 #[tauri::command]
 pub fn list_email_profiles(state: State<AppState>) -> Result<Vec<EmailProfile>, String> {
-    let profiles = state.db.list_email_profiles().map_err(|e| e.to_string())?;
-    Ok(profiles.into_iter().map(mask_profile_password).collect())
+    state
+        .service
+        .list_email_profiles()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn save_email_profile(
     state: State<AppState>,
-    mut profile: EmailProfile,
+    profile: EmailProfile,
 ) -> Result<EmailProfile, String> {
-    // Restore the stored password when the client echoes back the mask.
-    if profile.smtp_password == "••••••••" {
-        profile.smtp_password = if profile.id.trim().is_empty() {
-            String::new()
-        } else {
-            state
-                .db
-                .get_email_profile(&profile.id)
-                .map(|p| p.smtp_password)
-                .unwrap_or_default()
-        };
-    }
-    let saved = state
-        .db
-        .upsert_email_profile(&profile)
-        .map_err(|e| e.to_string())?;
-    Ok(mask_profile_password(saved))
+    state
+        .service
+        .save_email_profile(profile)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn delete_email_profile(state: State<AppState>, id: String) -> Result<(), String> {
     state
-        .db
+        .service
         .delete_email_profile(&id)
         .map_err(|e| e.to_string())
 }
@@ -1918,9 +1900,8 @@ pub fn set_workflow_email_profile(
     workflow_id: String,
     profile_id: Option<String>,
 ) -> Result<(), String> {
-    let profile_id = profile_id.filter(|s| !s.trim().is_empty());
     state
-        .db
+        .service
         .set_workflow_email_profile(&workflow_id, profile_id.as_deref())
         .map_err(|e| e.to_string())
 }

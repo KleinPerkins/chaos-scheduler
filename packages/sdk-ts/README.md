@@ -165,30 +165,39 @@ SDK's test suite against a cross-implementation vector shared with the backend.
 
 Client methods (all return typed models):
 
-| Method                       | Endpoint                               | Scope |
-| ---------------------------- | -------------------------------------- | ----- |
-| `getHealth()`                | `GET /api/v1/health`                   | —     |
-| `getVersion()`               | `GET /api/v1/version`                  | —     |
-| `listEnvironments()`         | `GET /api/v1/environments`             | read  |
-| `createEnvironment(input)`   | `POST /api/v1/environments`            | write |
-| `listWorkflows()`            | `GET /api/v1/workflows`                | read  |
-| `getWorkflow(id)`            | `GET /api/v1/workflows/{id}`           | read  |
-| `registerWorkflow(input)`    | `POST /api/v1/workflows`               | write |
-| `deleteWorkflow(id)`         | `DELETE /api/v1/workflows/{id}`        | write |
-| `setWorkflowSpec(id, spec)`  | `POST /api/v1/workflows/{id}/spec`     | write |
-| `runWorkflow(id, opts)`      | `POST /api/v1/workflows/{id}/run`      | write |
-| `enqueueWorkflow(id, opts)`  | `POST /api/v1/workflows/{id}/enqueue`  | write |
-| `dispatchWorkflow(id, opts)` | `POST /api/v1/workflows/{id}/dispatch` | write |
-| `listRuns(id)`               | `GET /api/v1/workflows/{id}/runs`      | read  |
-| `getRun(id)`                 | `GET /api/v1/runs/{id}`                | read  |
-| `getRunLogs(id)`             | `GET /api/v1/runs/{id}/logs`           | read  |
-| `getRunTasks(id)`            | `GET /api/v1/runs/{id}/tasks`          | read  |
-| `getRunMetrics(id)`          | `GET /api/v1/runs/{id}/metrics`        | read  |
-| `listQueues()`               | `GET /api/v1/queues`                   | read  |
-| `listQueuedRuns()`           | `GET /api/v1/queued-runs`              | read  |
-| `updateWorkflow(id, input)`  | `PATCH /api/v1/workflows/{id}`         | write |
-| `rerunWorkflow(id, opts)`    | `POST /api/v1/workflows/{id}/rerun`    | write |
-| `waitForRun(runId, opts)`    | polls `GET /api/v1/runs/{id}`          | read  |
+| Method                                   | Endpoint                                    | Scope |
+| ---------------------------------------- | ------------------------------------------- | ----- |
+| `getHealth()`                            | `GET /api/v1/health`                        | —     |
+| `getVersion()`                           | `GET /api/v1/version`                       | —     |
+| `listEnvironments()`                     | `GET /api/v1/environments`                  | read  |
+| `createEnvironment(input)`               | `POST /api/v1/environments`                 | write |
+| `listWorkflows()`                        | `GET /api/v1/workflows`                     | read  |
+| `getWorkflow(id)`                        | `GET /api/v1/workflows/{id}`                | read  |
+| `registerWorkflow(input)`                | `POST /api/v1/workflows`                    | write |
+| `deleteWorkflow(id)`                     | `DELETE /api/v1/workflows/{id}`             | write |
+| `setWorkflowSpec(id, spec)`              | `POST /api/v1/workflows/{id}/spec`          | write |
+| `runWorkflow(id, opts)`                  | `POST /api/v1/workflows/{id}/run`           | write |
+| `enqueueWorkflow(id, opts)`              | `POST /api/v1/workflows/{id}/enqueue`       | write |
+| `dispatchWorkflow(id, opts)`             | `POST /api/v1/workflows/{id}/dispatch`      | write |
+| `listRuns(id)`                           | `GET /api/v1/workflows/{id}/runs`           | read  |
+| `getRun(id)`                             | `GET /api/v1/runs/{id}`                     | read  |
+| `getRunLogs(id)`                         | `GET /api/v1/runs/{id}/logs`                | read  |
+| `getRunTasks(id)`                        | `GET /api/v1/runs/{id}/tasks`               | read  |
+| `getRunMetrics(id)`                      | `GET /api/v1/runs/{id}/metrics`             | read  |
+| `listQueues()`                           | `GET /api/v1/queues`                        | read  |
+| `listQueuedRuns()`                       | `GET /api/v1/queued-runs`                   | read  |
+| `updateWorkflow(id, input)`              | `PATCH /api/v1/workflows/{id}`              | write |
+| `rerunWorkflow(id, opts)`                | `POST /api/v1/workflows/{id}/rerun`         | write |
+| `listEmailProfiles()`                    | `GET /api/v1/email-profiles`                | read  |
+| `createEmailProfile(input)`              | `POST /api/v1/email-profiles`               | write |
+| `updateEmailProfile(id, in)`             | `PATCH /api/v1/email-profiles/{id}`         | write |
+| `deleteEmailProfile(id)`                 | `DELETE /api/v1/email-profiles/{id}`        | write |
+| `setWorkflowEmailProfile(id, profileId)` | `POST /api/v1/workflows/{id}/email-profile` | write |
+| `waitForRun(runId, opts)`                | polls `GET /api/v1/runs/{id}`               | read  |
+
+Email-profile `smtp_password` values are masked (`••••••••`, exported as
+`MASKED_SECRET`) on read; echo the mask back on update to preserve the stored
+secret, or send a new value to replace it.
 
 `waitForRun` throws if the run does not reach a terminal status before
 `timeoutMs` (default 300000) elapses; catch the error to distinguish a slow run
