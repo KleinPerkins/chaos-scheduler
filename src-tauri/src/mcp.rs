@@ -468,6 +468,13 @@ fn installed_package_dir(root: &Path) -> PathBuf {
 /// Resolve the installed CLI entrypoint by reading the package's own `bin`
 /// field, rather than hardcoding `dist/cli.js` — resilient to any future
 /// dist-layout change in `@chaos-scheduler/mcp-server`.
+///
+/// Defense-in-depth: canonicalizes the resolved path and rejects it if it
+/// escapes `package_dir` (e.g. a `bin` field containing `../../` or an
+/// absolute path). Not independently exploitable today — the `bin` field
+/// comes from a package this app itself installed via a pinned, exact npm
+/// spec — but cheap to close and protects against a future compromised
+/// registry entry smuggling a `bin` pointing outside the install root.
 pub fn resolve_cli_path(package_dir: &Path) -> Result<PathBuf, String> {
     let pkg_json_path = package_dir.join("package.json");
     let raw = std::fs::read_to_string(&pkg_json_path)
@@ -486,7 +493,22 @@ pub fn resolve_cli_path(package_dir: &Path) -> Result<PathBuf, String> {
             .to_string(),
         _ => return Err("unexpected package.json \"bin\" shape".to_string()),
     };
-    Ok(package_dir.join(rel))
+    let candidate = package_dir.join(&rel);
+
+    let canonical_package_dir = package_dir
+        .canonicalize()
+        .map_err(|e| format!("canonicalizing {}: {e}", package_dir.display()))?;
+    let canonical_candidate = candidate
+        .canonicalize()
+        .map_err(|e| format!("canonicalizing {}: {e}", candidate.display()))?;
+    if !canonical_candidate.starts_with(&canonical_package_dir) {
+        return Err(format!(
+            "package.json \"bin\" entry {rel:?} resolves outside the package directory \
+             ({})",
+            canonical_candidate.display()
+        ));
+    }
+    Ok(canonical_candidate)
 }
 
 fn npm_install(
@@ -505,6 +527,13 @@ fn npm_install(
             "--no-audit",
             "--no-fund",
             "--no-save",
+            // Defense against npm's classic supply-chain attack vector:
+            // mcp-server has no native/build-step dependency that needs a
+            // lifecycle script, and this install runs non-interactively
+            // (including silently from the startup re-provision thread), so
+            // there is no legitimate reason to execute arbitrary
+            // preinstall/postinstall code from any package in the tree.
+            "--ignore-scripts",
             &spec,
         ])
         .output()
@@ -1029,6 +1058,63 @@ exit 0
         );
     }
 
+    /// A fake `npm` that behaves like [`write_fake_npm`] but also appends its
+    /// full argv (one per line) to `record_path`, so a test can assert on
+    /// exactly which flags `npm_install` invoked it with.
+    fn write_recording_fake_npm(path: &Path, installed_version: &str, record_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$@" >> "{record}"
+prefix=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--prefix" ]; then prefix="$arg"; fi
+  prev="$arg"
+done
+mkdir -p "$prefix/node_modules/@chaos-scheduler/mcp-server/dist"
+cat > "$prefix/node_modules/@chaos-scheduler/mcp-server/package.json" <<EOF
+{{"name":"@chaos-scheduler/mcp-server","version":"{installed_version}","bin":{{"chaos-mcp-server":"./dist/cli.js"}}}}
+EOF
+echo "// fixture" > "$prefix/node_modules/@chaos-scheduler/mcp-server/dist/cli.js"
+exit 0
+"#,
+                record = record_path.display()
+            ),
+        );
+    }
+
+    /// Regression test for the "npm install runs with lifecycle scripts
+    /// enabled" finding: `npm_install` must always pass `--ignore-scripts`,
+    /// closing the standard npm supply-chain `postinstall` attack vector —
+    /// this install runs non-interactively, including from the silent
+    /// startup re-provision thread.
+    #[test]
+    fn npm_install_always_passes_ignore_scripts() {
+        let dir = tmpdir();
+        let node_path = dir.join("bin").join("node");
+        let npm_path = dir.join("bin").join("npm");
+        write_fake_node(&node_path, "v20.11.0");
+        let record_path = dir.join("npm-invocations.log");
+        write_recording_fake_npm(&npm_path, "0.5.0", &record_path);
+
+        let prefix = dir.join("install-prefix");
+        npm_install(
+            &npm_path.to_string_lossy(),
+            &node_path.to_string_lossy(),
+            &prefix,
+            "0.5.0",
+        )
+        .unwrap();
+
+        let recorded = std::fs::read_to_string(&record_path).unwrap();
+        assert!(
+            recorded.lines().any(|arg| arg == "--ignore-scripts"),
+            "npm_install must pass --ignore-scripts, got args: {recorded:?}"
+        );
+    }
+
     fn fake_runtime(dir: &Path, node_version: &str, npm_kind: &str) -> RuntimePaths {
         let bin = dir.join("bin");
         let node_path = bin.join("node");
@@ -1361,8 +1447,13 @@ exit 0
             r#"{"name":"x","bin":{"chaos-mcp-server":"./dist/cli.js"}}"#,
         )
         .unwrap();
+        std::fs::create_dir_all(dir.join("dist")).unwrap();
+        std::fs::write(dir.join("dist").join("cli.js"), "// fixture").unwrap();
 
-        assert_eq!(resolve_cli_path(&dir).unwrap(), dir.join("./dist/cli.js"));
+        assert_eq!(
+            resolve_cli_path(&dir).unwrap(),
+            dir.canonicalize().unwrap().join("dist").join("cli.js")
+        );
     }
 
     #[test]
@@ -1371,6 +1462,56 @@ exit 0
         std::fs::write(dir.join("package.json"), r#"{"name":"x"}"#).unwrap();
 
         assert!(resolve_cli_path(&dir).is_err());
+    }
+
+    /// Regression test for the "no path-escape validation" finding: a
+    /// malicious/compromised `bin` field pointing outside the installed
+    /// package directory (via `..` traversal) must be rejected rather than
+    /// silently resolved and later executed.
+    #[test]
+    fn resolve_cli_path_rejects_a_bin_entry_that_escapes_the_package_dir() {
+        let root = tmpdir();
+        let package_dir = root.join("node_modules").join("mcp-server");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        // A file outside package_dir that a malicious "bin" could point at.
+        std::fs::write(root.join("outside.js"), "// secret").unwrap();
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"x","bin":{"chaos-mcp-server":"../../outside.js"}}"#,
+        )
+        .unwrap();
+
+        let result = resolve_cli_path(&package_dir);
+        assert!(
+            result.is_err(),
+            "a bin entry escaping the package dir must be rejected, got {result:?}"
+        );
+    }
+
+    /// Same escape check, but via an absolute path in `bin` (Rust's
+    /// `PathBuf::join` replaces the whole path when the joined component is
+    /// absolute, so this is a distinct code path from the `..` case above).
+    #[test]
+    fn resolve_cli_path_rejects_an_absolute_bin_entry_outside_the_package_dir() {
+        let root = tmpdir();
+        let package_dir = root.join("node_modules").join("mcp-server");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        let outside = root.join("outside.js");
+        std::fs::write(&outside, "// secret").unwrap();
+        std::fs::write(
+            package_dir.join("package.json"),
+            format!(
+                r#"{{"name":"x","bin":{{"chaos-mcp-server":"{}"}}}}"#,
+                outside.to_string_lossy().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+
+        let result = resolve_cli_path(&package_dir);
+        assert!(
+            result.is_err(),
+            "an absolute bin entry outside the package dir must be rejected, got {result:?}"
+        );
     }
 
     // --- end-to-end provision/remove (fake node/npm, no network) --------

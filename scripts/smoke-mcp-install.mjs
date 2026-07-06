@@ -42,10 +42,14 @@ console.log(
   `Installing ${pkgSpec} into a clean consumer project: ${projectDir}`,
 );
 try {
-  execFileSync("npm", ["install", "--no-audit", "--no-fund", pkgSpec], {
-    cwd: projectDir,
-    stdio: "inherit",
-  });
+  execFileSync(
+    "npm",
+    ["install", "--no-audit", "--no-fund", "--ignore-scripts", pkgSpec],
+    {
+      cwd: projectDir,
+      stdio: "inherit",
+    },
+  );
 } catch {
   console.error(
     `::error::npm install failed for ${pkgSpec} — see output above.`,
