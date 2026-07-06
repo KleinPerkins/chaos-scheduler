@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v0.3.0...mcp-server-v0.4.0) (2026-07-06)
+
+
+### Features
+
+* **mcp-server:** advertise server icon + website in MCP handshake ([#91](https://github.com/KleinPerkins/chaos-scheduler/issues/91)) ([538bd89](https://github.com/KleinPerkins/chaos-scheduler/commit/538bd8990aadbd78ccd4c5333d91b397a48781da))
+
 ## [0.3.0](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v0.2.0...mcp-server-v0.3.0) (2026-07-05)
 
 
