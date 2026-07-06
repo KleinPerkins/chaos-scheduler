@@ -164,26 +164,26 @@ pub struct WorkflowDraft {
     pub async_mode: bool,
     pub email_on_failure: bool,
     pub timezone: String,
-    /// Legacy partition/governance value, retained as a shadow. New callers
-    /// should set `environment`; `corpus` defaults from it for back-compat.
-    pub corpus: String,
     /// First-class environment (authoritative partition). May be any registered
-    /// environment name. Defaults to `corpus` when not explicitly provided.
-    pub environment: Option<String>,
+    /// environment name (e.g. `instance`, `staging`, `prod`, or a per-org
+    /// container). Governance is carried separately by the `managed` flag on
+    /// the create/update call, not by the environment name.
+    pub environment: String,
     pub domain: Option<String>,
     pub trigger_config: Option<String>,
     pub queue_config: Option<String>,
 }
 
 impl WorkflowDraft {
-    /// The effective environment (partition) for this draft.
+    /// The effective environment (partition) for this draft. Falls back to
+    /// `instance` when a caller leaves it blank.
     fn effective_environment(&self) -> String {
-        self.environment
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.corpus.clone())
+        let trimmed = self.environment.trim();
+        if trimmed.is_empty() {
+            "instance".to_string()
+        } else {
+            trimmed.to_string()
+        }
     }
 }
 
@@ -630,11 +630,6 @@ impl SchedulerService {
     /// passes `false` and is blocked from minting managed definitions.
     pub fn create_workflow(&self, draft: WorkflowDraft, managed: bool) -> ServiceResult<Workflow> {
         self.validate_draft(&draft)?;
-        if !managed && draft.corpus == "source" {
-            return Err(ServiceError::Governance(
-                "source-corpus workflow definitions are source-controlled; create instance workflows from the Scheduler UI".into(),
-            ));
-        }
         let environment = draft.effective_environment();
         self.ensure_environment_target_writable(&environment, "create workflow")?;
         let workflow = self
@@ -647,21 +642,13 @@ impl SchedulerService {
                 draft.async_mode,
                 draft.email_on_failure,
                 &draft.timezone,
-                &draft.corpus,
+                &environment,
                 draft.domain.as_deref(),
                 draft.trigger_config.as_deref(),
                 draft.queue_config.as_deref(),
             )
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
-        // The authoritative environment may differ from the legacy corpus (e.g.
-        // a UI workflow targeting a user-created environment).
         let mut needs_reload = false;
-        if environment != workflow.environment {
-            self.db
-                .set_workflow_environment(&workflow.id, &environment)
-                .map_err(|e| ServiceError::Internal(e.to_string()))?;
-            needs_reload = true;
-        }
         // Governance is decoupled from the environment string: the API path may
         // register a managed workflow in any environment.
         if managed != workflow.managed_externally {
@@ -707,7 +694,7 @@ impl SchedulerService {
             && Self::managed_definition_changed(&existing, &draft)
         {
             return Err(ServiceError::Governance(
-                "source-corpus workflow definitions are source-controlled; only enabled, email, and timezone runtime preferences are editable in the Scheduler UI".into(),
+                "externally-managed workflow definitions are source-controlled; only enabled, email, and timezone runtime preferences are editable in the Scheduler UI".into(),
             ));
         }
         let environment = draft.effective_environment();
@@ -724,18 +711,12 @@ impl SchedulerService {
                 draft.async_mode,
                 draft.email_on_failure,
                 &draft.timezone,
-                &draft.corpus,
+                &environment,
                 draft.domain.as_deref(),
                 draft.trigger_config.as_deref(),
                 draft.queue_config.as_deref(),
             )
             .map_err(|e| ServiceError::Internal(e.to_string()))?;
-        if environment != updated.environment {
-            self.db
-                .set_workflow_environment(id, &environment)
-                .map_err(|e| ServiceError::Internal(e.to_string()))?;
-            return self.get_workflow(id);
-        }
         Ok(updated)
     }
 
@@ -746,7 +727,7 @@ impl SchedulerService {
         self.ensure_environment_target_writable(&existing.environment, "delete workflow")?;
         if !force && self.is_managed_externally(&existing) {
             return Err(ServiceError::Governance(
-                "source-corpus workflows are source-controlled; remove them from the product registry instead of deleting from the Scheduler UI".into(),
+                "externally-managed workflows are source-controlled; remove them from the product registry instead of deleting from the Scheduler UI".into(),
             ));
         }
         self.db
@@ -923,7 +904,7 @@ mod tests {
         )
     }
 
-    fn draft(name: &str, corpus: &str) -> WorkflowDraft {
+    fn draft(name: &str, environment: &str) -> WorkflowDraft {
         WorkflowDraft {
             name: name.to_string(),
             description: None,
@@ -932,8 +913,7 @@ mod tests {
             async_mode: false,
             email_on_failure: true,
             timezone: "UTC".to_string(),
-            corpus: corpus.to_string(),
-            environment: None,
+            environment: environment.to_string(),
             domain: None,
             trigger_config: None,
             queue_config: None,
@@ -970,13 +950,15 @@ mod tests {
     }
 
     #[test]
-    fn ui_cannot_create_source_managed_workflow() {
+    fn ui_create_is_never_externally_managed() {
+        // Governance is decoupled from the environment name: a UI-originated
+        // create (managed = false) is never externally-managed, even when it
+        // targets an environment that happens to be named "source".
         let dir = tmpdir();
         let svc = service(&dir);
-        let err = svc
-            .create_workflow(draft("wf", "source"), false)
-            .unwrap_err();
-        assert!(matches!(err, ServiceError::Governance(_)));
+        let wf = svc.create_workflow(draft("wf", "source"), false).unwrap();
+        assert!(!svc.is_managed_externally(&wf));
+        assert_eq!(wf.environment, "source");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1088,8 +1070,7 @@ mod tests {
         let db = Arc::new(Database::new(&dir));
         let svc = service_with_db(db.clone(), vec!["prod"], false);
 
-        let mut draft_prod = draft("prod wf", "instance");
-        draft_prod.environment = Some("prod".into());
+        let draft_prod = draft("prod wf", "prod");
         assert!(matches!(
             svc.create_workflow(draft_prod.clone(), false).unwrap_err(),
             ServiceError::Governance(_)
@@ -1159,8 +1140,7 @@ mod tests {
             .create_environment("prod", None, None, None, None, None)
             .unwrap();
         assert_eq!(env.name, "prod");
-        let mut d = draft("prod wf", "instance");
-        d.environment = Some("prod".into());
+        let d = draft("prod wf", "prod");
         assert!(svc.create_workflow(d, false).is_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1169,12 +1149,11 @@ mod tests {
     fn create_workflow_targets_explicit_environment() {
         let dir = tmpdir();
         let svc = service(&dir);
-        let mut d = draft("wf", "instance");
-        d.environment = Some("staging".to_string());
+        let d = draft("wf", "staging");
         let wf = svc.create_workflow(d, false).unwrap();
         assert_eq!(wf.environment, "staging");
-        // corpus retained as legacy shadow; governance unaffected (not managed).
-        assert_eq!(wf.corpus, "instance");
+        // `corpus` mirrors `environment` during the migration window.
+        assert_eq!(wf.corpus, "staging");
         assert!(!wf.managed_externally);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1184,8 +1163,7 @@ mod tests {
         let dir = tmpdir();
         let svc = service(&dir);
         let wf = svc.create_workflow(draft("wf", "instance"), false).unwrap();
-        let mut d = draft("wf", "instance");
-        d.environment = Some("staging".to_string());
+        let d = draft("wf", "staging");
         let updated = svc.update_workflow(&wf.id, true, d, false).unwrap();
         assert_eq!(updated.environment, "staging");
         let _ = std::fs::remove_dir_all(dir);

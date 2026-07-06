@@ -1627,17 +1627,21 @@ impl Database {
         async_mode: bool,
         email_on_failure: bool,
         timezone: &str,
-        corpus: &str,
+        environment: &str,
         domain: Option<&str>,
         trigger_config: Option<&str>,
         queue_config: Option<&str>,
     ) -> rusqlite::Result<Workflow> {
         let id = uuid::Uuid::new_v4().to_string();
         let conn = self.conn()?;
-        let managed = if corpus == "source" { 1 } else { 0 };
+        // `environment` is the authoritative partition. The legacy `corpus`
+        // column is written to the same value as a shadow for the remainder of
+        // the migration window (dropped in a later cleanup migration).
+        // Governance (`managed_externally`) is decoupled and set explicitly by
+        // the service layer, never derived from the environment name.
         conn.execute(
             "INSERT INTO workflows (id, name, description, script_path, cron_schedule, async_mode, email_on_failure, timezone, corpus, environment, managed_externally, domain, trigger_config, queue_config) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![id, name, description, script_path, cron_schedule, async_mode as i32, email_on_failure as i32, timezone, corpus, corpus, managed, domain, trigger_config, queue_config],
+            params![id, name, description, script_path, cron_schedule, async_mode as i32, email_on_failure as i32, timezone, environment, environment, 0i32, domain, trigger_config, queue_config],
         )?;
         self.get_workflow(&id)
     }
@@ -1654,28 +1658,19 @@ impl Database {
         async_mode: bool,
         email_on_failure: bool,
         timezone: &str,
-        corpus: &str,
+        environment: &str,
         domain: Option<&str>,
         trigger_config: Option<&str>,
         queue_config: Option<&str>,
     ) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
+        // `environment` is authoritative; the legacy `corpus` column is kept in
+        // sync as a shadow until the cleanup migration drops it.
         conn.execute(
             "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, corpus = ?10, environment = ?10, domain = ?11, trigger_config = ?12, queue_config = ?13, updated_at = datetime('now') WHERE id = ?1",
-            params![id, name, description, script_path, cron_schedule, enabled as i32, async_mode as i32, email_on_failure as i32, timezone, corpus, domain, trigger_config, queue_config],
+            params![id, name, description, script_path, cron_schedule, enabled as i32, async_mode as i32, email_on_failure as i32, timezone, environment, domain, trigger_config, queue_config],
         )?;
         self.get_workflow(id)
-    }
-
-    /// Set a workflow's authoritative `environment` (partition). Used when a
-    /// UI/API caller targets an environment distinct from the legacy corpus.
-    pub fn set_workflow_environment(&self, id: &str, environment: &str) -> rusqlite::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "UPDATE workflows SET environment = ?2, updated_at = datetime('now') WHERE id = ?1",
-            params![id, environment],
-        )?;
-        Ok(())
     }
 
     /// Explicitly set the governance flag, decoupled from `corpus`. Used by the
