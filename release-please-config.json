@@ -25,6 +25,10 @@
           "type": "json",
           "path": "src-tauri/tauri.conf.json",
           "jsonpath": "$.version"
+        },
+        {
+          "type": "generic",
+          "path": "src/lib/branding.ts"
         }
       ]
     },
