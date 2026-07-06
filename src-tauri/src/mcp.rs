@@ -60,6 +60,33 @@ pub struct McpState {
     pub lock: Mutex<()>,
 }
 
+/// Single-flight lock acquisition shared by every entry point that touches
+/// `McpState::lock` (the `provision_mcp_integration` / `remove_mcp_integration`
+/// commands and the startup re-provision hook).
+///
+/// `Mutex::try_lock` conflates two very different situations under one
+/// `Err`: "someone else legitimately holds the lock right now"
+/// (`WouldBlock`) and "a previous holder panicked while holding it"
+/// (`Poisoned`). Treating both as "busy" — the naive
+/// `try_lock().map_err(|_| "already in progress")` this module used to use
+/// at all three call sites — means a single panic anywhere under the lock
+/// (now, or in any future change) permanently bricks MCP provisioning with a
+/// misleading "already in progress" error until the app is restarted, since
+/// every future call re-observes the same poisoned mutex. `update.rs`
+/// already recovers from poison on its (blocking) lock; this does the same
+/// for `McpState`'s non-blocking one: only `WouldBlock` is reported as
+/// "busy", while `Poisoned` is recovered via `into_inner()` (the guarded
+/// value is `()`, so there is no partially-mutated state to distrust).
+pub fn try_lock_recovering(
+    state: &McpState,
+) -> Result<std::sync::MutexGuard<'_, ()>, &'static str> {
+    match state.lock.try_lock() {
+        Ok(guard) => Ok(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => Err("MCP provisioning is already in progress"),
+    }
+}
+
 /// The exact `mcp-server` version this desktop build was smoke-tested and
 /// stamped against by release CI (see docs/RELEASING.md "Release ordering +
 /// package-installability gate"). Compiled in via `include_str!` so the
@@ -959,11 +986,14 @@ pub fn spawn_reprovision_on_startup(app: tauri::AppHandle) {
             }
         };
         let mcp_state = app.state::<McpState>();
-        let Ok(_guard) = mcp_state.lock.try_lock() else {
-            log::info!(
-                "Skipping startup MCP re-provision: a provisioning call is already in flight"
-            );
-            return;
+        let _guard = match try_lock_recovering(&mcp_state) {
+            Ok(guard) => guard,
+            Err(_) => {
+                log::info!(
+                    "Skipping startup MCP re-provision: a provisioning call is already in flight"
+                );
+                return;
+            }
         };
         let service = app.state::<crate::commands::AppState>().service.clone();
         if let Err(err) = provision(&app_data_dir, &service, &config_path, false) {
@@ -1129,6 +1159,54 @@ exit 0
             npm_path: npm_path.to_string_lossy().into_owned(),
             node_version: node_version.to_string(),
         }
+    }
+
+    // --- McpState lock poison recovery ----------------------------------
+
+    /// Regression test for the "mutex-poisoning is unhandled" finding: a
+    /// panic anywhere while holding `McpState::lock` (e.g. in some future
+    /// change) must not permanently brick every future provision/remove
+    /// call with a misleading "already in progress" error — the lock must
+    /// be recoverable, exactly like `update.rs`'s snapshot lock already is.
+    #[test]
+    fn try_lock_recovering_recovers_from_a_poisoned_lock() {
+        let state = Arc::new(McpState::default());
+
+        // Poison the lock by panicking on another thread while holding it.
+        let poisoner = Arc::clone(&state);
+        let handle = std::thread::spawn(move || {
+            let _guard = poisoner.lock.lock().unwrap();
+            panic!("simulated panic while holding McpState::lock");
+        });
+        assert!(handle.join().is_err(), "the poisoner thread must panic");
+        assert!(
+            state.lock.is_poisoned(),
+            "the mutex must be poisoned after the panic"
+        );
+
+        // A subsequent call must still succeed rather than reporting "busy"
+        // — a `std::sync::Mutex` stays flagged `is_poisoned()` forever once
+        // poisoned (there is no automatic un-poisoning), so every future
+        // acquisition must independently recover, not just the first one.
+        for _ in 0..2 {
+            let result = try_lock_recovering(&state);
+            assert!(
+                result.is_ok(),
+                "try_lock_recovering must recover from poison, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn try_lock_recovering_reports_busy_when_genuinely_held() {
+        let state = McpState::default();
+        let _held = state.lock.try_lock().unwrap();
+
+        let result = try_lock_recovering(&state);
+        assert_eq!(
+            result.err(),
+            Some("MCP provisioning is already in progress")
+        );
     }
 
     // --- pinned version -----------------------------------------------
