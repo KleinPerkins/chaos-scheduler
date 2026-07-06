@@ -71,13 +71,140 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Release ordering: sdk-ts -> mcp-server -> [consumer install smoke] -> desktop.
+  # publish-mcp is a real npm dependent of the sdk (see its own "pin the exact
+  # published semver" step), so it must not race publish-sdk. `needs` + a
+  # success-or-skipped guard enforces sdk-first without forcing publish-mcp to
+  # run when only the SDK released.
+  # ---------------------------------------------------------------------------
+  publish-sdk:
+    name: npm publish @chaos-scheduler/sdk
+    if: ${{ inputs.publish_sdk }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # required for npm provenance
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sdk_tag }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+      - name: Build
+        working-directory: packages/sdk-ts
+        run: |
+          npm ci
+          npm run build
+      - name: Publish (with provenance)
+        working-directory: packages/sdk-ts
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # npm: publish the MCP server with provenance.
+  # The committed dependency `@chaos-scheduler/sdk: file:../sdk-ts` (a local dev
+  # link) is rewritten to the published semver just before publishing so the
+  # tarball on npm depends on the real package. The build is done against the
+  # local sdk (built here) to avoid any npm-propagation race. Gated on
+  # publish-sdk having succeeded or been skipped (sdk-ts -> mcp-server order).
+  # ---------------------------------------------------------------------------
+  publish-mcp:
+    name: npm publish @chaos-scheduler/mcp-server
+    if: ${{ inputs.publish_mcp && (needs.publish-sdk.result == 'success' || needs.publish-sdk.result == 'skipped') }}
+    needs: [publish-sdk]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # required for npm provenance
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.mcp_tag }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+      - name: Build sdk (local dependency of mcp-server)
+        working-directory: packages/sdk-ts
+        run: |
+          npm ci
+          npm run build
+      - name: Build mcp-server (against local sdk)
+        working-directory: packages/mcp-server
+        run: |
+          npm ci
+          npm run build
+      - name: Pin @chaos-scheduler/sdk to the published semver
+        run: |
+          SDK_VERSION=$(node -p "require('./packages/sdk-ts/package.json').version")
+          export SDK_VERSION
+          node -e "const fs=require('fs');const p='packages/mcp-server/package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.dependencies['@chaos-scheduler/sdk']='^'+process.env.SDK_VERSION;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n');"
+          echo "Rewrote @chaos-scheduler/sdk dependency to ^$SDK_VERSION"
+      - name: Publish (with provenance)
+        working-directory: packages/mcp-server
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Consumer-install smoke gate: proves the exact pinned mcp-server version is
+  # installable by a clean npm consumer and resolves the SDK from the registry
+  # (not file:../sdk-ts), *before* the desktop build stamps that version as the
+  # one it provisions. Runs whenever a desktop build needs a pin to validate,
+  # or whenever mcp-server was freshly published (validate it standalone even
+  # on a package-only release with no desktop bump).
+  #
+  # The target version is read from packages/mcp-server/package.json at the
+  # relevant tag — for a desktop-only release (no mcp bump this run) that file
+  # still reflects the last-released mcp-server version, since this is a
+  # monorepo: whichever version was last actually published is what the
+  # desktop build should keep pinning.
+  # ---------------------------------------------------------------------------
+  mcp-consumer-smoke:
+    name: Consumer-install smoke (@chaos-scheduler/mcp-server)
+    if: ${{ (inputs.build_desktop || inputs.publish_mcp) && (needs.publish-mcp.result == 'success' || needs.publish-mcp.result == 'skipped') }}
+    needs: [publish-sdk, publish-mcp]
+    runs-on: ubuntu-latest
+    outputs:
+      mcp_version: ${{ steps.resolve.outputs.mcp_version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Prefer the mcp release tag when one exists this run; otherwise the
+          # desktop tag's checkout still has the last-published version in
+          # packages/mcp-server/package.json (monorepo, shared history).
+          ref: ${{ inputs.mcp_tag != '' && inputs.mcp_tag || inputs.desktop_tag }}
+      - name: Resolve target mcp-server version
+        id: resolve
+        run: |
+          MCP_VERSION=$(node -p "require('./packages/mcp-server/package.json').version")
+          echo "Target pinned version: $MCP_VERSION"
+          echo "mcp_version=$MCP_VERSION" >> "$GITHUB_OUTPUT"
+      # Test against the package's documented floor (engines.node >=18), not
+      # whatever newer version .nvmrc pins for everyday dev/CI — that's the
+      # actual compatibility claim this gate is verifying.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "18"
+      - name: npm-consumer install + CLI smoke
+        run: node scripts/smoke-mcp-install.mjs "${{ steps.resolve.outputs.mcp_version }}"
+
+  # ---------------------------------------------------------------------------
   # Desktop app: signed + notarized, hardened-runtime, universal macOS binary.
   # Uploads the .dmg (initial install) + .app.tar.gz + .sig + latest.json
-  # (updater) to the GitHub Release created by release-please.
+  # (updater) to the GitHub Release created by release-please. Gated on the
+  # consumer-install smoke check above, so the desktop build never stamps an
+  # mcp-server version it hasn't proven installable.
   # ---------------------------------------------------------------------------
   build-macos:
     name: macOS desktop (signed + notarized, universal)
-    if: ${{ inputs.build_desktop }}
+    if: ${{ inputs.build_desktop && needs.mcp-consumer-smoke.result == 'success' }}
+    needs: [mcp-consumer-smoke]
     runs-on: macos-14
     environment: release
     permissions:
@@ -103,6 +230,17 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      # Managed MCP provisioning invariant (docs/RELEASING.md "Managed MCP/SDK
+      # coherence"): the desktop build only ever embeds an mcp-server version
+      # that mcp-consumer-smoke has already proven installable from npm. This
+      # file is compiled into the binary via `include_str!` (src-tauri/src/mcp.rs)
+      # — never committed back, just stamped into this ephemeral checkout right
+      # before the build that will read it.
+      - name: Stamp pinned MCP version into the desktop build
+        run: |
+          echo "${{ needs.mcp-consumer-smoke.outputs.mcp_version }}" > src-tauri/mcp-pinned-version.txt
+          echo "Stamped src-tauri/mcp-pinned-version.txt -> ${{ needs.mcp-consumer-smoke.outputs.mcp_version }}"
 
       - name: Resolve GitHub Release id for tag
         id: rel
@@ -158,76 +296,45 @@ jobs:
             --latest
 
   # ---------------------------------------------------------------------------
-  # npm: publish the TypeScript SDK with provenance.
+  # Guard against a package-only release (sdk-ts / mcp-server, no desktop bump)
+  # stealing GitHub's "Latest" flag. build-macos only re-pins "Latest" when it
+  # runs; a release that publishes only npm packages never runs build-macos, so
+  # a component release (sdk-ts-v* / mcp-server-v*) can transiently grab
+  # "Latest" from the desktop release and 404 the updater endpoint (see
+  # docs/RELEASING.md "Residual edge case"). This job automates the previously
+  # manual `gh release edit <desktop> --latest` recovery whenever that happens.
+  # No-ops (and does not need the `release` environment/secrets) when there is
+  # nothing to fix.
   # ---------------------------------------------------------------------------
-  publish-sdk:
-    name: npm publish @chaos-scheduler/sdk
-    if: ${{ inputs.publish_sdk }}
+  guard-latest-for-package-only-release:
+    name: Guard GitHub "Latest" (package-only release)
+    if: ${{ always() && !inputs.build_desktop && (inputs.publish_sdk || inputs.publish_mcp) }}
+    needs: [publish-sdk, publish-mcp]
     runs-on: ubuntu-latest
-    environment: release
     permissions:
-      contents: read
-      id-token: write # required for npm provenance
+      contents: write
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.sdk_tag }}
-      - uses: actions/setup-node@v6
-        with:
-          node-version-file: .nvmrc
-          registry-url: https://registry.npmjs.org
-      - name: Build
-        working-directory: packages/sdk-ts
-        run: |
-          npm ci
-          npm run build
-      - name: Publish (with provenance)
-        working-directory: packages/sdk-ts
-        run: npm publish --provenance --access public
+      - name: Re-pin "Latest" to the most recent desktop release if it drifted
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-  # ---------------------------------------------------------------------------
-  # npm: publish the MCP server with provenance.
-  # The committed dependency `@chaos-scheduler/sdk: file:../sdk-ts` (a local dev
-  # link) is rewritten to the published semver just before publishing so the
-  # tarball on npm depends on the real package. The build is done against the
-  # local sdk (built here) to avoid any npm-propagation race.
-  # ---------------------------------------------------------------------------
-  publish-mcp:
-    name: npm publish @chaos-scheduler/mcp-server
-    if: ${{ inputs.publish_mcp }}
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      contents: read
-      id-token: write # required for npm provenance
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.mcp_tag }}
-      - uses: actions/setup-node@v6
-        with:
-          node-version-file: .nvmrc
-          registry-url: https://registry.npmjs.org
-      - name: Build sdk (local dependency of mcp-server)
-        working-directory: packages/sdk-ts
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          npm ci
-          npm run build
-      - name: Build mcp-server (against local sdk)
-        working-directory: packages/mcp-server
-        run: |
-          npm ci
-          npm run build
-      - name: Pin @chaos-scheduler/sdk to the published semver
-        run: |
-          SDK_VERSION=$(node -p "require('./packages/sdk-ts/package.json').version")
-          export SDK_VERSION
-          node -e "const fs=require('fs');const p='packages/mcp-server/package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.dependencies['@chaos-scheduler/sdk']='^'+process.env.SDK_VERSION;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n');"
-          echo "Rewrote @chaos-scheduler/sdk dependency to ^$SDK_VERSION"
-      - name: Publish (with provenance)
-        working-directory: packages/mcp-server
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          set -euo pipefail
+          current_latest=$(gh release list --repo "$REPO" --limit 50 \
+            --json tagName,isLatest --jq '.[] | select(.isLatest) | .tagName')
+          # Desktop releases are tagged chaos-scheduler-v<version> (root
+          # component); this excludes the linked chaos-scheduler-tauri-v* and
+          # the independent sdk-ts-v* / mcp-server-v* tags.
+          desktop_tag=$(gh release list --repo "$REPO" --limit 50 \
+            --json tagName,createdAt --jq \
+            '[.[] | select(.tagName | test("^chaos-scheduler-v[0-9]"))] | sort_by(.createdAt) | last | .tagName // ""')
+          if [ -z "$desktop_tag" ]; then
+            echo "No desktop release exists yet; nothing to guard."
+            exit 0
+          fi
+          if [ "$current_latest" != "$desktop_tag" ]; then
+            echo "GitHub 'Latest' ($current_latest) drifted from the desktop release ($desktop_tag) after a package-only release — re-pinning."
+            gh release edit "$desktop_tag" --repo "$REPO" --latest
+          else
+            echo "GitHub 'Latest' already points at the desktop release ($desktop_tag); nothing to do."
+          fi
