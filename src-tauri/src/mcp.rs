@@ -911,8 +911,6 @@ fn provision_with_runtime(
         }
         mint_key(service)?
     };
-    manifest.managed_id = Some(managed_id.clone());
-    manifest.managed_key_id = Some(key_id.clone());
 
     let staging = mcp_root(app_data_dir).join(format!("staging-{pinned}-{}", uuid::Uuid::new_v4()));
     let stage_result = npm_install(&runtime.npm_path, &runtime.node_path, &staging, &pinned)
@@ -924,6 +922,17 @@ fn provision_with_runtime(
 
     if let Err(err) = stage_result {
         let _ = std::fs::remove_dir_all(&staging);
+        // Deliberately do NOT persist `managed_id`/`managed_key_id` here: a
+        // newly-minted `key_id` only becomes the source of truth once it's
+        // actually embedded in `mcp.json` by a successful merge below. If we
+        // saved it now, `manifest.managed_key_id` would point at a live key
+        // while `mcp.json` still (or never) carries its token — the next
+        // launch's `key_is_alive` check would then see a live key, treat the
+        // stale/absent config as "already current", and silently report a
+        // healthy status while every real MCP call 401s. Leaving the old
+        // value in place means a revoked old key is correctly seen as dead
+        // on the next attempt, so re-provision keeps retrying instead of
+        // falsely settling into "healthy".
         manifest.last_error = Some(err.clone());
         manifest.enabled = true;
         manifest.save(app_data_dir)?;
@@ -959,6 +968,13 @@ fn provision_with_runtime(
             check_api_reachable(),
         ));
     }
+
+    // Only now — after `mcp.json` itself has actually been written with this
+    // `key_id`'s token — is it safe to make `managed_key_id` the source of
+    // truth for "the live config is correct". See the comment on the
+    // staging-failure branch above for why this can't happen any earlier.
+    manifest.managed_id = Some(managed_id.clone());
+    manifest.managed_key_id = Some(key_id.clone());
 
     // Only prune the previous version now that the new one is staged,
     // smoke-checked, promoted, and registered in Cursor.
@@ -1976,6 +1992,94 @@ exit 0
         );
         assert!(status_after.last_error.is_some());
         assert_eq!(status_after.provisioned_version.as_deref(), Some("0.4.0"));
+    }
+
+    /// Regression test for the "managed-token/key-id desync" finding: a
+    /// successful provision followed by an out-of-band key revocation and
+    /// then a *staging failure* on re-provision must never leave the status
+    /// reporting healthy/current. Before the fix, `provision_with_runtime`
+    /// minted the replacement key and persisted `manifest.managed_key_id`
+    /// to point at it *before* attempting staging/install — so a staging
+    /// failure after the mint left `manifest.managed_key_id` pointing at a
+    /// live key while `mcp.json` still held the dead, revoked token, and
+    /// every subsequent status check (including the next launch's
+    /// `already_current` fast path) saw "a live key is tracked" and reported
+    /// healthy, even though every real MCP call would 401 against the dead
+    /// token still embedded in `mcp.json`.
+    #[test]
+    fn provision_does_not_report_healthy_after_key_revocation_and_a_failed_reprovision() {
+        let app_data_dir = tmpdir();
+        let config_path = tmpdir().join("mcp.json");
+        let service_dir = tmpdir();
+        let service = test_service(&service_dir);
+
+        let good_runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+        let first =
+            provision_with_runtime(&app_data_dir, &service, &config_path, &good_runtime, false)
+                .expect("first provision should succeed");
+        assert!(first.matches, "first provision must report healthy");
+        let original_key_id = first.managed_key_id.clone().expect("a key must be minted");
+
+        // Simulate the managed key being revoked out-of-band (e.g. the user
+        // rotated/revoked it directly), independent of any app-side call.
+        service
+            .revoke_api_key(&original_key_id)
+            .expect("revoking the key out-of-band must succeed");
+        assert!(!key_is_alive(&service, &original_key_id));
+
+        // Re-provision now sees the tracked key is dead, mints a replacement
+        // *before* staging even begins — then staging itself fails (broken
+        // npm fixture: install succeeds but the package has no `bin` field,
+        // so `resolve_cli_path`/`smoke_check` fail), exactly the "unrelated
+        // transient failure after the mint" sequence from the finding.
+        let broken_runtime = fake_runtime(&tmpdir(), "v20.11.0", "broken");
+        let reprovision_result = provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &broken_runtime,
+            false,
+        );
+        assert!(
+            reprovision_result.is_err(),
+            "the forced staging failure must surface as an error"
+        );
+
+        // The critical assertion: a status computed as of "the next launch"
+        // must NOT report the integration as matching/healthy — the dead
+        // token is still all that's in `mcp.json`, so `key_alive` for
+        // whatever key the manifest tracks must be false, `already_current`
+        // (in a subsequent provision call) must not fast-path, and any UI
+        // reading status must see something is wrong rather than "healthy".
+        let status_after = status_with(
+            &app_data_dir,
+            &service,
+            &config_path,
+            Some(&broken_runtime),
+            false,
+        );
+        assert!(
+            !status_after.matches,
+            "status must not report healthy/current after a failed re-provision \
+             following an out-of-band key revocation, got {status_after:?}"
+        );
+        assert!(
+            status_after.last_error.is_some(),
+            "the failure must be surfaced via last_error, not silently swallowed"
+        );
+
+        // And a subsequent re-provision attempt (simulating the next launch's
+        // startup hook, this time succeeding) must actually retry rather
+        // than taking the `already_current` fast path.
+        let healed =
+            provision_with_runtime(&app_data_dir, &service, &config_path, &good_runtime, false)
+                .expect("a later successful re-provision must be able to self-heal");
+        assert!(healed.matches, "self-heal must result in a healthy status");
+        assert_ne!(
+            healed.managed_key_id.as_deref(),
+            Some(original_key_id.as_str()),
+            "self-heal must mint a fresh key rather than reusing the revoked one"
+        );
     }
 
     #[test]
