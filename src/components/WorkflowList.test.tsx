@@ -31,7 +31,12 @@ describe("WorkflowList", () => {
     };
 
     render(
-      <WorkflowList onEdit={() => {}} onNew={() => {}} onHistory={() => {}} />,
+      <WorkflowList
+        onOpen={() => {}}
+        onEdit={() => {}}
+        onNew={() => {}}
+        onHistory={() => {}}
+      />,
     );
 
     await waitFor(() =>
@@ -50,7 +55,12 @@ describe("WorkflowList", () => {
     };
 
     render(
-      <WorkflowList onEdit={() => {}} onNew={() => {}} onHistory={() => {}} />,
+      <WorkflowList
+        onOpen={() => {}}
+        onEdit={() => {}}
+        onNew={() => {}}
+        onHistory={() => {}}
+      />,
     );
 
     await waitFor(() =>
