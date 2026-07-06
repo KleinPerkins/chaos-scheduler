@@ -145,9 +145,9 @@ export default function OperatorConfigForm({
             <span className="editor-label">Repository</span>
             <input
               type="text"
-              value={str(config, "repo")}
+              value={str(config, "repository")}
               disabled={disabled}
-              onChange={(e) => setConfig({ repo: e.target.value })}
+              onChange={(e) => setConfig({ repository: e.target.value })}
               placeholder="org/repo"
             />
           </label>

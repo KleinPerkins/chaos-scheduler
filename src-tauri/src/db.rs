@@ -2381,6 +2381,24 @@ impl Database {
         Ok(id)
     }
 
+    /// Update a still-running task's `details_json` without touching status or
+    /// `finished_at`. Used to persist interim progress (e.g. a remote agent/run
+    /// id) before a long-running operator's poll loop begins, so a crash or
+    /// kill mid-execution still leaves a traceable record.
+    pub fn update_run_task_details(
+        &self,
+        task_row_id: &str,
+        details: &serde_json::Value,
+    ) -> rusqlite::Result<()> {
+        let details_json = json_to_string(Some(details))?;
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE run_tasks SET details_json = ?2, updated_at = datetime('now') WHERE id = ?1",
+            params![task_row_id, details_json],
+        )?;
+        Ok(())
+    }
+
     pub fn finish_run_task(
         &self,
         task_row_id: &str,

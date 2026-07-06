@@ -62,7 +62,16 @@ pub struct OperatorContext<'a> {
     pub http: &'a dyn HttpClient,
     pub secrets: &'a dyn SecretResolver,
     pub workspace_root: &'a str,
+    /// Called by an operator to report interim progress (e.g. a remote
+    /// agent/run id) before a long-running poll loop begins, so a crash or
+    /// kill mid-execution still leaves a traceable record. No-op by default.
+    pub on_progress: &'a dyn Fn(&Value),
 }
+
+/// An `on_progress` that discards every update; used by operators/tests that
+/// have nothing worth persisting mid-execution.
+#[allow(dead_code)] // Used by test `OperatorContext` construction below.
+pub fn noop_progress(_progress: &Value) {}
 
 /// The result of running an operator.
 #[derive(Debug, Clone)]
@@ -476,10 +485,19 @@ pub struct CursorAgentOperator;
 
 const CURSOR_DEFAULT_API_BASE: &str = "https://api.cursor.com";
 const CURSOR_DEFAULT_SECRET: &str = "cursor_api_key";
-const CURSOR_DEFAULT_POLL_ATTEMPTS: u64 = 150;
-const CURSOR_MAX_POLL_ATTEMPTS: u64 = 300;
+// Real coding-agent runs (clone + edit + test + push) commonly take well
+// beyond a few minutes; the default budget is sized at ~10 minutes
+// (300 * 2s) so normal-length tasks don't hit `POLL_EXHAUSTED` prematurely,
+// with room to opt into a longer budget (up to the max) via config for
+// slower tasks.
+const CURSOR_DEFAULT_POLL_ATTEMPTS: u64 = 300;
+const CURSOR_MAX_POLL_ATTEMPTS: u64 = 600;
 const CURSOR_DEFAULT_POLL_INTERVAL_MS: u64 = 2_000;
 const CURSOR_MAX_POLL_INTERVAL_MS: u64 = 30_000;
+// A single flaky GET (transient network error or a 429/5xx from Cursor's
+// API) shouldn't nuke a multi-minute agent run; retry a bounded number of
+// *consecutive* transient failures with exponential backoff before giving up.
+const CURSOR_MAX_CONSECUTIVE_POLL_FAILURES: u32 = 5;
 
 impl CursorAgentOperator {
     fn mode(config: &Value) -> &str {
@@ -500,6 +518,12 @@ impl CursorAgentOperator {
                 return OperatorOutcome::failure("cursor_agent cloud mode requires a `repository`")
             }
         };
+        // Defense in depth: `validate()` already checks this at registration
+        // time, but a spec created before this check existed (or edited
+        // directly in the DB) could reach execution unvalidated.
+        if let Err(e) = validate_cursor_repository(&repository) {
+            return OperatorOutcome::failure(e);
+        }
         let api_base = CURSOR_DEFAULT_API_BASE;
         let secret_name = config
             .get("api_key_secret")
@@ -513,24 +537,31 @@ impl CursorAgentOperator {
         // Authorization carries the secret; never include it in summaries/details.
         let headers = vec![("authorization".to_string(), format!("Bearer {api_key}"))];
 
-        // Build the launch payload (Cursor Cloud Agents v1).
-        let mut source = serde_json::json!({ "repository": repository });
+        // Build the launch payload (Cursor Cloud Agents v1: `POST /v1/agents`).
+        // `repos[0].url` must be a full GitHub URL; accept an `owner/repo`
+        // shorthand for convenience and normalize it.
+        let repo_url = if repository.starts_with("http://") || repository.starts_with("https://") {
+            repository.clone()
+        } else {
+            format!("https://github.com/{repository}")
+        };
+        let mut repo_entry = serde_json::json!({ "url": repo_url });
         if let Some(git_ref) = config.get("ref").and_then(|v| v.as_str()) {
-            source["ref"] = Value::String(git_ref.to_string());
+            repo_entry["startingRef"] = Value::String(git_ref.to_string());
         }
         let mut payload = serde_json::json!({
             "prompt": { "text": prompt },
-            "source": source,
+            "repos": [repo_entry],
         });
         if let Some(model) = config.get("model").and_then(|v| v.as_str()) {
-            payload["model"] = Value::String(model.to_string());
+            payload["model"] = serde_json::json!({ "id": model });
         }
         if config
             .get("auto_create_pr")
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
         {
-            payload["target"] = serde_json::json!({ "autoCreatePr": true });
+            payload["autoCreatePR"] = Value::Bool(true);
         }
 
         let launch = match ctx
@@ -546,24 +577,45 @@ impl CursorAgentOperator {
             }
             Err(e) => return OperatorOutcome::failure(format!("cursor_agent: launch error: {e}")),
         };
-        let agent_id = match launch.body.get("id").and_then(|v| v.as_str()) {
+        // The create response nests the durable agent and its initial run:
+        // `{ "agent": { "id": ... }, "run": { "id": ..., "status": ... } }`.
+        let agent_id = match launch.body["agent"]["id"].as_str() {
             Some(id) => id.to_string(),
             None => {
                 return OperatorOutcome::failure("cursor_agent: launch response missing agent id")
             }
         };
+        let run_id = match launch.body["run"]["id"].as_str() {
+            Some(id) => id.to_string(),
+            None => {
+                return OperatorOutcome::failure("cursor_agent: launch response missing run id")
+            }
+        };
 
-        // Poll for completion. (SSE is the documented streaming channel; polling
-        // is the primary, GA-safe path used here per the plan.)
+        // Persist the remote identifiers *before* the (possibly multi-minute)
+        // poll loop starts, so a scheduler kill mid-poll still leaves a
+        // traceable record of which Cursor Cloud Agent run this local run
+        // corresponds to (rather than only recording it on completion).
+        (ctx.on_progress)(&serde_json::json!({
+            "mode": "cloud",
+            "agent_id": agent_id,
+            "run_id": run_id,
+        }));
+
+        // Poll for completion. Execution status lives on the *run*, not the
+        // agent (the agent's own `status` stays `ACTIVE` across runs) — SSE is
+        // the documented streaming channel; polling `GET .../runs/{run_id}` is
+        // the primary, GA-safe path used here per the plan.
         let poll_attempts =
             clamp_cursor_poll_attempts(config.get("poll_attempts").and_then(|v| v.as_u64()));
         let poll_interval_ms =
             clamp_cursor_poll_interval_ms(config.get("poll_interval_ms").and_then(|v| v.as_u64()));
 
-        let status_url = format!("{api_base}/v1/agents/{agent_id}");
-        let mut last_body = launch.body.clone();
-        let mut terminal_status = status_str(&launch.body);
+        let status_url = format!("{api_base}/v1/agents/{agent_id}/runs/{run_id}");
+        let mut last_body = launch.body["run"].clone();
+        let mut terminal_status = status_str(&last_body);
         if !is_terminal(&terminal_status) {
+            let mut consecutive_poll_failures: u32 = 0;
             for attempt in 0..poll_attempts {
                 if crate::scheduler::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                     terminal_status = "POLL_EXHAUSTED".to_string();
@@ -576,11 +628,27 @@ impl CursorAgentOperator {
                 }
                 match ctx.http.get_json(&status_url, &headers) {
                     Ok(resp) if resp.is_success() => {
+                        consecutive_poll_failures = 0;
                         terminal_status = status_str(&resp.body);
                         last_body = resp.body;
                         if is_terminal(&terminal_status) {
                             break;
                         }
+                    }
+                    // A single flaky GET (rate-limited or a transient server
+                    // error) shouldn't fail a whole multi-minute run; retry
+                    // with bounded exponential backoff before giving up.
+                    Ok(resp) if is_retryable_poll_status(resp.status) => {
+                        consecutive_poll_failures += 1;
+                        if consecutive_poll_failures > CURSOR_MAX_CONSECUTIVE_POLL_FAILURES {
+                            return OperatorOutcome::failure(format!(
+                                "cursor_agent: poll failed repeatedly (status {}) after {consecutive_poll_failures} consecutive attempts",
+                                resp.status
+                            ));
+                        }
+                        crate::scheduler::sleep_interruptible(std::time::Duration::from_millis(
+                            poll_retry_backoff_ms(poll_interval_ms, consecutive_poll_failures),
+                        ));
                     }
                     Ok(resp) => {
                         return OperatorOutcome::failure(format!(
@@ -589,7 +657,15 @@ impl CursorAgentOperator {
                         ))
                     }
                     Err(e) => {
-                        return OperatorOutcome::failure(format!("cursor_agent: poll error: {e}"))
+                        consecutive_poll_failures += 1;
+                        if consecutive_poll_failures > CURSOR_MAX_CONSECUTIVE_POLL_FAILURES {
+                            return OperatorOutcome::failure(format!(
+                                "cursor_agent: poll error after {consecutive_poll_failures} consecutive attempts: {e}"
+                            ));
+                        }
+                        crate::scheduler::sleep_interruptible(std::time::Duration::from_millis(
+                            poll_retry_backoff_ms(poll_interval_ms, consecutive_poll_failures),
+                        ));
                     }
                 }
             }
@@ -599,13 +675,17 @@ impl CursorAgentOperator {
         }
 
         let success = is_success_status(&terminal_status);
+        // `git` is a per-agent snapshot returned on the run body once a branch
+        // has been pushed: `{ branches: [{ repoUrl, branch?, prUrl? }] }`.
         let pr_url = last_body
-            .get("target")
-            .and_then(|t| t.get("prUrl"))
+            .get("git")
+            .and_then(|g| g.get("branches"))
+            .and_then(|b| b.as_array())
+            .and_then(|branches| branches.iter().find_map(|b| b.get("prUrl")))
             .and_then(|v| v.as_str())
             .map(str::to_string);
         let summary_text = last_body
-            .get("summary")
+            .get("result")
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| format!("cursor_agent {agent_id} -> {terminal_status}"));
@@ -615,6 +695,7 @@ impl CursorAgentOperator {
             details: serde_json::json!({
                 "mode": "cloud",
                 "agent_id": agent_id,
+                "run_id": run_id,
                 "status": terminal_status,
                 "poll_attempts": poll_attempts,
                 "poll_interval_ms": poll_interval_ms,
@@ -700,6 +781,63 @@ fn is_success_status(status: &str) -> bool {
     matches!(status, "FINISHED" | "COMPLETED")
 }
 
+/// Status codes worth retrying on the poll GET: rate-limiting and transient
+/// server errors. Anything else (4xx auth/not-found errors) won't be fixed by
+/// retrying, so those fail fast.
+fn is_retryable_poll_status(status: u16) -> bool {
+    status == 429 || (500..600).contains(&status)
+}
+
+/// Bounded exponential backoff for a retried poll GET, seeded from the
+/// configured poll interval. `poll_interval_ms == 0` (the "no delay" test
+/// convention) is preserved as no delay.
+fn poll_retry_backoff_ms(poll_interval_ms: u64, consecutive_failures: u32) -> u64 {
+    if poll_interval_ms == 0 {
+        return 0;
+    }
+    let multiplier = 1u64 << consecutive_failures.clamp(1, 4).saturating_sub(1); // 1,2,4,8
+    poll_interval_ms
+        .saturating_mul(multiplier)
+        .min(CURSOR_MAX_POLL_INTERVAL_MS)
+}
+
+/// Sanity-check a `cursor_agent` `repository` value before it's sent to
+/// Cursor's API. Cursor's own API is the real trust boundary (it only acts on
+/// GitHub repos it has installed access to) — this is cheap local hygiene,
+/// not a security boundary: reject embedded URL credentials, non-TLS URLs,
+/// and shorthand that doesn't actually look like `owner/repo`.
+fn validate_cursor_repository(repository: &str) -> Result<(), String> {
+    let r = repository.trim();
+    if r.is_empty() {
+        return Err("cursor_agent: `repository` must not be empty".into());
+    }
+    if r.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(
+            "cursor_agent: `repository` must not contain whitespace or control characters".into(),
+        );
+    }
+    if r.starts_with("http://") || r.starts_with("https://") {
+        if r.starts_with("http://") {
+            return Err("cursor_agent: `repository` URL must use https://".into());
+        }
+        let authority = r["https://".len()..].split('/').next().unwrap_or("");
+        if authority.is_empty() {
+            return Err("cursor_agent: `repository` URL must include a host".into());
+        }
+        if authority.contains('@') {
+            return Err(
+                "cursor_agent: `repository` URL must not contain embedded credentials".into(),
+            );
+        }
+    } else {
+        let parts: Vec<&str> = r.split('/').collect();
+        if r.starts_with('-') || parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+            return Err("cursor_agent: `repository` shorthand must look like 'owner/repo'".into());
+        }
+    }
+    Ok(())
+}
+
 impl Operator for CursorAgentOperator {
     fn operator_type(&self) -> &'static str {
         "cursor_agent"
@@ -718,8 +856,47 @@ impl Operator for CursorAgentOperator {
         }
         if mode == "cloud" {
             match config.get("repository").and_then(|v| v.as_str()) {
-                Some(r) if !r.trim().is_empty() => {}
+                Some(r) if !r.trim().is_empty() => validate_cursor_repository(r)?,
                 _ => return Err("cursor_agent cloud mode requires a `repository`".into()),
+            }
+            if let Some(v) = config.get("ref") {
+                if !v.is_string() {
+                    return Err("cursor_agent: `ref` must be a string".into());
+                }
+            }
+            if let Some(v) = config.get("model") {
+                if !v.is_string() {
+                    return Err("cursor_agent: `model` must be a string".into());
+                }
+            }
+            if let Some(v) = config.get("auto_create_pr") {
+                if !v.is_boolean() {
+                    return Err("cursor_agent: `auto_create_pr` must be a boolean".into());
+                }
+            }
+            if let Some(v) = config.get("api_key_secret") {
+                if !v.is_string() {
+                    return Err("cursor_agent: `api_key_secret` must be a string".into());
+                }
+            }
+        }
+        if let Some(v) = config.get("poll_attempts") {
+            if v.as_u64().is_none() {
+                return Err("cursor_agent: `poll_attempts` must be a non-negative integer".into());
+            }
+        }
+        if let Some(v) = config.get("poll_interval_ms") {
+            if v.as_u64().is_none() {
+                return Err(
+                    "cursor_agent: `poll_interval_ms` must be a non-negative integer".into(),
+                );
+            }
+        }
+        if mode == "cli" {
+            if let Some(v) = config.get("cli_path") {
+                if !v.is_string() {
+                    return Err("cursor_agent: `cli_path` must be a string".into());
+                }
             }
         }
         Ok(())
@@ -819,6 +996,7 @@ mod tests {
             http: &http,
             secrets: &secrets,
             workspace_root: "/tmp",
+            on_progress: &noop_progress,
         };
         // A path that certainly has no .git dir.
         let path = format!("/tmp/does-not-exist-{}", uuid::Uuid::new_v4());
@@ -885,6 +1063,7 @@ mod tests {
             http: &http,
             secrets: &secrets,
             workspace_root: &root_str,
+            on_progress: &noop_progress,
         };
         // Relative path is joined onto the workspace root.
         let outcome = GitPullOperator.execute(
@@ -923,6 +1102,7 @@ mod tests {
             http: &http,
             secrets: &secrets,
             workspace_root: &root_str,
+            on_progress: &noop_progress,
         };
         // Traversal outside the workspace root is refused before git runs.
         let outcome = GitPullOperator.execute(
@@ -951,6 +1131,7 @@ mod tests {
             http: &http,
             secrets: &secrets,
             workspace_root: &root_str,
+            on_progress: &noop_progress,
         };
         let outcome = GitPullOperator.execute(
             &ctx,
@@ -1028,6 +1209,7 @@ mod tests {
             http,
             secrets,
             workspace_root: "/tmp",
+            on_progress: &noop_progress,
         }
     }
 
@@ -1052,16 +1234,101 @@ mod tests {
     }
 
     #[test]
+    fn cursor_agent_validate_rejects_malformed_numeric_and_typed_fields() {
+        let op = CursorAgentOperator;
+        let base = |extra: Value| {
+            let mut c = serde_json::json!({
+                "mode": "cloud", "prompt": "fix", "repository": "acme/repo"
+            });
+            c.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            c
+        };
+        // poll_attempts / poll_interval_ms must be non-negative integers, not
+        // strings, floats, or negative numbers that would otherwise silently
+        // fall back to the default at execution time.
+        for bad in [
+            serde_json::json!({"poll_attempts": -5}),
+            serde_json::json!({"poll_attempts": "5"}),
+            serde_json::json!({"poll_attempts": 5.5}),
+            serde_json::json!({"poll_interval_ms": -1}),
+            serde_json::json!({"poll_interval_ms": "1000"}),
+        ] {
+            assert!(
+                op.validate(&base(bad.clone())).is_err(),
+                "expected rejection for {bad}"
+            );
+        }
+        // auto_create_pr / model / ref / api_key_secret must be the right type.
+        for bad in [
+            serde_json::json!({"auto_create_pr": "true"}),
+            serde_json::json!({"model": 123}),
+            serde_json::json!({"ref": 123}),
+            serde_json::json!({"api_key_secret": 123}),
+        ] {
+            assert!(
+                op.validate(&base(bad.clone())).is_err(),
+                "expected rejection for {bad}"
+            );
+        }
+        // Valid values of the same fields are accepted.
+        assert!(op
+            .validate(&base(serde_json::json!({
+                "poll_attempts": 10,
+                "poll_interval_ms": 500,
+                "auto_create_pr": true,
+                "model": "claude",
+                "ref": "main",
+                "api_key_secret": "cursor_api_key"
+            })))
+            .is_ok());
+        // cli_path must be a string when present in cli mode.
+        assert!(CursorAgentOperator
+            .validate(&serde_json::json!({"mode": "cli", "prompt": "p", "cli_path": 123}))
+            .is_err());
+    }
+
+    #[test]
+    fn cursor_agent_validate_repository_hygiene() {
+        for bad in [
+            "https://user:pass@github.com/acme/repo",
+            "http://github.com/acme/repo",
+            "not-a-repo-shorthand",
+            "owner/",
+            "/repo",
+            "owner/repo/extra",
+            "-owner/repo",
+            "https://",
+        ] {
+            assert!(
+                validate_cursor_repository(bad).is_err(),
+                "expected rejection for repository: {bad}"
+            );
+        }
+        for good in [
+            "acme/repo",
+            "https://github.com/acme/repo",
+            "https://ghe.internal.example.com/acme/repo",
+        ] {
+            assert!(
+                validate_cursor_repository(good).is_ok(),
+                "expected acceptance for repository: {good}"
+            );
+        }
+    }
+
+    #[test]
     fn cursor_agent_cloud_launches_polls_and_reports_pr() {
         let runner = FakeRunner {
             code: 0,
             calls: Mutex::new(vec![]),
         };
         let http = MockHttp {
-            launch: serde_json::json!({"id": "bc_123", "status": "RUNNING"}),
+            launch: serde_json::json!({"agent": {"id": "bc_123"}, "run": {"id": "run_1", "status": "RUNNING"}}),
             polls: Mutex::new(vec![
-                serde_json::json!({"id": "bc_123", "status": "RUNNING"}),
-                serde_json::json!({"id": "bc_123", "status": "FINISHED", "summary": "done", "target": {"prUrl": "https://gh/pr/1"}}),
+                serde_json::json!({"id": "run_1", "status": "RUNNING"}),
+                serde_json::json!({"id": "run_1", "status": "FINISHED", "result": "done", "git": {"branches": [{"prUrl": "https://gh/pr/1"}]}}),
             ]),
             get_count: Mutex::new(0),
             posted: Mutex::new(vec![]),
@@ -1075,21 +1342,40 @@ mod tests {
             &serde_json::json!({
                 "mode": "cloud",
                 "prompt": "fix the bug",
-                "repository": "https://github.com/acme/app",
+                "repository": "acme/app",
+                "ref": "main",
+                "model": "claude-4-sonnet-thinking",
+                "auto_create_pr": true,
                 "api_base": "https://attacker.example",
                 "poll_interval_ms": 0
             }),
         );
         assert!(outcome.success, "FINISHED => success: {}", outcome.summary);
+        assert_eq!(outcome.summary, "done");
         assert_eq!(outcome.details["agent_id"], serde_json::json!("bc_123"));
+        assert_eq!(outcome.details["run_id"], serde_json::json!("run_1"));
         assert_eq!(
             outcome.details["pr_url"],
             serde_json::json!("https://gh/pr/1")
         );
-        // The launch POST carried a Bearer auth header only to Cursor's pinned host.
+        // The launch POST carried a Bearer auth header only to Cursor's pinned
+        // host, and the body matches the real Cloud Agents v1 schema: a
+        // `repos[]` array with a full GitHub URL (a bare `owner/repo`
+        // shorthand is normalized), a `model` *object* (not a bare string),
+        // and top-level `autoCreatePR` (not nested under a `target` object —
+        // the real API rejects both a `source` key and a nested `target`).
         let posted = http.posted.lock().unwrap();
         assert_eq!(posted[0].0, "https://api.cursor.com/v1/agents");
         assert!(posted[0].2, "authorization header present");
+        assert_eq!(
+            posted[0].1,
+            serde_json::json!({
+                "prompt": { "text": "fix the bug" },
+                "repos": [{ "url": "https://github.com/acme/app", "startingRef": "main" }],
+                "model": { "id": "claude-4-sonnet-thinking" },
+                "autoCreatePR": true,
+            })
+        );
         let details_str = outcome.details.to_string();
         assert!(
             !details_str.contains("sk-secret"),
@@ -1104,7 +1390,7 @@ mod tests {
             calls: Mutex::new(vec![]),
         };
         let http = MockHttp {
-            launch: serde_json::json!({"id": "x", "status": "RUNNING"}),
+            launch: serde_json::json!({"agent": {"id": "x"}, "run": {"id": "run_x", "status": "RUNNING"}}),
             polls: Mutex::new(vec![]),
             get_count: Mutex::new(0),
             posted: Mutex::new(vec![]),
@@ -1113,7 +1399,7 @@ mod tests {
         let ctx = cursor_ctx(&runner, &http, &secrets);
         let outcome = CursorAgentOperator.execute(
             &ctx,
-            &serde_json::json!({"mode": "cloud", "prompt": "p", "repository": "r"}),
+            &serde_json::json!({"mode": "cloud", "prompt": "p", "repository": "acme/repo"}),
         );
         assert!(!outcome.success);
         assert!(outcome.summary.contains("API key"));
@@ -1128,7 +1414,7 @@ mod tests {
             calls: Mutex::new(vec![]),
         };
         let http = MockHttp {
-            launch: serde_json::json!({"id": "bc_9", "status": "ERROR"}),
+            launch: serde_json::json!({"agent": {"id": "bc_9"}, "run": {"id": "run_9", "status": "ERROR"}}),
             polls: Mutex::new(vec![]),
             get_count: Mutex::new(0),
             posted: Mutex::new(vec![]),
@@ -1139,7 +1425,7 @@ mod tests {
         let ctx = cursor_ctx(&runner, &http, &secrets);
         let outcome = CursorAgentOperator.execute(
             &ctx,
-            &serde_json::json!({"mode": "cloud", "prompt": "p", "repository": "r", "api_base": "https://mock.local"}),
+            &serde_json::json!({"mode": "cloud", "prompt": "p", "repository": "acme/repo", "api_base": "https://mock.local"}),
         );
         assert!(!outcome.success);
         assert_eq!(outcome.details["status"], serde_json::json!("ERROR"));
@@ -1152,9 +1438,9 @@ mod tests {
             calls: Mutex::new(vec![]),
         };
         let http = MockHttp {
-            launch: serde_json::json!({"id": "bc_poll", "status": "RUNNING"}),
+            launch: serde_json::json!({"agent": {"id": "bc_poll"}, "run": {"id": "run_poll", "status": "RUNNING"}}),
             polls: Mutex::new(vec![
-                serde_json::json!({"id": "bc_poll", "status": "RUNNING"}),
+                serde_json::json!({"id": "run_poll", "status": "RUNNING"}),
             ]),
             get_count: Mutex::new(0),
             posted: Mutex::new(vec![]),
@@ -1171,7 +1457,7 @@ mod tests {
             &serde_json::json!({
                 "mode": "cloud",
                 "prompt": "p",
-                "repository": "r",
+                "repository": "acme/repo",
                 "poll_attempts": 999_999,
                 "poll_interval_ms": 0
             }),
@@ -1193,6 +1479,248 @@ mod tests {
         );
     }
 
+    /// Scripted GET outcomes for retry/backoff tests: a fixed sequence, the
+    /// last entry repeating once exhausted (mirrors `MockHttp`).
+    #[derive(Clone)]
+    enum ScriptedGet {
+        Status(u16, Value),
+        Err(String),
+    }
+    struct FlakyMockHttp {
+        launch: Value,
+        gets: Mutex<Vec<ScriptedGet>>,
+        get_count: Mutex<usize>,
+    }
+    impl HttpClient for FlakyMockHttp {
+        fn post_json(
+            &self,
+            _url: &str,
+            _headers: &[(String, String)],
+            _body: &Value,
+        ) -> Result<HttpResponse, String> {
+            Ok(HttpResponse {
+                status: 200,
+                body: self.launch.clone(),
+            })
+        }
+        fn get_json(
+            &self,
+            _url: &str,
+            _headers: &[(String, String)],
+        ) -> Result<HttpResponse, String> {
+            *self.get_count.lock().unwrap() += 1;
+            let mut gets = self.gets.lock().unwrap();
+            let item = if gets.len() > 1 {
+                gets.remove(0)
+            } else {
+                gets.first()
+                    .cloned()
+                    .unwrap_or(ScriptedGet::Status(200, Value::Null))
+            };
+            match item {
+                ScriptedGet::Status(status, body) => Ok(HttpResponse { status, body }),
+                ScriptedGet::Err(e) => Err(e),
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_agent_poll_retries_transient_5xx_then_succeeds() {
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let http = FlakyMockHttp {
+            launch: serde_json::json!({"agent": {"id": "bc_flaky"}, "run": {"id": "run_flaky", "status": "RUNNING"}}),
+            gets: Mutex::new(vec![
+                ScriptedGet::Status(503, Value::Null),
+                ScriptedGet::Status(502, Value::Null),
+                ScriptedGet::Status(
+                    200,
+                    serde_json::json!({"id": "run_flaky", "status": "FINISHED", "result": "done"}),
+                ),
+            ]),
+            get_count: Mutex::new(0),
+        };
+        let mut m = HashMap::new();
+        m.insert("cursor_api_key".to_string(), "sk-flaky-secret".to_string());
+        let secrets = MapSecrets(m);
+        let ctx = cursor_ctx(&runner, &http, &secrets);
+        let outcome = CursorAgentOperator.execute(
+            &ctx,
+            &serde_json::json!({
+                "mode": "cloud",
+                "prompt": "p",
+                "repository": "acme/repo",
+                "poll_interval_ms": 0
+            }),
+        );
+        assert!(
+            outcome.success,
+            "a couple of transient 5xx polls must not fail the run: {}",
+            outcome.summary
+        );
+        assert_eq!(*http.get_count.lock().unwrap(), 3);
+        let details_str = outcome.details.to_string();
+        assert!(!details_str.contains("sk-flaky-secret"));
+    }
+
+    #[test]
+    fn cursor_agent_poll_retries_transient_network_errors_then_succeeds() {
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let http = FlakyMockHttp {
+            launch: serde_json::json!({"agent": {"id": "bc_net"}, "run": {"id": "run_net", "status": "RUNNING"}}),
+            gets: Mutex::new(vec![
+                ScriptedGet::Err("connection reset".to_string()),
+                ScriptedGet::Status(
+                    200,
+                    serde_json::json!({"id": "run_net", "status": "FINISHED", "result": "done"}),
+                ),
+            ]),
+            get_count: Mutex::new(0),
+        };
+        let mut m = HashMap::new();
+        m.insert("cursor_api_key".to_string(), "k".to_string());
+        let secrets = MapSecrets(m);
+        let ctx = cursor_ctx(&runner, &http, &secrets);
+        let outcome = CursorAgentOperator.execute(
+            &ctx,
+            &serde_json::json!({
+                "mode": "cloud",
+                "prompt": "p",
+                "repository": "acme/repo",
+                "poll_interval_ms": 0
+            }),
+        );
+        assert!(outcome.success, "a single flaky GET must not fail the run");
+        assert_eq!(*http.get_count.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn cursor_agent_poll_gives_up_after_max_consecutive_transient_failures() {
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let http = FlakyMockHttp {
+            launch: serde_json::json!({"agent": {"id": "bc_dead"}, "run": {"id": "run_dead", "status": "RUNNING"}}),
+            gets: Mutex::new(vec![ScriptedGet::Status(503, Value::Null)]),
+            get_count: Mutex::new(0),
+        };
+        let mut m = HashMap::new();
+        m.insert("cursor_api_key".to_string(), "sk-dead-secret".to_string());
+        let secrets = MapSecrets(m);
+        let ctx = cursor_ctx(&runner, &http, &secrets);
+        let outcome = CursorAgentOperator.execute(
+            &ctx,
+            &serde_json::json!({
+                "mode": "cloud",
+                "prompt": "p",
+                "repository": "acme/repo",
+                "poll_interval_ms": 0
+            }),
+        );
+        assert!(
+            !outcome.success,
+            "persistent 5xx polling must eventually fail rather than exhaust silently"
+        );
+        assert!(outcome.summary.contains("poll failed repeatedly"));
+        assert_eq!(
+            *http.get_count.lock().unwrap(),
+            (CURSOR_MAX_CONSECUTIVE_POLL_FAILURES + 1) as usize
+        );
+        assert!(!outcome.summary.contains("sk-dead-secret"));
+        assert!(!outcome.details.to_string().contains("sk-dead-secret"));
+    }
+
+    #[test]
+    fn cursor_agent_poll_non_retryable_status_fails_fast() {
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let http = FlakyMockHttp {
+            launch: serde_json::json!({"agent": {"id": "bc_404"}, "run": {"id": "run_404", "status": "RUNNING"}}),
+            gets: Mutex::new(vec![ScriptedGet::Status(404, Value::Null)]),
+            get_count: Mutex::new(0),
+        };
+        let mut m = HashMap::new();
+        m.insert("cursor_api_key".to_string(), "k".to_string());
+        let secrets = MapSecrets(m);
+        let ctx = cursor_ctx(&runner, &http, &secrets);
+        let outcome = CursorAgentOperator.execute(
+            &ctx,
+            &serde_json::json!({
+                "mode": "cloud",
+                "prompt": "p",
+                "repository": "acme/repo",
+                "poll_interval_ms": 0
+            }),
+        );
+        assert!(!outcome.success);
+        // A 404 (e.g. the agent/run no longer exists) is not a transient
+        // condition retrying would fix, so it must fail on the first GET.
+        assert_eq!(*http.get_count.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn cursor_agent_launch_failure_does_not_leak_secret() {
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let http = MockHttp {
+            // A non-2xx launch response; body content is irrelevant here.
+            launch: serde_json::json!({"error": "unauthorized"}),
+            polls: Mutex::new(vec![]),
+            get_count: Mutex::new(0),
+            posted: Mutex::new(vec![]),
+        };
+        struct RejectingHttp(MockHttp);
+        impl HttpClient for RejectingHttp {
+            fn post_json(
+                &self,
+                url: &str,
+                headers: &[(String, String)],
+                body: &Value,
+            ) -> Result<HttpResponse, String> {
+                let _ = self.0.post_json(url, headers, body);
+                Ok(HttpResponse {
+                    status: 401,
+                    body: serde_json::json!({"error": "unauthorized"}),
+                })
+            }
+            fn get_json(
+                &self,
+                url: &str,
+                headers: &[(String, String)],
+            ) -> Result<HttpResponse, String> {
+                self.0.get_json(url, headers)
+            }
+        }
+        let http = RejectingHttp(http);
+        let mut m = HashMap::new();
+        m.insert(
+            "cursor_api_key".to_string(),
+            "sk-launch-fail-secret".to_string(),
+        );
+        let secrets = MapSecrets(m);
+        let ctx = cursor_ctx(&runner, &http, &secrets);
+        let outcome = CursorAgentOperator.execute(
+            &ctx,
+            &serde_json::json!({"mode": "cloud", "prompt": "p", "repository": "acme/repo"}),
+        );
+        assert!(!outcome.success);
+        assert!(!outcome.summary.contains("sk-launch-fail-secret"));
+        assert!(!outcome
+            .details
+            .to_string()
+            .contains("sk-launch-fail-secret"));
+    }
+
     #[test]
     fn shutdown_interrupts_cursor_agent_poll_promptly() {
         use crate::scheduler::{initiate_shutdown, lock_shutdown_test_state};
@@ -1204,9 +1732,9 @@ mod tests {
             calls: Mutex::new(vec![]),
         };
         let http = MockHttp {
-            launch: serde_json::json!({"id": "bc_shutdown", "status": "RUNNING"}),
+            launch: serde_json::json!({"agent": {"id": "bc_shutdown"}, "run": {"id": "run_shutdown", "status": "RUNNING"}}),
             polls: Mutex::new(vec![
-                serde_json::json!({"id": "bc_shutdown", "status": "RUNNING"}),
+                serde_json::json!({"id": "run_shutdown", "status": "RUNNING"}),
             ]),
             get_count: Mutex::new(0),
             posted: Mutex::new(vec![]),
@@ -1225,7 +1753,7 @@ mod tests {
             &serde_json::json!({
                 "mode": "cloud",
                 "prompt": "p",
-                "repository": "r",
+                "repository": "acme/repo",
                 "api_base": "https://mock.local",
                 "poll_attempts": 300,
                 "poll_interval_ms": 5000

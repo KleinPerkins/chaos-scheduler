@@ -1546,6 +1546,20 @@ fn operator_run_terminal_status(
 /// Execute a typed operator via the operator registry, recording a task/attempt.
 /// Returns `(exit_code, stdout, stderr, terminal_status)` where `terminal_status`
 /// is a first-class run status when the outcome maps to one.
+/// Run `f` via `tokio::task::block_in_place` when called from inside an
+/// ambient multi-threaded tokio runtime (so the runtime can hand this
+/// worker's other queued tasks to a fresh thread while `f` blocks); otherwise
+/// run `f` directly. `block_in_place` panics if there is no current runtime
+/// or the runtime is single-threaded, so both are guarded against.
+fn run_possibly_blocking<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}
+
 fn execute_typed_operator(
     db: &Arc<Database>,
     workspace_root: &str,
@@ -1565,16 +1579,53 @@ fn execute_typed_operator(
     let attempt_id = db
         .insert_run_attempt(run_id, &typed.operator_type, 0, "running", None)
         .ok();
-    let runner = crate::service::SystemProcessRunner;
-    let http = crate::operators::ReqwestHttpClient::default();
-    let secrets = SchedulerSecretResolver { db: Arc::clone(db) };
-    let ctx = crate::operators::OperatorContext {
-        runner: &runner,
-        http: &http,
-        secrets: &secrets,
-        workspace_root,
+    // Insert the task row *before* execution (status "running", no details
+    // yet) rather than only recording it once execution finishes. A
+    // long-running operator (`cursor_agent` cloud mode polls for minutes) can
+    // report interim progress via `on_progress` — see below — so a scheduler
+    // kill mid-execution still leaves a traceable run_task row instead of no
+    // record at all.
+    let task_row_id = db
+        .insert_run_task(
+            run_id,
+            attempt_id.as_deref(),
+            &typed.operator_type,
+            "running",
+            0,
+            None,
+        )
+        .ok();
+    let progress_db = Arc::clone(db);
+    let progress_task_row_id = task_row_id.clone();
+    let on_progress = move |details: &Value| {
+        if let Some(task_row_id) = &progress_task_row_id {
+            let _ = progress_db.update_run_task_details(task_row_id, details);
+        }
     };
-    let outcome = operator.execute(&ctx, &typed.config);
+    // Typed operators (`cursor_agent` in particular) build and use a
+    // `reqwest::blocking::Client` and may block synchronously for minutes
+    // (HTTP polling). The REST API path reaches this function from inside a
+    // multi-threaded tokio runtime worker (see `api::start_api_server`); a
+    // blocking reqwest client constructed *and dropped* on such a worker
+    // panics on drop ("Cannot drop a runtime in a context where blocking is
+    // not allowed"), silently leaving the run stuck in `running` forever. Run
+    // the operator (construction through drop of `http`) inside
+    // `block_in_place` whenever an ambient tokio runtime is detected so the
+    // runtime can offload other work first; call directly otherwise (e.g. the
+    // cron scheduler loop or a Tauri sync-command context with no runtime).
+    let outcome = run_possibly_blocking(|| {
+        let runner = crate::service::SystemProcessRunner;
+        let http = crate::operators::ReqwestHttpClient::default();
+        let secrets = SchedulerSecretResolver { db: Arc::clone(db) };
+        let ctx = crate::operators::OperatorContext {
+            runner: &runner,
+            http: &http,
+            secrets: &secrets,
+            workspace_root,
+            on_progress: &on_progress,
+        };
+        operator.execute(&ctx, &typed.config)
+    });
     let status = if outcome.success { "success" } else { "failed" };
     if let Some(attempt_id) = &attempt_id {
         let _ = db.finish_run_attempt(
@@ -1593,14 +1644,37 @@ fn execute_typed_operator(
             },
         );
     }
-    let _ = db.insert_run_task(
-        run_id,
-        attempt_id.as_deref(),
-        &typed.operator_type,
-        status,
-        0,
-        Some(&outcome.details),
-    );
+    match &task_row_id {
+        Some(task_row_id) => {
+            let _ = db.finish_run_task(
+                task_row_id,
+                status,
+                if outcome.success {
+                    None
+                } else {
+                    Some("OperatorError")
+                },
+                if outcome.success {
+                    None
+                } else {
+                    Some(outcome.summary.as_str())
+                },
+                Some(&outcome.details),
+            );
+        }
+        None => {
+            // The early insert failed (rare); fall back to a single insert
+            // with the final outcome so the task is still recorded.
+            let _ = db.insert_run_task(
+                run_id,
+                attempt_id.as_deref(),
+                &typed.operator_type,
+                status,
+                0,
+                Some(&outcome.details),
+            );
+        }
+    }
     let exit_code = if outcome.success { 0 } else { 1 };
     let terminal = operator_run_terminal_status(&outcome);
     let stderr = if outcome.success {
@@ -3969,6 +4043,71 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Timelike, Utc};
 
+    /// Regression test for the `cursor_agent` cloud-mode hang: a
+    /// `reqwest::blocking::Client` that makes a real request and is then
+    /// dropped while running directly inside a tokio multi-thread runtime's
+    /// `block_on` (exactly how `execute_typed_operator` is reached from the
+    /// REST API's axum handler, see `api::start_api_server`) panics on drop.
+    /// `run_possibly_blocking` must route that work through
+    /// `tokio::task::block_in_place` to avoid it.
+    #[test]
+    fn run_possibly_blocking_avoids_reqwest_blocking_drop_panic_on_tokio_worker() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let body = b"ok";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+        let make_request_and_drop = move || {
+            let client = reqwest::blocking::Client::new();
+            for _ in 0..3 {
+                let _ = client.get(format!("http://{addr}")).send();
+            }
+            drop(client);
+        };
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        // Sanity check: the *unguarded* call reproduces the real-world panic
+        // when run directly on a tokio worker (proves this test actually
+        // exercises the bug, not just the fix's happy path).
+        let unguarded = runtime.block_on(async {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(make_request_and_drop))
+        });
+        assert!(
+            unguarded.is_err(),
+            "expected the unguarded blocking client to panic on drop inside a tokio worker \
+             (if this starts failing, reqwest/tokio may have changed and the guard may be \
+             obsolete or need revisiting)"
+        );
+
+        // The fix: routed through `run_possibly_blocking`, no panic.
+        let guarded = runtime.block_on(async {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_possibly_blocking(make_request_and_drop)
+            }))
+        });
+        assert!(
+            guarded.is_ok(),
+            "run_possibly_blocking should prevent the reqwest::blocking drop panic: {guarded:?}"
+        );
+    }
+
     fn structured_test_db() -> (Arc<Database>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("chaos-sched-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -4451,6 +4590,203 @@ mod tests {
             libc::kill(pid as i32, libc::SIGKILL);
         }
         let _ = child.wait();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Typed operators like `cursor_agent` (cloud mode) never call
+    /// `record_run_process` — there's no local child process, just HTTP
+    /// polling of a remote agent — so a run left `running` by a killed
+    /// scheduler has no PID to verify. Orphan recovery already handles this
+    /// generically (it operates on any `running` row, not just ones with
+    /// process metadata): confirm it marks such a run `stale` with a clear
+    /// message rather than leaving it `running` forever.
+    #[test]
+    #[cfg(unix)]
+    fn orphan_recovery_marks_running_run_without_process_metadata_stale() {
+        let (db, dir) = structured_test_db();
+        let wf = make_orphan_workflow(&db, "No Process Metadata Orphan");
+        let run_id = admit_running_orphan_run(&db, &wf.id);
+        // No `record_run_process` call: mirrors a typed cloud operator run.
+
+        recover_orphaned_runs(&db, dir.to_str().unwrap());
+
+        let recovered = db.get_run(&run_id).unwrap();
+        assert_eq!(recovered.status, "stale");
+        let stderr = recovered.stderr.as_deref().unwrap_or_default();
+        assert!(
+            stderr.contains("no process metadata to reattach safely"),
+            "unexpected stderr: {stderr}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Regression test for the "no traceable record if killed mid-poll" gap:
+    /// `execute_typed_operator` must insert the `run_tasks` row *before*
+    /// calling the operator, and the operator's `on_progress` callback must
+    /// persist remote identifiers (agent/run id) before its poll loop starts
+    /// — proven here by having the mock's `get_json` (the poll call) assert
+    /// the DB already reflects them, i.e. the write happened strictly earlier
+    /// than any poll GET, not just at the end of execution.
+    #[test]
+    #[cfg(unix)]
+    fn cursor_agent_on_progress_persists_ids_before_first_poll_get() {
+        use crate::operators::{
+            CursorAgentOperator, HttpClient, HttpResponse, Operator, OperatorContext,
+            SecretResolver,
+        };
+
+        struct AssertingMockHttp {
+            db: Arc<Database>,
+            task_row_id: String,
+            run_id: String,
+            launch: Value,
+            poll: Value,
+        }
+        impl HttpClient for AssertingMockHttp {
+            fn post_json(
+                &self,
+                _url: &str,
+                _headers: &[(String, String)],
+                _body: &Value,
+            ) -> Result<HttpResponse, String> {
+                Ok(HttpResponse {
+                    status: 200,
+                    body: self.launch.clone(),
+                })
+            }
+            fn get_json(
+                &self,
+                _url: &str,
+                _headers: &[(String, String)],
+            ) -> Result<HttpResponse, String> {
+                let tasks = self.db.get_run_tasks(&self.run_id).unwrap();
+                let task = tasks
+                    .iter()
+                    .find(|t| t.id == self.task_row_id)
+                    .expect("task row must already exist");
+                let details = task.details.clone().unwrap_or(Value::Null);
+                assert_eq!(
+                    details.get("agent_id").and_then(|v| v.as_str()),
+                    Some("bc_progress"),
+                    "agent_id must be persisted before the first poll GET, got: {details}"
+                );
+                assert_eq!(
+                    details.get("run_id").and_then(|v| v.as_str()),
+                    Some("run_progress"),
+                    "run_id must be persisted before the first poll GET, got: {details}"
+                );
+                Ok(HttpResponse {
+                    status: 200,
+                    body: self.poll.clone(),
+                })
+            }
+        }
+        struct MapSecrets(HashMap<String, String>);
+        impl SecretResolver for MapSecrets {
+            fn get(&self, key: &str) -> Option<String> {
+                self.0.get(key).cloned()
+            }
+        }
+
+        let (db, dir) = structured_test_db();
+        let wf = make_orphan_workflow(&db, "Cursor Progress");
+        let run_id = admit_running_orphan_run(&db, &wf.id);
+        let task_row_id = db
+            .insert_run_task(&run_id, None, "cursor_agent", "running", 0, None)
+            .unwrap();
+
+        let progress_db = Arc::clone(&db);
+        let progress_task_row_id = task_row_id.clone();
+        let on_progress = move |details: &Value| {
+            let _ = progress_db.update_run_task_details(&progress_task_row_id, details);
+        };
+        let runner = crate::service::SystemProcessRunner;
+        let http = AssertingMockHttp {
+            db: Arc::clone(&db),
+            task_row_id: task_row_id.clone(),
+            run_id: run_id.clone(),
+            launch: serde_json::json!({"agent": {"id": "bc_progress"}, "run": {"id": "run_progress", "status": "RUNNING"}}),
+            poll: serde_json::json!({"id": "run_progress", "status": "FINISHED", "result": "done"}),
+        };
+        let mut secrets_map = HashMap::new();
+        secrets_map.insert(
+            "cursor_api_key".to_string(),
+            "sk-progress-secret".to_string(),
+        );
+        let secrets = MapSecrets(secrets_map);
+        let ctx = OperatorContext {
+            runner: &runner,
+            http: &http,
+            secrets: &secrets,
+            workspace_root: "/tmp",
+            on_progress: &on_progress,
+        };
+        let outcome = CursorAgentOperator.execute(
+            &ctx,
+            &serde_json::json!({
+                "mode": "cloud",
+                "prompt": "p",
+                "repository": "acme/repo",
+                "poll_interval_ms": 0,
+            }),
+        );
+        assert!(outcome.success, "{}", outcome.summary);
+
+        // The secret must never have been written into the progress details.
+        let tasks = db.get_run_tasks(&run_id).unwrap();
+        let task = tasks.iter().find(|t| t.id == task_row_id).unwrap();
+        let details_str = task
+            .details
+            .as_ref()
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        assert!(!details_str.contains("sk-progress-secret"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The insert-before/finish-after `run_tasks` change applies to every
+    /// typed operator (not just `cursor_agent`); confirm it still records
+    /// exactly one row per run (no duplicate from insert-then-insert-again)
+    /// with the final status and error details attached, using `git_pull`
+    /// (no network required — it fails fast on a missing `repo_url`).
+    #[test]
+    #[cfg(unix)]
+    fn execute_typed_operator_records_single_task_row_with_final_status_and_error() {
+        let (db, dir) = structured_test_db();
+        let wf = make_orphan_workflow(&db, "Typed GitPull");
+        let run_id = admit_running_orphan_run(&db, &wf.id);
+        let workflow = db.get_workflow(&wf.id).unwrap();
+        let typed = crate::workflow_spec::TypedSpec {
+            operator_type: "git_pull".to_string(),
+            config: serde_json::json!({
+                "path": format!("/tmp/does-not-exist-{}", uuid::Uuid::new_v4())
+            }),
+        };
+
+        let (exit_code, _stdout, stderr, terminal) =
+            execute_typed_operator(&db, "/tmp", &run_id, &workflow, &typed);
+        assert_ne!(exit_code, 0);
+        assert!(terminal.is_none());
+        assert!(
+            stderr.contains("no repo_url"),
+            "unexpected stderr: {stderr}"
+        );
+
+        let tasks = db.get_run_tasks(&run_id).unwrap();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "exactly one run_task row, not a duplicate from insert-then-insert"
+        );
+        let task = &tasks[0];
+        assert_eq!(task.status, "failed");
+        assert_eq!(task.error_type.as_deref(), Some("OperatorError"));
+        assert!(task
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no repo_url"));
+        assert!(task.finished_at.is_some());
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -41,7 +41,7 @@ export function defaultOperatorConfig(
     case "git_pull":
       return { repo_url: "", local_path: "", branch: "main", rebase: false };
     case "cursor_agent":
-      return { mode: "cloud", prompt: "", repo: "", model: "" };
+      return { mode: "cloud", prompt: "", repository: "", model: "" };
     default:
       return {};
   }
