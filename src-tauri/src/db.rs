@@ -6,7 +6,7 @@ fn default_utc() -> String {
     "UTC".to_string()
 }
 
-fn default_source_corpus() -> String {
+fn default_environment() -> String {
     "source".to_string()
 }
 
@@ -67,7 +67,7 @@ pub struct Workflow {
     pub email_on_failure: bool,
     /// First-class environment name (partition / queue-scope / filter). May be
     /// any registered environment; seeded with `source` / `instance`.
-    #[serde(default = "default_source_corpus")]
+    #[serde(default = "default_environment")]
     pub environment: String,
     /// Governance flag: whether this workflow's definition is owned by an
     /// external source of truth and therefore read-only in the UI/API.
@@ -662,7 +662,7 @@ pub enum IdempotencyReservation {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 8;
+pub const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 pub struct Database {
     path: String,
@@ -811,9 +811,15 @@ impl Database {
         let _ = conn
             .execute_batch("ALTER TABLE workflows ADD COLUMN email_on_failure INTEGER DEFAULT 1;");
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN email_profile_id TEXT;");
-        let _ = conn.execute_batch(
-            "ALTER TABLE workflows ADD COLUMN corpus TEXT NOT NULL DEFAULT 'source';",
-        );
+        // Legacy `corpus` shim: only (re)add it for DBs that predate v9, whose
+        // v2->v9 migration chain still reads/backfills from it. Post-v9 DBs have
+        // dropped the column for good; re-adding it here would resurrect it on
+        // every startup.
+        if existing_version < 9 {
+            let _ = conn.execute_batch(
+                "ALTER TABLE workflows ADD COLUMN corpus TEXT NOT NULL DEFAULT 'source';",
+            );
+        }
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN trigger_config TEXT;");
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN queue_config TEXT;");
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN domain TEXT;");
@@ -1118,6 +1124,7 @@ impl Database {
             (6, Self::migrate_v6_run_retention_fk_actions),
             (7, Self::migrate_v7_idempotency_contract),
             (8, Self::migrate_v8_execution_metadata),
+            (9, Self::migrate_v9_drop_workflow_corpus),
         ]
     }
 
@@ -1137,6 +1144,21 @@ impl Database {
         let _ = conn.execute_batch(
             "ALTER TABLE runs ADD COLUMN task_events_truncated INTEGER NOT NULL DEFAULT 0;",
         );
+        Ok(())
+    }
+
+    /// v9: drop the vestigial `corpus` column from `workflows`. `environment`
+    /// has been the authoritative partition (write model since the environment
+    /// rearchitecture; the serialized read contract no longer exposes `corpus`).
+    /// Backfill any lingering empty `environment` from the old `corpus` value
+    /// (or `source`) before dropping so no partition is lost.
+    fn migrate_v9_drop_workflow_corpus(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "UPDATE workflows
+                SET environment = COALESCE(NULLIF(environment, ''), corpus, 'source')
+                WHERE environment IS NULL OR environment = '';
+             ALTER TABLE workflows DROP COLUMN corpus;",
+        )?;
         Ok(())
     }
 
@@ -1543,7 +1565,7 @@ impl Database {
     pub fn list_workflows(&self) -> rusqlite::Result<Vec<Workflow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), corpus), COALESCE(managed_externally, CASE WHEN corpus = 'source' THEN 1 ELSE 0 END), COALESCE(kind, 'generic'), spec_json, email_profile_id FROM workflows ORDER BY corpus, name"
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), 'source'), COALESCE(managed_externally, 0), COALESCE(kind, 'generic'), spec_json, email_profile_id FROM workflows ORDER BY environment, name"
         )?;
         let rows = stmt.query_map([], Self::row_to_workflow)?;
         rows.collect()
@@ -1568,24 +1590,24 @@ impl Database {
                 .get::<_, String>(11)
                 .unwrap_or_else(|_| "UTC".to_string()),
             environment: row
-                .get::<_, String>(16)
+                .get::<_, String>(15)
                 .unwrap_or_else(|_| "source".to_string()),
-            managed_externally: row.get::<_, i32>(17).unwrap_or(0) != 0,
+            managed_externally: row.get::<_, i32>(16).unwrap_or(0) != 0,
             kind: row
-                .get::<_, String>(18)
+                .get::<_, String>(17)
                 .unwrap_or_else(|_| "generic".to_string()),
-            spec_json: row.get(19).unwrap_or(None),
-            domain: row.get(13).unwrap_or(None),
-            trigger_config: row.get(14).unwrap_or(None),
-            queue_config: row.get(15).unwrap_or(None),
-            email_profile_id: row.get(20).unwrap_or(None),
+            spec_json: row.get(18).unwrap_or(None),
+            domain: row.get(12).unwrap_or(None),
+            trigger_config: row.get(13).unwrap_or(None),
+            queue_config: row.get(14).unwrap_or(None),
+            email_profile_id: row.get(19).unwrap_or(None),
         })
     }
 
     pub fn get_workflow(&self, id: &str) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), corpus), COALESCE(managed_externally, CASE WHEN corpus = 'source' THEN 1 ELSE 0 END), COALESCE(kind, 'generic'), spec_json, email_profile_id FROM workflows WHERE id = ?1",
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), 'source'), COALESCE(managed_externally, 0), COALESCE(kind, 'generic'), spec_json, email_profile_id FROM workflows WHERE id = ?1",
             params![id],
             Self::row_to_workflow,
         )
@@ -1617,14 +1639,12 @@ impl Database {
     ) -> rusqlite::Result<Workflow> {
         let id = uuid::Uuid::new_v4().to_string();
         let conn = self.conn()?;
-        // `environment` is the authoritative partition. The legacy `corpus`
-        // column is written to the same value as a shadow for the remainder of
-        // the migration window (dropped in a later cleanup migration).
-        // Governance (`managed_externally`) is decoupled and set explicitly by
-        // the service layer, never derived from the environment name.
+        // `environment` is the authoritative partition. Governance
+        // (`managed_externally`) is decoupled and set explicitly by the service
+        // layer, never derived from the environment name.
         conn.execute(
-            "INSERT INTO workflows (id, name, description, script_path, cron_schedule, async_mode, email_on_failure, timezone, corpus, environment, managed_externally, domain, trigger_config, queue_config) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![id, name, description, script_path, cron_schedule, async_mode as i32, email_on_failure as i32, timezone, environment, environment, 0i32, domain, trigger_config, queue_config],
+            "INSERT INTO workflows (id, name, description, script_path, cron_schedule, async_mode, email_on_failure, timezone, environment, managed_externally, domain, trigger_config, queue_config) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![id, name, description, script_path, cron_schedule, async_mode as i32, email_on_failure as i32, timezone, environment, 0i32, domain, trigger_config, queue_config],
         )?;
         self.get_workflow(&id)
     }
@@ -1647,10 +1667,9 @@ impl Database {
         queue_config: Option<&str>,
     ) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
-        // `environment` is authoritative; the legacy `corpus` column is kept in
-        // sync as a shadow until the cleanup migration drops it.
+        // `environment` is the authoritative partition column.
         conn.execute(
-            "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, corpus = ?10, environment = ?10, domain = ?11, trigger_config = ?12, queue_config = ?13, updated_at = datetime('now') WHERE id = ?1",
+            "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, environment = ?10, domain = ?11, trigger_config = ?12, queue_config = ?13, updated_at = datetime('now') WHERE id = ?1",
             params![id, name, description, script_path, cron_schedule, enabled as i32, async_mode as i32, email_on_failure as i32, timezone, environment, domain, trigger_config, queue_config],
         )?;
         self.get_workflow(id)
@@ -1954,7 +1973,7 @@ impl Database {
     pub fn count_workflows_in_environment(&self, name: &str) -> rusqlite::Result<i64> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT COUNT(*) FROM workflows WHERE COALESCE(NULLIF(environment, ''), corpus) = ?1",
+            "SELECT COUNT(*) FROM workflows WHERE COALESCE(NULLIF(environment, ''), 'source') = ?1",
             params![name],
             |row| row.get(0),
         )
@@ -2059,7 +2078,7 @@ impl Database {
         let mut running: Vec<(String, String, Vec<String>)> = Vec::new();
         {
             let mut stmt = tx.prepare(
-                "SELECT COALESCE(NULLIF(w.environment, ''), w.corpus, 'source') AS env, w.queue_config
+                "SELECT COALESCE(NULLIF(w.environment, ''), 'source') AS env, w.queue_config
                  FROM runs r JOIN workflows w ON w.id = r.workflow_id
                  WHERE r.status IN ('admitted', 'running')",
             )?;
@@ -3018,7 +3037,7 @@ impl Database {
              LEFT JOIN workflows w ON r.workflow_id = w.id
              WHERE (?1 = 'all' OR r.status = ?1)
                AND (?2 = 'all' OR COALESCE(r.trigger_kind, 'cron') = ?2)
-               AND (?3 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?3)
+               AND (?3 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?3)
                AND (?4 = 'all'
                  OR (?4 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?4)
@@ -3115,13 +3134,13 @@ impl Database {
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), corpus), COALESCE(managed_externally, CASE WHEN corpus = 'source' THEN 1 ELSE 0 END), COALESCE(kind, 'generic'), spec_json, email_profile_id
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), 'source'), COALESCE(managed_externally, 0), COALESCE(kind, 'generic'), spec_json, email_profile_id
              FROM workflows w
-             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)
-             ORDER BY w.corpus, COALESCE(NULLIF(TRIM(w.domain), ''), 'Unowned'), w.name",
+             ORDER BY COALESCE(NULLIF(w.environment, ''), 'source'), COALESCE(NULLIF(TRIM(w.domain), ''), 'Unowned'), w.name",
         )?;
         let rows = stmt.query_map(params![corpus_filter, domain_filter], Self::row_to_workflow)?;
         rows.collect()
@@ -3136,7 +3155,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT COALESCE(NULLIF(TRIM(domain), ''), 'Unowned') AS owner, COUNT(*)
              FROM workflows
-             WHERE (?1 = 'all' OR COALESCE(NULLIF(environment, ''), corpus) = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(environment, ''), 'source') = ?1)
              GROUP BY owner
              ORDER BY CASE owner WHEN 'Unowned' THEN 1 ELSE 0 END, owner",
         )?;
@@ -3176,7 +3195,7 @@ impl Database {
                 (SELECT COUNT(*)
                    FROM queued_runs q JOIN workflows qw ON qw.id = q.workflow_id
                   WHERE q.status IN ('queued', 'admitted')
-                    AND (?1 = 'all' OR COALESCE(NULLIF(qw.environment, ''), qw.corpus) = ?1)
+                    AND (?1 = 'all' OR COALESCE(NULLIF(qw.environment, ''), 'source') = ?1)
                     AND (?2 = 'all'
                       OR (?2 = '__unowned__' AND (qw.domain IS NULL OR TRIM(qw.domain) = ''))
                       OR TRIM(qw.domain) = ?2)) AS queued_count,
@@ -3185,7 +3204,7 @@ impl Database {
                          THEN 1 ELSE 0 END) AS recent_failures
              FROM workflows w
              LEFT JOIN runs r ON r.workflow_id = w.id
-             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
@@ -3217,7 +3236,7 @@ impl Database {
              JOIN workflows w ON w.id = r.workflow_id
              WHERE datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', '-1 day')
                AND r.status IN ('success', 'succeeded', 'failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
-               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
@@ -3231,7 +3250,7 @@ impl Database {
                  JOIN workflows w ON w.id = q.workflow_id
                  WHERE q.admitted_at IS NOT NULL
                    AND datetime(q.queued_at) >= datetime('now', '-1 day')
-                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
+                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
                    AND (?2 = 'all'
                      OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                      OR TRIM(w.domain) = ?2)
@@ -3242,7 +3261,7 @@ impl Database {
                    JOIN workflows mw ON mw.id = mq.workflow_id
                    WHERE mq.admitted_at IS NOT NULL
                      AND datetime(mq.queued_at) >= datetime('now', '-1 day')
-                     AND (?1 = 'all' OR COALESCE(NULLIF(mw.environment, ''), mw.corpus) = ?1)
+                     AND (?1 = 'all' OR COALESCE(NULLIF(mw.environment, ''), 'source') = ?1)
                      AND (?2 = 'all'
                        OR (?2 = '__unowned__' AND (mw.domain IS NULL OR TRIM(mw.domain) = ''))
                        OR TRIM(mw.domain) = ?2)
@@ -3255,7 +3274,7 @@ impl Database {
             "SELECT COUNT(*)
              FROM queued_runs q JOIN workflows w ON w.id = q.workflow_id
              WHERE q.status = 'queued'
-               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
@@ -3288,7 +3307,7 @@ impl Database {
             "SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis, r.trigger_kind, r.trigger_payload, r.upstream_run_id, r.input_json, r.rerun_of_run_id
              FROM runs r
              JOIN workflows w ON w.id = r.workflow_id
-             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)
@@ -3327,7 +3346,7 @@ impl Database {
              FROM latest_terminal r
              JOIN workflows w ON w.id = r.workflow_id
              WHERE r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
-               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)
@@ -3365,7 +3384,7 @@ impl Database {
              FROM latest_terminal r
              JOIN workflows w ON w.id = r.workflow_id
              WHERE r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
-               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
@@ -3384,10 +3403,10 @@ impl Database {
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT r.id, r.workflow_id, w.name, w.corpus, w.domain, r.status, r.started_at, r.finished_at
+            "SELECT r.id, r.workflow_id, w.name, COALESCE(NULLIF(w.environment, ''), 'source'), w.domain, r.status, r.started_at, r.finished_at
              FROM runs r
              JOIN workflows w ON w.id = r.workflow_id
-             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)
@@ -3424,14 +3443,14 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT a.asset_id, a.asset_kind, a.asset_namespace, a.asset_partition, a.last_action,
-                    a.last_written_at, r.workflow_id, w.name, w.corpus, w.domain
+                    a.last_written_at, r.workflow_id, w.name, COALESCE(NULLIF(w.environment, ''), 'source'), w.domain
              FROM scheduler_assets a
              LEFT JOIN runs r ON r.id = a.last_writer_run_id
              LEFT JOIN workflows w ON w.id = r.workflow_id
              WHERE (a.last_written_at IS NULL OR datetime(a.last_written_at) <= datetime('now', ?3))
                AND (
                  (w.id IS NOT NULL
-                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
+                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
                    AND (?2 = 'all'
                      OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                      OR TRIM(w.domain) = ?2))
@@ -3478,14 +3497,14 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "WITH visible_workflows AS (
-                SELECT w.id, w.name, w.corpus, w.domain
+                SELECT w.id, w.name, COALESCE(NULLIF(w.environment, ''), 'source') AS environment, w.domain
                 FROM workflows w
                 WHERE w.enabled = 1
-                  AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
+                  AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
                   AND (?2 = 'all'
                     OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                     OR TRIM(w.domain) = ?2)
-                ORDER BY w.corpus, COALESCE(NULLIF(TRIM(w.domain), ''), 'Unowned'), w.name
+                ORDER BY COALESCE(NULLIF(w.environment, ''), 'source'), COALESCE(NULLIF(TRIM(w.domain), ''), 'Unowned'), w.name
                 LIMIT ?4
              ),
              resource_rollup AS (
@@ -3507,7 +3526,7 @@ impl Database {
                 WHERE datetime(t.emitted_at) >= datetime('now', ?3)
                 GROUP BY t.workflow_id
              )
-             SELECT vw.id, vw.name, vw.corpus, vw.domain,
+             SELECT vw.id, vw.name, vw.environment, vw.domain,
                     r.max_cpu_percent,
                     r.max_memory_rss_bytes,
                     COALESCE(r.sample_count, 0),
@@ -3516,7 +3535,7 @@ impl Database {
              FROM visible_workflows vw
              LEFT JOIN resource_rollup r ON r.workflow_id = vw.id
              LEFT JOIN token_rollup t ON t.workflow_id = vw.id
-             ORDER BY vw.corpus, COALESCE(NULLIF(TRIM(vw.domain), ''), 'Unowned'), vw.name",
+             ORDER BY vw.environment, COALESCE(NULLIF(TRIM(vw.domain), ''), 'Unowned'), vw.name",
         )?;
         let rows = stmt.query_map(
             params![corpus_filter, domain_filter, window_modifier, limit],
@@ -4192,7 +4211,7 @@ impl Database {
     pub fn list_queued_runs(&self, limit: i64) -> rusqlite::Result<Vec<QueuedRun>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, COALESCE(NULLIF(w.environment, ''), w.corpus), q.priority, q.status, q.queued_at, q.admitted_at, q.finished_at,
+            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, COALESCE(NULLIF(w.environment, ''), 'source'), q.priority, q.status, q.queued_at, q.admitted_at, q.finished_at,
                     q.trigger_kind, q.trigger_payload, q.upstream_run_id, q.input_json, q.rerun_of_run_id
              FROM queued_runs q
              LEFT JOIN workflows w ON q.workflow_id = w.id
@@ -4271,7 +4290,7 @@ impl Database {
     ) -> rusqlite::Result<Option<QueuedRun>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, COALESCE(NULLIF(w.environment, ''), w.corpus), q.priority,
+            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, COALESCE(NULLIF(w.environment, ''), 'source'), q.priority,
                     q.status, q.queued_at, q.admitted_at, q.finished_at, q.trigger_kind,
                     q.trigger_payload, q.upstream_run_id, q.input_json, q.rerun_of_run_id
              FROM queued_runs q
@@ -4506,7 +4525,7 @@ impl Database {
             "SELECT COUNT(*)
              FROM queued_runs q
              LEFT JOIN workflows w ON q.workflow_id = w.id
-             WHERE q.queue_name = ?1 AND COALESCE(NULLIF(w.environment, ''), w.corpus, 'source') = ?2 AND q.status = 'queued'",
+             WHERE q.queue_name = ?1 AND COALESCE(NULLIF(w.environment, ''), 'source') = ?2 AND q.status = 'queued'",
             params![queue_name, environment],
             |row| row.get(0),
         )
@@ -5110,11 +5129,11 @@ mod tests {
     }
 
     #[test]
-    fn migration_fixture_v7_to_v8_adds_execution_metadata_and_stamps_version() {
+    fn migration_fixture_v7_to_v9_adds_execution_metadata_and_drops_workflow_corpus() {
         // Tripwire: refresh this fixture (seed schema + asserted columns) the
-        // next time a migration lands so the N-1 -> N path stays covered.
+        // next time a migration lands so the newest N-1 -> N paths stay covered.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 8,
+            CURRENT_SCHEMA_VERSION, 9,
             "add a v(N-1)->v(N) fixture when a new migration ships"
         );
 
@@ -5126,8 +5145,10 @@ mod tests {
         };
 
         // Seed the pre-v8 shape of `runs` (no execution/truncation metadata) and
-        // stamp the DB at v(N-1) so exactly the v8 migration is pending. We drive
-        // `run_migrations` directly to isolate the N-1 -> N transition rather than
+        // the pre-v9 shape of `workflows` (still carrying the legacy `corpus`
+        // shadow alongside the authoritative `environment`), then stamp the DB
+        // at v7 so exactly the v8 and v9 migrations are pending. We drive
+        // `run_migrations` directly to isolate the transitions rather than
         // rebuilding the entire intermediate schema through `init`.
         {
             let conn = Connection::open(&db_path).unwrap();
@@ -5148,8 +5169,25 @@ mod tests {
                     rerun_of_run_id TEXT,
                     status TEXT DEFAULT 'running'
                 );
+                CREATE TABLE workflows (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    script_path TEXT NOT NULL,
+                    cron_schedule TEXT NOT NULL,
+                    enabled INTEGER DEFAULT 1,
+                    corpus TEXT NOT NULL DEFAULT 'source',
+                    environment TEXT,
+                    managed_externally INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT,
+                    updated_at TEXT
+                );
                 INSERT INTO runs (id, workflow_id, started_at, status)
                     VALUES ('run-mig', 'wf-mig', '2026-01-01T00:00:00Z', 'running');
+                INSERT INTO workflows (id, name, script_path, cron_schedule, corpus, environment)
+                    VALUES ('wf-mig', 'Mig', 's.py', '0 0 * * *', 'staging', 'staging');
+                INSERT INTO workflows (id, name, script_path, cron_schedule, corpus, environment)
+                    VALUES ('wf-legacy', 'Legacy', 'l.py', '0 0 * * *', 'prod', NULL);
                 PRAGMA user_version = 7;",
             )
             .unwrap();
@@ -5159,23 +5197,26 @@ mod tests {
                 !cols.contains("execution_worker_id") && !cols.contains("process_pid"),
                 "pre-migration fixture must not already carry v8 columns"
             );
+            assert!(
+                workflow_columns(&conn).contains("corpus"),
+                "pre-migration fixture must still carry the legacy corpus column"
+            );
             let v: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(v, CURRENT_SCHEMA_VERSION - 1);
+            assert_eq!(v, 7);
         }
 
-        // Apply exactly the pending v(N-1) -> v(N) migration.
+        // Apply the pending v8 + v9 migrations.
         let conn = db.conn().unwrap();
-        db.run_migrations(&conn, CURRENT_SCHEMA_VERSION - 1)
-            .unwrap();
+        db.run_migrations(&conn, 7).unwrap();
 
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
 
-        let cols = runs_columns(&conn);
+        let run_cols = runs_columns(&conn);
         for expected in [
             "execution_worker_id",
             "process_pid",
@@ -5186,24 +5227,62 @@ mod tests {
             "task_events_truncated",
         ] {
             assert!(
-                cols.contains(expected),
+                run_cols.contains(expected),
                 "v8 migration should add `{expected}` to runs"
             );
         }
 
-        // Existing pre-migration row survives the in-place upgrade.
+        // v9 drops the vestigial corpus column but keeps environment.
+        let wf_cols = workflow_columns(&conn);
+        assert!(
+            !wf_cols.contains("corpus"),
+            "v9 migration should drop workflows.corpus"
+        );
+        assert!(
+            wf_cols.contains("environment"),
+            "environment is retained as the authoritative partition"
+        );
+
+        // Existing rows survive; the un-backfilled row recovers its partition
+        // from the legacy corpus value before the column is dropped.
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM runs WHERE id = 'run-mig'", [], |r| {
                 r.get(0)
             })
             .unwrap();
         assert_eq!(count, 1);
+        let mig_env: String = conn
+            .query_row(
+                "SELECT environment FROM workflows WHERE id = 'wf-mig'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mig_env, "staging");
+        let legacy_env: String = conn
+            .query_row(
+                "SELECT environment FROM workflows WHERE id = 'wf-legacy'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_env, "prod");
 
         let _ = std::fs::remove_dir_all(dir);
     }
 
     fn runs_columns(conn: &Connection) -> std::collections::HashSet<String> {
         let mut stmt = conn.prepare("PRAGMA table_info(runs)").unwrap();
+        let cols = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        cols
+    }
+
+    fn workflow_columns(conn: &Connection) -> std::collections::HashSet<String> {
+        let mut stmt = conn.prepare("PRAGMA table_info(workflows)").unwrap();
         let cols = stmt
             .query_map([], |r| r.get::<_, String>(1))
             .unwrap()
@@ -5413,6 +5492,7 @@ mod tests {
                     id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
                     script_path TEXT NOT NULL, cron_schedule TEXT NOT NULL,
                     enabled INTEGER DEFAULT 1, corpus TEXT NOT NULL DEFAULT 'source',
+                    environment TEXT,
                     created_at TEXT, updated_at TEXT
                 );
                 CREATE TABLE runs (
@@ -5518,6 +5598,7 @@ mod tests {
                     id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
                     script_path TEXT NOT NULL, cron_schedule TEXT NOT NULL,
                     enabled INTEGER DEFAULT 1, corpus TEXT NOT NULL DEFAULT 'source',
+                    environment TEXT,
                     created_at TEXT, updated_at TEXT
                 );
                 CREATE TABLE runs (
