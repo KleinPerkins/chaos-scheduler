@@ -242,7 +242,7 @@ export default function MenuBarPopup() {
             disabled={updateDownloading || updating}
             onClick={handleUpdate}
           >
-            Update
+            {updateDownloading ? "Updating…" : "Update"}
           </button>
         </div>
       )}

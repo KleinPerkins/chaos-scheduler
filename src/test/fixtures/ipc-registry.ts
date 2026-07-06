@@ -170,8 +170,11 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       available: false,
       current_version: "0.1.0",
     }),
-    apply_update: () => updateSnapshot,
-    get_app_update_status: () => updateSnapshot,
+    // Fresh objects, not the mutated reference: real IPC round-trips always
+    // deserialize a new object, and callers may rely on referential
+    // inequality to detect a change (see set_updater_preferences below).
+    apply_update: () => ({ ...updateSnapshot }),
+    get_app_update_status: () => ({ ...updateSnapshot }),
     set_updater_preferences: (args) => {
       if (typeof args.backgroundCheckEnabled === "boolean") {
         updateSnapshot.background_check_enabled = args.backgroundCheckEnabled;
@@ -181,9 +184,6 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       } else if (typeof args.skippedVersion === "string") {
         updateSnapshot.skipped_version = args.skippedVersion;
       }
-      // A fresh object, not the mutated reference: real IPC round-trips
-      // always deserialize a new object, and callers (e.g. React state
-      // setters) may rely on referential inequality to detect the change.
       return { ...updateSnapshot };
     },
     // A fresh object, not the shared module-level constant: real IPC

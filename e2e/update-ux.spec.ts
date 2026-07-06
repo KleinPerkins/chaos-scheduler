@@ -156,6 +156,7 @@ test.describe("Update UX — menu bar popup", () => {
 
     await expect(page.getByText("Chaos Scheduler")).toBeVisible();
     await expect(page.getByText(/Update available/)).not.toBeVisible();
+    await expectNoAxeViolations(page, "popup, no update");
   });
 });
 
@@ -205,5 +206,6 @@ test.describe("Update UX — Settings", () => {
 
     await clearBtn.click();
     await expect(skipBtn).toBeVisible();
+    await expectNoAxeViolations(page, "settings, skip cleared");
   });
 });

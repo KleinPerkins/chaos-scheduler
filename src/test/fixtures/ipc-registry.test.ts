@@ -127,6 +127,28 @@ describe("ipc fixture registry", () => {
     expect(defaultMcpIntegrationStatus.enabled).toBe(false);
   });
 
+  it("returns a fresh object (not the shared reference) from every update-status handler", () => {
+    // Real Tauri IPC always deserializes a new object per call. Handlers
+    // returning the raw shared snapshot reference would silently break any
+    // caller relying on referential inequality to detect a change.
+    const registry = createDefaultIpcRegistry();
+    const updateHandlers = [
+      "apply_update",
+      "get_app_update_status",
+      "set_updater_preferences",
+    ] as const;
+
+    for (const cmd of updateHandlers) {
+      const first = registry[cmd]({});
+      const second = registry[cmd]({});
+      expect(
+        first,
+        `${cmd} should not return the same reference twice`,
+      ).not.toBe(second);
+      expect(second).toEqual(first);
+    }
+  });
+
   it("honors per-test overrides", () => {
     const registry = createDefaultIpcRegistry();
     window.__CHAOS_IPC_OVERRIDES__ = {
