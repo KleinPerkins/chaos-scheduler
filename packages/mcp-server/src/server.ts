@@ -24,6 +24,7 @@ import {
   GuardrailError,
   ToolBudget,
 } from "./guardrails.js";
+import { SERVER_ICONS, SERVER_WEBSITE_URL } from "./icon.js";
 
 export const SERVER_NAME = "chaos-scheduler";
 export const SERVER_VERSION = "0.1.0";
@@ -95,7 +96,13 @@ export function buildServer(deps: ServerDeps): McpServer {
   };
 
   const server = new McpServer(
-    { name: SERVER_NAME, version: SERVER_VERSION },
+    {
+      name: SERVER_NAME,
+      version: SERVER_VERSION,
+      title: "Chaos Scheduler",
+      websiteUrl: SERVER_WEBSITE_URL,
+      icons: SERVER_ICONS,
+    },
     {
       instructions:
         "Chaos Scheduler MCP server. Use these tools to register/inspect environments and " +
