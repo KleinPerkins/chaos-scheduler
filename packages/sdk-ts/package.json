@@ -51,8 +51,12 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.0",
+    "esbuild": "^0.28.1",
     "tsup": "^8.5.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.9"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
   }
 }

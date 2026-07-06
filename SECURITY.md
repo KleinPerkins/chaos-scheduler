@@ -174,3 +174,37 @@ hooks remain **fail-open** (confirm/warn). Details:
 
 The post-hardening gap-closure ship (11 concerns, PRs #68–#80) is documented in
 [docs/hardening-gap-closure-report.md](docs/hardening-gap-closure-report.md).
+
+## Transitive dependency advisories (upstream-blocked)
+
+Dependabot may still flag the following **transitive** Rust crates. We track
+them, bump when upstream releases permit, and dismiss with documented rationale
+when blocked.
+
+### `glib` &lt; 0.20 (GTK3 / Tauri Linux stack)
+
+- **Source:** Tauri 2's Linux webview stack pulls `gtk` 0.18 → `glib` 0.18.x.
+  The gtk3-rs 0.18 line is EOL and pins `glib` ^0.18; there is no in-tree upgrade
+  path without a Tauri major platform shift.
+- **Exposure:** Chaos Scheduler ships **macOS-only** desktop binaries. Linux
+  GTK/glib code is compile-time transitive baggage from `wry`/`tauri`, not a
+  supported runtime surface for this project.
+- **Mitigation:** Stay on latest Tauri patch releases; re-evaluate when Tauri
+  moves the Linux stack beyond gtk3-rs 0.18.
+
+### `rand` 0.7.x (PHF 0.8 build codegen)
+
+- **Source:** `selectors` 0.24 (Tauri HTML/CSS parsing) → `phf_codegen` 0.8 →
+  `phf_generator` 0.8 → `rand` 0.7.3. This chain is **build-time only** (PHF
+  table generation during `cargo build`).
+- **Exposure:** Runtime `rand` is 0.8.6+ / 0.9.x after lockfile updates. The
+  0.7.x advisory (custom logger unsoundness) does not affect shipped binaries.
+- **Mitigation:** `cargo update -p rand@0.8` on each security pass; dismiss
+  the 0.7.x alert until `selectors`/`phf` 0.8 codegen is upgraded upstream.
+
+### NPM `esbuild` (dev-server, Windows-only advisory)
+
+- **Source:** `tsup` and other dev tooling pin `esbuild` ^0.27. Patched in
+  `>= 0.28.1` via root and package `overrides`.
+- **Exposure:** Dev/build tooling only; advisory targets the esbuild **dev
+  server on Windows**, not production bundles or macOS operator workflows.
