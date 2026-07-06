@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0](https://github.com/KleinPerkins/chaos-scheduler/compare/sdk-ts-v0.2.0...sdk-ts-v0.3.0) (2026-07-05)
+
+
+### Features
+
+* **api:** add REST workflow patch and rerun endpoints ([#62](https://github.com/KleinPerkins/chaos-scheduler/issues/62)) ([e9632cc](https://github.com/KleinPerkins/chaos-scheduler/commit/e9632cc25e429c672db0f67803e21dd9c1ac09ec))
+* **packages:** add SDK/MCP read methods for runs and queues ([#59](https://github.com/KleinPerkins/chaos-scheduler/issues/59)) ([8898873](https://github.com/KleinPerkins/chaos-scheduler/commit/8898873c6affcf768355cf380cd7fdf66f126ce1))
+
+
+### Bug Fixes
+
+* enforce protected environment writes ([#44](https://github.com/KleinPerkins/chaos-scheduler/issues/44)) ([2432dce](https://github.com/KleinPerkins/chaos-scheduler/commit/2432dcee356c0bf7b714770622e36223b045ae61))
+* persist queued idempotency outcomes ([#45](https://github.com/KleinPerkins/chaos-scheduler/issues/45)) ([c131c14](https://github.com/KleinPerkins/chaos-scheduler/commit/c131c14d9bf7b0de10effb5f154507c3b84319c3))
+* **sdk:** canonical inbound webhook signing ([#69](https://github.com/KleinPerkins/chaos-scheduler/issues/69)) ([913cffc](https://github.com/KleinPerkins/chaos-scheduler/commit/913cffcb1eac035087afdbc774ce8bb0cf38fa0d))
+
 ## [0.2.0](https://github.com/KleinPerkins/chaos-scheduler/compare/sdk-ts-v0.1.0...sdk-ts-v0.2.0) (2026-07-04)
 
 

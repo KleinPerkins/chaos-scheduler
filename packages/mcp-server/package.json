@@ -1,6 +1,6 @@
 {
   "name": "@chaos-scheduler/mcp-server",
-  "version": "0.4.0",
+  "version": "0.3.0",
   "description": "Chaos MCP server — exposes the Chaos Scheduler to Cursor and other MCP clients as tools, resources, and prompts, over stdio (local) and Streamable HTTP (remote/team).",
   "license": "MIT",
   "repository": {
