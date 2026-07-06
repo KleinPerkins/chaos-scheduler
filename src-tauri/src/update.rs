@@ -210,7 +210,15 @@ fn tooltip_for(snapshot: &UpdateSnapshot) -> String {
     }
 }
 
-fn emit_snapshot(app: &AppHandle, snapshot: &UpdateSnapshot) {
+/// Generic over `R: Runtime` (rather than the concrete `AppHandle` alias
+/// every other function in this module uses) purely so unit tests can drive
+/// it against `tauri::test::mock_app()`'s `MockRuntime` — every production
+/// call site still passes the real `AppHandle` (= `AppHandle<Wry>`), which
+/// monomorphizes identically to the pre-generic version.
+pub(crate) fn emit_snapshot<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    snapshot: &UpdateSnapshot,
+) {
     if let Err(e) = app.emit(UPDATE_STATUS_EVENT, snapshot) {
         log::warn!("Failed to emit {UPDATE_STATUS_EVENT}: {e}");
     }
@@ -301,6 +309,38 @@ pub async fn run_check(app: &AppHandle, manual: bool) -> UpdateSnapshot {
 
     let result = snapshot.clone();
     drop(snapshot);
+    emit_snapshot(app, &result);
+    result
+}
+
+/// Applies a preferences patch (background-check toggle / skip-version) to
+/// the shared snapshot and broadcasts the result exactly like [`run_check`]
+/// and [`apply`] do (Sections 2 & 5) — the one code path
+/// `set_updater_preferences` routes through so a Skip / background-check
+/// toggle reaches every window and the tray tooltip immediately, instead of
+/// only the calling window's own return value.
+pub fn apply_preferences<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    background_check_enabled: Option<bool>,
+    skipped_version: Option<String>,
+    clear_skip: bool,
+) -> UpdateSnapshot {
+    let state = app.state::<UpdateState>();
+    let result = {
+        let mut snapshot = state
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(enabled) = background_check_enabled {
+            snapshot.background_check_enabled = enabled;
+        }
+        if clear_skip {
+            snapshot.skipped_version = None;
+        } else if let Some(version) = skipped_version {
+            snapshot.skipped_version = Some(version);
+        }
+        snapshot.clone()
+    };
     emit_snapshot(app, &result);
     result
 }
@@ -696,6 +736,63 @@ mod tests {
         let snap = state.snapshot();
         assert_eq!(snap.current_version, "2.0.0");
         assert!(!snap.background_check_enabled);
+    }
+
+    /// Regression test for the missing broadcast: `set_updater_preferences`
+    /// (via [`apply_preferences`]) must emit [`UPDATE_STATUS_EVENT`] exactly
+    /// like `run_check`/`apply` do, so a Skip / background-check-toggle
+    /// change reaches every window and the tray tooltip immediately instead
+    /// of only the calling window's own return value.
+    #[test]
+    fn apply_preferences_emits_update_status_event() {
+        use tauri::{Listener, Manager};
+
+        let app = tauri::test::mock_app();
+        let handle = app.handle();
+        handle.manage(UpdateState::new("1.0.0".to_string(), true, None));
+
+        let received: std::sync::Arc<Mutex<Option<UpdateSnapshot>>> =
+            std::sync::Arc::new(Mutex::new(None));
+        let received_clone = received.clone();
+        handle.listen(UPDATE_STATUS_EVENT, move |event| {
+            let snapshot: UpdateSnapshot =
+                serde_json::from_str(event.payload()).expect("valid snapshot payload");
+            *received_clone
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(snapshot);
+        });
+
+        let result = apply_preferences(handle, Some(false), None, false);
+
+        assert!(!result.background_check_enabled);
+        let observed = received
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("update-status event should have fired");
+        assert!(!observed.background_check_enabled);
+    }
+
+    /// Regression test for finding #4: `apply_preferences` (the shared core
+    /// `set_updater_preferences` now routes through) must recover from a
+    /// poisoned mutex the same way every other `snapshot.lock()` call site in
+    /// this module does, instead of hard-failing.
+    #[test]
+    fn apply_preferences_recovers_from_a_poisoned_snapshot_mutex() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle();
+        handle.manage(UpdateState::new("1.0.0".to_string(), true, None));
+
+        let state = handle.state::<UpdateState>();
+        let poison_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state.snapshot.lock().unwrap();
+            panic!("simulated poisoning panic while holding the lock");
+        }));
+        assert!(poison_result.is_err());
+        assert!(state.snapshot.is_poisoned());
+
+        let result = apply_preferences(handle, None, Some("2.0.0".to_string()), false);
+        assert_eq!(result.skipped_version, Some("2.0.0".to_string()));
     }
 
     // Plain (non-`#[tokio::test]`) test so the process-global test-serialization

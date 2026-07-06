@@ -262,10 +262,16 @@ pub fn get_app_update_status(
 /// rather than a nullable `skipped_version` so the Tauri IPC boundary never
 /// has to distinguish "omitted" from "explicit null" — both collapse to the
 /// same `None` once they cross serde's `Option` handling.
+///
+/// The in-memory snapshot mutation + broadcast is delegated to
+/// [`crate::update::apply_preferences`], the same helper `run_check`/`apply`
+/// use to emit `update-status`, so a Skip / background-check-toggle change
+/// reaches every window and the tray tooltip immediately instead of only the
+/// calling window's own return value.
 #[tauri::command]
 pub fn set_updater_preferences(
+    app: tauri::AppHandle,
     state: State<AppState>,
-    update_state: State<crate::update::UpdateState>,
     background_check_enabled: Option<bool>,
     skipped_version: Option<String>,
     clear_skip: Option<bool>,
@@ -289,16 +295,12 @@ pub fn set_updater_preferences(
             .map_err(|e| e.to_string())?;
     }
 
-    let mut snapshot = update_state.snapshot.lock().map_err(|e| e.to_string())?;
-    if let Some(enabled) = background_check_enabled {
-        snapshot.background_check_enabled = enabled;
-    }
-    if clearing_skip {
-        snapshot.skipped_version = None;
-    } else if let Some(version) = skipped_version {
-        snapshot.skipped_version = Some(version);
-    }
-    Ok(snapshot.clone())
+    Ok(crate::update::apply_preferences(
+        &app,
+        background_check_enabled,
+        skipped_version,
+        clearing_skip,
+    ))
 }
 
 /// Download + install the available update, then relaunch. Routed through
