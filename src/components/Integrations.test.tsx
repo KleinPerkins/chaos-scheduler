@@ -157,3 +157,122 @@ describe("Integrations managed MCP live refresh", () => {
     expect(screen.getByText("Healthy")).toBeInTheDocument();
   });
 });
+
+describe("Integrations managed MCP destructive actions", () => {
+  afterEach(() => {
+    cleanup();
+    clearMocks();
+    delete window.__CHAOS_IPC_OVERRIDES__;
+  });
+
+  function installEnabledMcpMocks(): void {
+    installStrictIpcMocks();
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_mcp_integration_status: () => ({
+        ...defaultMcpIntegrationStatus,
+        enabled: true,
+        install_status: "installed",
+        provisioned_version: defaultMcpIntegrationStatus.pinned_version,
+        registered_in_cursor: true,
+        matches: true,
+      }),
+    };
+  }
+
+  // Regression test for the "Remove and Prepare to uninstall share one
+  // confirm-gate" finding: clicking "Prepare to uninstall" once must only
+  // arm *that* button's own confirm state — the adjacent "Remove" button's
+  // label/aria must be completely unaffected, so a confused user clicking
+  // "Remove" next always fires a real remove they explicitly confirmed
+  // (never a "prepare to uninstall" they never touched, and never the
+  // reverse).
+  it("arms only the clicked destructive action's confirm state, not the other one", async () => {
+    installEnabledMcpMocks();
+    render(<Integrations />);
+
+    const removeBtn = await screen.findByRole("button", {
+      name: "Remove managed integration",
+    });
+    const prepareBtn = screen.getByRole("button", {
+      name: "Prepare to uninstall",
+    });
+
+    // Clicking "Prepare to uninstall" once must only arm itself.
+    fireEvent.click(prepareBtn);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Confirm prepare to uninstall" }),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("button", { name: "Remove managed integration" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "Confirm remove managed integration",
+      }),
+    ).not.toBeInTheDocument();
+
+    // Clicking the still-unarmed "Remove" button now must only arm itself,
+    // not fire (or reflect confirmation of) the prepare-to-uninstall action.
+    fireEvent.click(removeBtn);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", {
+          name: "Confirm remove managed integration",
+        }),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("button", { name: "Confirm prepare to uninstall" }),
+    ).toBeInTheDocument();
+  });
+
+  it("a plain remove click while armed calls remove with prepareToUninstall=false", async () => {
+    installEnabledMcpMocks();
+    let receivedArgs: Record<string, unknown> | undefined;
+    const registry = createDefaultIpcRegistry();
+    mockIPC(
+      (cmd, args) => {
+        if (cmd === "remove_mcp_integration") {
+          receivedArgs = (args ?? {}) as Record<string, unknown>;
+        }
+        return resolveIpcInvoke(
+          cmd,
+          (args ?? {}) as Record<string, unknown>,
+          registry,
+        );
+      },
+      { shouldMockEvents: true },
+    );
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_mcp_integration_status: () => ({
+        ...defaultMcpIntegrationStatus,
+        enabled: true,
+        registered_in_cursor: true,
+        matches: true,
+      }),
+    };
+
+    render(<Integrations />);
+    const removeBtn = await screen.findByRole("button", {
+      name: "Remove managed integration",
+    });
+    // Arm, then also click "Prepare to uninstall" in between (must not leak
+    // into the Remove confirm), then confirm Remove.
+    fireEvent.click(removeBtn);
+    const prepareBtn = await screen.findByRole("button", {
+      name: "Prepare to uninstall",
+    });
+    fireEvent.click(prepareBtn);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Confirm remove managed integration",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(receivedArgs).toEqual({ prepareToUninstall: false }),
+    );
+  });
+});

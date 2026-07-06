@@ -94,8 +94,18 @@ export default function Integrations() {
   const [mcpStatus, setMcpStatus] = useState<McpIntegrationStatus | null>(null);
   const [mcpUnavailable, setMcpUnavailable] = useState(false);
   const [mcpBusy, setMcpBusy] = useState(false);
+  // "Remove" and "Prepare to uninstall" are two distinct destructive
+  // actions that happen to share a backend command — each gets its own
+  // independent two-step confirm state so arming one can never be
+  // misread as confirming the other (see handleMcpRemoveClick /
+  // handleMcpPrepareUninstallClick below).
   const [mcpRemovePending, setMcpRemovePending] = useState(false);
   const mcpRemoveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [mcpPrepareUninstallPending, setMcpPrepareUninstallPending] =
+    useState(false);
+  const mcpPrepareUninstallTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
 
   const clearRevokeTimer = () => {
     if (revokeTimerRef.current) {
@@ -111,8 +121,16 @@ export default function Integrations() {
     }
   };
 
+  const clearMcpPrepareUninstallTimer = () => {
+    if (mcpPrepareUninstallTimerRef.current) {
+      clearTimeout(mcpPrepareUninstallTimerRef.current);
+      mcpPrepareUninstallTimerRef.current = null;
+    }
+  };
+
   useEffect(() => () => clearRevokeTimer(), []);
   useEffect(() => () => clearMcpRemoveTimer(), []);
+  useEffect(() => () => clearMcpPrepareUninstallTimer(), []);
 
   const notify = (msg: string, type: "info" | "error" | "success" = "info") => {
     setStatus(msg);
@@ -196,7 +214,20 @@ export default function Integrations() {
     }
   };
 
-  const handleMcpRemove = async (prepareToUninstall: boolean) => {
+  const performMcpRemove = async (prepareToUninstall: boolean) => {
+    setMcpBusy(true);
+    try {
+      const s = await removeMcpIntegration(prepareToUninstall);
+      setMcpStatus(s);
+      notify("Managed integration removed.", "success");
+    } catch (err) {
+      notify(String(err), "error");
+    } finally {
+      setMcpBusy(false);
+    }
+  };
+
+  const handleMcpRemoveClick = () => {
     if (!mcpRemovePending) {
       clearMcpRemoveTimer();
       setMcpRemovePending(true);
@@ -208,16 +239,22 @@ export default function Integrations() {
     }
     clearMcpRemoveTimer();
     setMcpRemovePending(false);
-    setMcpBusy(true);
-    try {
-      const s = await removeMcpIntegration(prepareToUninstall);
-      setMcpStatus(s);
-      notify("Managed integration removed.", "success");
-    } catch (err) {
-      notify(String(err), "error");
-    } finally {
-      setMcpBusy(false);
+    void performMcpRemove(false);
+  };
+
+  const handleMcpPrepareUninstallClick = () => {
+    if (!mcpPrepareUninstallPending) {
+      clearMcpPrepareUninstallTimer();
+      setMcpPrepareUninstallPending(true);
+      mcpPrepareUninstallTimerRef.current = setTimeout(
+        () => setMcpPrepareUninstallPending(false),
+        3000,
+      );
+      return;
     }
+    clearMcpPrepareUninstallTimer();
+    setMcpPrepareUninstallPending(false);
+    void performMcpRemove(true);
   };
 
   const copy = async (label: string, value: string) => {
@@ -542,7 +579,7 @@ export default function Integrations() {
                     type="button"
                     className="btn btn-danger"
                     disabled={mcpBusy}
-                    onClick={() => handleMcpRemove(false)}
+                    onClick={handleMcpRemoveClick}
                     aria-label={
                       mcpRemovePending
                         ? "Confirm remove managed integration"
@@ -555,9 +592,16 @@ export default function Integrations() {
                     type="button"
                     className="btn btn-ghost"
                     disabled={mcpBusy}
-                    onClick={() => handleMcpRemove(true)}
+                    onClick={handleMcpPrepareUninstallClick}
+                    aria-label={
+                      mcpPrepareUninstallPending
+                        ? "Confirm prepare to uninstall"
+                        : "Prepare to uninstall"
+                    }
                   >
-                    Prepare to uninstall
+                    {mcpPrepareUninstallPending
+                      ? "Confirm?"
+                      : "Prepare to uninstall"}
                   </button>
                 </>
               )}
