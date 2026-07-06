@@ -4,6 +4,7 @@ mod branding;
 mod commands;
 mod db;
 mod email;
+mod mcp;
 mod operators;
 mod scheduler;
 mod service;
@@ -375,6 +376,7 @@ pub fn run() {
                 .build(app)?;
 
             app.manage(TrayState { _icon: tray });
+            app.manage(mcp::McpState::default());
 
             log::info!("Chaos Scheduler started, tray icon created");
 
@@ -407,6 +409,9 @@ pub fn run() {
             commands::apply_update,
             commands::get_app_update_status,
             commands::set_updater_preferences,
+            commands::get_mcp_integration_status,
+            commands::provision_mcp_integration,
+            commands::remove_mcp_integration,
             commands::trigger_workflow,
             commands::enqueue_workflow,
             commands::rerun_workflow,

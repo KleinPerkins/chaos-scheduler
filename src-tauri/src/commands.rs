@@ -318,6 +318,82 @@ pub async fn apply_update(app: tauri::AppHandle) -> Result<serde_json::Value, St
     app.restart();
 }
 
+/// Read-only status for the managed Cursor/MCP integration card in
+/// Integrations. Never fails hard — a missing Node install, an unreachable
+/// API, or a Cursor config conflict are all reported as status fields, not
+/// as a rejected promise, so the UI can always render a coherent card.
+#[tauri::command]
+pub fn get_mcp_integration_status(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+) -> Result<crate::mcp::McpIntegrationStatus, String> {
+    use tauri::Manager;
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let config_path = crate::mcp::cursor_mcp_config_path()?;
+    Ok(crate::mcp::status(
+        &app_data_dir,
+        &state.service,
+        &config_path,
+    ))
+}
+
+/// Enable (or repair/re-provision) the managed Cursor/MCP integration:
+/// mints/reuses a scoped API key, installs the pinned `mcp-server` version
+/// into an app-owned directory, verifies it, and registers it in
+/// `~/.cursor/mcp.json`. Idempotent. `force` takes over a pre-existing
+/// unmanaged `chaos-scheduler` entry instead of reporting a conflict.
+///
+/// Shares a single-flight lock with [`remove_mcp_integration`] and the
+/// startup re-provision hook so concurrent callers can never race the same
+/// staging directory or config file.
+#[tauri::command]
+pub fn provision_mcp_integration(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    mcp_state: State<crate::mcp::McpState>,
+    force: Option<bool>,
+) -> Result<crate::mcp::McpIntegrationStatus, String> {
+    use tauri::Manager;
+    let _guard = mcp_state
+        .lock
+        .try_lock()
+        .map_err(|_| "MCP provisioning is already in progress".to_string())?;
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let config_path = crate::mcp::cursor_mcp_config_path()?;
+    crate::mcp::provision(
+        &app_data_dir,
+        &state.service,
+        &config_path,
+        force.unwrap_or(false),
+    )
+}
+
+/// Remove the managed integration: drop the managed `mcp.json` entry (only if
+/// app-owned), delete the app-managed install directory, and revoke the
+/// managed API key. `prepare_to_uninstall` additionally removes the
+/// launch-at-login launchd agent.
+#[tauri::command]
+pub fn remove_mcp_integration(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    mcp_state: State<crate::mcp::McpState>,
+    prepare_to_uninstall: Option<bool>,
+) -> Result<crate::mcp::McpIntegrationStatus, String> {
+    use tauri::Manager;
+    let _guard = mcp_state
+        .lock
+        .try_lock()
+        .map_err(|_| "MCP provisioning is already in progress".to_string())?;
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let config_path = crate::mcp::cursor_mcp_config_path()?;
+    crate::mcp::remove(
+        &app_data_dir,
+        &state.service,
+        &config_path,
+        prepare_to_uninstall.unwrap_or(false),
+    )
+}
+
 #[tauri::command]
 pub fn revoke_api_key(state: State<AppState>, id: String) -> Result<(), String> {
     state.service.revoke_api_key(&id).map_err(|e| e.to_string())
