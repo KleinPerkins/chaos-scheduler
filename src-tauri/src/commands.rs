@@ -359,12 +359,16 @@ pub fn provision_mcp_integration(
     let _guard = crate::mcp::try_lock_recovering(&mcp_state).map_err(|e| e.to_string())?;
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let config_path = crate::mcp::cursor_mcp_config_path()?;
-    crate::mcp::provision(
+    let result = crate::mcp::provision(
         &app_data_dir,
         &state.service,
         &config_path,
         force.unwrap_or(false),
-    )
+    );
+    if let Ok(status) = &result {
+        crate::mcp::emit_status_changed(&app, status);
+    }
+    result
 }
 
 /// Remove the managed integration: drop the managed `mcp.json` entry (only if
@@ -382,12 +386,16 @@ pub fn remove_mcp_integration(
     let _guard = crate::mcp::try_lock_recovering(&mcp_state).map_err(|e| e.to_string())?;
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let config_path = crate::mcp::cursor_mcp_config_path()?;
-    crate::mcp::remove(
+    let result = crate::mcp::remove(
         &app_data_dir,
         &state.service,
         &config_path,
         prepare_to_uninstall.unwrap_or(false),
-    )
+    );
+    if let Ok(status) = &result {
+        crate::mcp::emit_status_changed(&app, status);
+    }
+    result
 }
 
 #[tauri::command]

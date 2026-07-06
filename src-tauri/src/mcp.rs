@@ -52,6 +52,23 @@ pub const MCP_PACKAGE_NAME: &str = "@chaos-scheduler/mcp-server";
 /// hand or copied from the manual snippet.
 const MANAGED_BY_MARKER: &str = "Chaos Scheduler";
 
+/// Event emitted whenever the managed integration's status may have changed
+/// (provision, remove, or the background startup re-provision hook
+/// completing) — mirrors the updater's `update-status` event/`emit_snapshot`
+/// convention so the Integrations card can stay live without polling, even
+/// when the change happens on a background thread after the page already
+/// mounted.
+pub const MCP_STATUS_EVENT: &str = "mcp-status-changed";
+
+/// Best-effort emit of [`MCP_STATUS_EVENT`]; a failure to emit (e.g. no
+/// window yet) never fails the caller's own provision/remove/startup flow.
+pub fn emit_status_changed(app: &tauri::AppHandle, status: &McpIntegrationStatus) {
+    use tauri::Emitter;
+    if let Err(err) = app.emit(MCP_STATUS_EVENT, status) {
+        log::warn!("Failed to emit {MCP_STATUS_EVENT}: {err}");
+    }
+}
+
 /// Holds the single-flight provisioning lock shared by UI-triggered
 /// provision/remove calls and the post-launch re-provision hook, so staging
 /// dirs and `mcp.json` writes can never race each other.
@@ -1109,6 +1126,11 @@ pub fn spawn_reprovision_on_startup(app: tauri::AppHandle) {
                 "Startup MCP re-provision failed (previous integration state is left in place): {err}"
             );
         }
+        // Emit regardless of the outcome above: a page that mounted before
+        // this background thread finished (Ok or Err) must not be left
+        // showing a stale pre-startup-hook status indefinitely.
+        let status = status(&app_data_dir, &service, &config_path);
+        emit_status_changed(&app, &status);
     });
 }
 
