@@ -132,13 +132,6 @@ export interface ApiKey {
 
 // --- Updater (Phase 11) ---
 
-export interface UpdateStatus {
-  available: boolean;
-  current_version: string;
-  latest_version?: string | null;
-  notes?: string | null;
-}
-
 export type UpdatePhase =
   | "idle"
   | "checking"
@@ -1032,9 +1025,14 @@ export function setWorkflowSpec(
 
 // --- Updater (Phase 11) ---
 
-/** Checks for an available update. Registered on the backend; guarded via
- * {@link invokeOptional} so the Settings affordance renders on older builds. */
-export function checkForUpdate(): Promise<UpdateStatus> {
+/** Triggers a manual update check, routed through the same backend
+ * `run_check` code path as the launch/6h background timer (so there is only
+ * one code path that ever talks to the updater plugin). The resulting
+ * snapshot arrives via the `update-status` event (see {@link useAppUpdate}'s
+ * `checkNow`) — this call's own return value is intentionally discarded by
+ * callers. Registered on the backend; guarded via {@link invokeOptional} so
+ * the Settings affordance renders on older builds. */
+export function checkForUpdate(): Promise<void> {
   return invokeOptional("check_for_update");
 }
 

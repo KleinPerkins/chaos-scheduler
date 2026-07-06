@@ -8,11 +8,8 @@ import {
   getEmailConfig,
   setEmailConfig,
   testEmailConfig,
-  checkForUpdate,
-  applyUpdate,
   isCommandUnavailable,
   type EmailConfig,
-  type UpdateStatus,
 } from "../lib/commands";
 import { PRODUCT_NAME, EMAIL_FROM_NAME, APP_VERSION } from "../lib/branding";
 import Notice from "./ui/Notice";
@@ -36,12 +33,13 @@ export default function Settings() {
   );
   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const [updateInfo, setUpdateInfo] = useState<UpdateStatus | null>(null);
   const [updateChecking, setUpdateChecking] = useState(false);
-  const [updateApplying, setUpdateApplying] = useState(false);
+  const [updateInstalling, setUpdateInstalling] = useState(false);
   const [updaterUnavailable, setUpdaterUnavailable] = useState(false);
   const {
     snapshot: updateSnapshot,
+    checkNow,
+    install: installUpdate,
     setBackgroundCheckEnabled,
     skipVersion,
     clearSkippedVersion,
@@ -135,14 +133,13 @@ export default function Settings() {
     setUpdateChecking(true);
     setUpdaterUnavailable(false);
     try {
-      const info = await checkForUpdate();
-      setUpdateInfo(info);
-      showStatus(
-        info.available
-          ? `Update available: v${info.latest_version ?? "?"}`
-          : "You are on the latest version.",
-        info.available ? "info" : "success",
-      );
+      const result = await checkNow();
+      if (result?.phase === "idle") {
+        showStatus("You are on the latest version.", "success");
+      } else if (result?.phase === "available" && result.latest_version) {
+        showStatus(`Update available: v${result.latest_version}`, "info");
+      }
+      // An "error" phase already renders inline below; no separate toast.
     } catch (e) {
       if (isCommandUnavailable(e)) {
         setUpdaterUnavailable(true);
@@ -156,9 +153,10 @@ export default function Settings() {
   };
 
   const handleApplyUpdate = async () => {
-    setUpdateApplying(true);
+    if (!updateSnapshot?.latest_version) return;
+    setUpdateInstalling(true);
     try {
-      await applyUpdate();
+      await installUpdate(updateSnapshot.latest_version);
       showStatus("Update downloaded — the app will relaunch.", "success", 0);
     } catch (e) {
       if (isCommandUnavailable(e)) {
@@ -168,7 +166,7 @@ export default function Settings() {
         showStatus(`Update failed: ${e}`, "error");
       }
     } finally {
-      setUpdateApplying(false);
+      setUpdateInstalling(false);
     }
   };
 
@@ -658,25 +656,32 @@ export default function Settings() {
             <button
               className="btn btn-ghost btn-sm"
               onClick={handleCheckForUpdate}
-              disabled={updateChecking || updateApplying}
+              disabled={updateChecking || updateInstalling}
             >
               {updateChecking ? "Checking..." : "Check for updates"}
             </button>
-            {updateInfo?.available && (
-              <button
-                className="btn btn-primary btn-sm"
-                onClick={handleApplyUpdate}
-                disabled={updateApplying}
-              >
-                {updateApplying
-                  ? "Installing..."
-                  : `Install and Restart v${updateInfo.latest_version ?? ""}`}
-              </button>
-            )}
+            {updateSnapshot?.phase === "available" &&
+              updateSnapshot.latest_version && (
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={handleApplyUpdate}
+                  disabled={updateInstalling}
+                >
+                  {updateInstalling
+                    ? "Installing..."
+                    : `Install and Restart v${updateSnapshot.latest_version}`}
+                </button>
+              )}
           </div>
-          {updateInfo?.available && updateInfo.notes && (
+          {updateSnapshot?.phase === "available" && updateSnapshot.notes && (
             <div className="settings-hint settings-release-notes">
-              {updateInfo.notes}
+              {updateSnapshot.notes}
+            </div>
+          )}
+          {updateSnapshot?.phase === "error" && updateSnapshot.last_error && (
+            <div className="settings-status settings-status--error">
+              Update check failed ({updateSnapshot.last_error.kind}):{" "}
+              {updateSnapshot.last_error.message}
             </div>
           )}
           {updateSnapshot?.skipped_version ? (

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   applyUpdate,
+  checkForUpdate,
   getAppUpdateStatus,
   isCommandUnavailable,
   setUpdaterPreferences,
@@ -27,10 +28,12 @@ export function useAppUpdate() {
       const status = await getAppUpdateStatus();
       setSnapshot(status);
       setUnavailable(false);
+      return status;
     } catch (e) {
       if (isCommandUnavailable(e)) {
         setUnavailable(true);
       }
+      return null;
     }
   }, []);
 
@@ -54,6 +57,18 @@ export function useAppUpdate() {
   const install = useCallback((expectedVersion?: string) => {
     return applyUpdate(expectedVersion);
   }, []);
+
+  /**
+   * Triggers a real, manual on-demand check (unlike `refresh`, which only
+   * re-reads whatever the backend last observed with no network round-trip).
+   * `check_for_update` broadcasts its result via the `update-status` event
+   * before it resolves, so `refresh()` afterwards is a defensive re-read
+   * rather than the primary update path.
+   */
+  const checkNow = useCallback(async () => {
+    await checkForUpdate();
+    return refresh();
+  }, [refresh]);
 
   const setBackgroundCheckEnabled = useCallback(async (enabled: boolean) => {
     const next = await setUpdaterPreferences({
@@ -85,6 +100,7 @@ export function useAppUpdate() {
     snapshot,
     unavailable,
     refresh,
+    checkNow,
     install,
     setBackgroundCheckEnabled,
     skipVersion,
