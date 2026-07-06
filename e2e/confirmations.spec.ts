@@ -32,7 +32,7 @@ test.describe("Destructive confirmations", () => {
     page,
   }) => {
     await gotoDashboard(page);
-    await openSidebar(page, "Dashboard");
+    await openSidebar(page, "Workflows");
     await workflowCard(page).getByRole("button", { name: "History" }).click();
 
     await expect(

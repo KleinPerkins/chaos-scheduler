@@ -5,7 +5,7 @@ import { gotoDashboard, openSidebar } from "./support/nav";
 test.describe("Enqueue workflow", () => {
   test("enqueue shows success notice with queued run id", async ({ page }) => {
     await gotoDashboard(page);
-    await openSidebar(page, "Dashboard");
+    await openSidebar(page, "Workflows");
     await expect(page.getByText("Nightly sync")).toBeVisible();
 
     await page.getByRole("button", { name: "Enqueue Nightly sync" }).click();
