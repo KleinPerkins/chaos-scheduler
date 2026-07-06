@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v0.3.0...chaos-scheduler-v0.3.1) (2026-07-06)
+
+
+### Bug Fixes
+
+* **desktop:** align tauri crate to 2.11 to match @tauri-apps/api ([#82](https://github.com/KleinPerkins/chaos-scheduler/issues/82)) ([1841217](https://github.com/KleinPerkins/chaos-scheduler/commit/1841217356d44e67c1037625e8622f4a00117c36))
+
 ## [0.3.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v0.2.0...chaos-scheduler-v0.3.0) (2026-07-05)
 
 
