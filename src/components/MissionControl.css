@@ -14,7 +14,11 @@
   justify-content: space-between;
   gap: 16px;
   padding: 12px 0;
-  background: linear-gradient(180deg, var(--bg-primary) 70%, rgba(15, 17, 23, 0));
+  background: linear-gradient(
+    180deg,
+    var(--bg-primary) 70%,
+    rgba(var(--bg-primary-rgb), 0)
+  );
 }
 
 .mc-tabs,
@@ -22,7 +26,7 @@
   display: inline-flex;
   gap: 3px;
   padding: 4px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(var(--elevate-rgb), 0.03);
   border: 1px solid var(--border);
   border-radius: 999px;
 }
@@ -40,7 +44,7 @@
 .mc-segmented button.active {
   background: var(--bg-tertiary);
   color: var(--text-primary);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 0 0 1px rgba(var(--elevate-rgb), 0.04);
 }
 
 .mc-filters {
@@ -58,8 +62,16 @@
 .mc-hero-panel,
 .mc-panel {
   background:
-    radial-gradient(circle at top left, rgba(124, 108, 255, 0.15), transparent 34%),
-    linear-gradient(145deg, rgba(26, 29, 39, 0.98), rgba(18, 21, 30, 0.98));
+    radial-gradient(
+      circle at top left,
+      rgba(var(--accent-rgb), 0.15),
+      transparent 34%
+    ),
+    linear-gradient(
+      145deg,
+      rgba(var(--surface-overlay-rgb), 0.98),
+      rgba(var(--surface-overlay-rgb), 0.98)
+    );
   border: 1px solid var(--border);
   border-radius: 18px;
   box-shadow: var(--shadow);
@@ -105,9 +117,9 @@
 .mc-sla-card,
 .mc-upcoming-card,
 .mc-telemetry-card {
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(var(--elevate-rgb), 0.06);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.035);
+  background: rgba(var(--elevate-rgb), 0.035);
 }
 
 .mc-stat-card {
@@ -194,9 +206,9 @@
   gap: 10px;
   width: 100%;
   padding: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(var(--elevate-rgb), 0.05);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.025);
+  background: rgba(var(--elevate-rgb), 0.025);
   color: var(--text-primary);
   text-align: left;
 }
@@ -206,18 +218,18 @@
 }
 
 .mc-attention-item.error {
-  border-color: rgba(234, 67, 53, 0.25);
+  border-color: rgba(var(--error-rgb), 0.25);
 }
 
 .mc-attention-item.warning {
-  border-color: rgba(251, 188, 4, 0.25);
+  border-color: rgba(var(--warning-rgb), 0.25);
 }
 
 .mc-attention-severity,
 .mc-asset-kind {
   padding: 3px 7px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(var(--elevate-rgb), 0.07);
   color: var(--text-secondary);
   font-size: 10px;
   font-weight: 700;
@@ -287,7 +299,7 @@
   padding: 10px;
   text-align: left;
   vertical-align: top;
-  background: rgba(255, 255, 255, 0.025);
+  background: rgba(var(--elevate-rgb), 0.025);
 }
 
 .mc-matrix thead th {
@@ -309,7 +321,7 @@
 
 .mc-inline-error,
 .mc-error {
-  border-color: rgba(234, 67, 53, 0.35);
+  border-color: rgba(var(--error-rgb), 0.35);
   color: var(--error);
 }
 

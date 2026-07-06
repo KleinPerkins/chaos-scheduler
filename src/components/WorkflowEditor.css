@@ -6,7 +6,7 @@
 }
 
 .editor-error {
-  background: rgba(234, 67, 53, 0.1);
+  background: rgba(var(--error-rgb), 0.1);
   color: var(--error);
   padding: 10px 14px;
   border-radius: var(--radius);
@@ -62,16 +62,16 @@
   font-size: 11px;
   font-weight: 600;
   color: var(--accent);
-  background: rgba(124, 108, 255, 0.08);
-  border: 1px solid rgba(124, 108, 255, 0.2);
+  background: rgba(var(--accent-rgb), 0.08);
+  border: 1px solid rgba(var(--accent-rgb), 0.2);
   cursor: pointer;
   transition: all 0.15s;
   letter-spacing: 0.3px;
 }
 
 .btn-ai:hover:not(:disabled) {
-  background: rgba(124, 108, 255, 0.15);
-  border-color: rgba(124, 108, 255, 0.4);
+  background: rgba(var(--accent-rgb), 0.15);
+  border-color: rgba(var(--accent-rgb), 0.4);
 }
 
 .btn-ai:disabled {
@@ -104,8 +104,8 @@
 
 /* --- Managed / notice banners --- */
 .editor-managed-banner {
-  background: rgba(124, 108, 255, 0.08);
-  border: 1px dashed rgba(124, 108, 255, 0.35);
+  background: rgba(var(--accent-rgb), 0.08);
+  border: 1px dashed rgba(var(--accent-rgb), 0.35);
   border-radius: var(--radius);
   padding: 10px 14px;
   font-size: 12px;
@@ -114,8 +114,8 @@
 }
 
 .editor-notice {
-  background: rgba(124, 108, 255, 0.06);
-  border: 1px solid rgba(124, 108, 255, 0.2);
+  background: rgba(var(--accent-rgb), 0.06);
+  border: 1px solid rgba(var(--accent-rgb), 0.2);
   border-radius: var(--radius);
   padding: 8px 12px;
 }

@@ -14,7 +14,15 @@ export async function expectNoAxeViolations(
 
   if (serious.length > 0) {
     const summary = serious
-      .map((v) => `${v.id}: ${v.description} (${v.nodes.length} nodes)`)
+      .map((v) => {
+        const nodes = v.nodes
+          .map(
+            (n) =>
+              `    - ${n.target.join(" ")}\n      ${n.failureSummary ?? ""}`,
+          )
+          .join("\n");
+        return `${v.id}: ${v.description} (${v.nodes.length} nodes)\n${nodes}`;
+      })
       .join("\n");
     throw new Error(
       `axe violations${context ? ` (${context})` : ""}:\n${summary}`,

@@ -168,9 +168,9 @@
   flex-direction: column;
   gap: 2px;
   padding: 8px 12px;
-  background: rgba(124, 108, 255, 0.08);
+  background: rgba(var(--accent-rgb), 0.08);
   border-radius: var(--radius);
-  border: 1px solid rgba(124, 108, 255, 0.15);
+  border: 1px solid rgba(var(--accent-rgb), 0.15);
 }
 
 .sched-preview-text {
@@ -231,7 +231,7 @@
 .sched-time-remove:hover {
   color: var(--error);
   border-color: var(--error);
-  background: rgba(234, 67, 53, 0.08);
+  background: rgba(var(--error-rgb), 0.08);
 }
 
 .sched-time-add {

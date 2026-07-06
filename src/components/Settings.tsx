@@ -16,9 +16,13 @@ import {
 } from "../lib/commands";
 import { PRODUCT_NAME, EMAIL_FROM_NAME, APP_VERSION } from "../lib/branding";
 import Notice from "./ui/Notice";
+import ThemeToggle from "./ThemeToggle";
+import { useTheme } from "../hooks/useTheme";
 import "./Settings.css";
 
 export default function Settings() {
+  const { preference: themePreference, setPreference: setThemePreference } =
+    useTheme();
   const [workspaceRoot, setWorkspaceRoot] = useState("(detecting...)");
   const [pythonPath, setPythonPath] = useState("(detecting...)");
   const [notifyOnFailure, setNotifyOnFailure] = useState(true);
@@ -246,6 +250,28 @@ export default function Settings() {
       )}
 
       <div className="settings-sections">
+        <section className="settings-section">
+          <h2 className="settings-section-title">Appearance</h2>
+          <div className="settings-field">
+            <span className="settings-label" id="settings-theme-label">
+              Color theme
+            </span>
+            <div
+              className="settings-theme-control"
+              aria-labelledby="settings-theme-label"
+            >
+              <ThemeToggle
+                preference={themePreference}
+                onChange={setThemePreference}
+              />
+            </div>
+            <span className="settings-hint">
+              Light, dark, or match your system appearance. Applies instantly
+              and is remembered on this device.
+            </span>
+          </div>
+        </section>
+
         <section className="settings-section">
           <h2 className="settings-section-title">Paths</h2>
           <div className="settings-field">

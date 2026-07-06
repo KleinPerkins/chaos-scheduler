@@ -58,24 +58,24 @@
 .settings-status {
   padding: 8px 14px;
   margin-bottom: 16px;
-  background: rgba(124, 108, 255, 0.1);
+  background: rgba(var(--accent-rgb), 0.1);
   color: var(--accent);
   border-radius: var(--radius);
   font-size: 13px;
 }
 
 .settings-status--success {
-  background: rgba(46, 204, 113, 0.1);
-  color: #27ae60;
+  background: rgba(var(--success-rgb), 0.1);
+  color: var(--success);
 }
 
 .settings-status--error {
-  background: rgba(231, 76, 60, 0.1);
-  color: #e74c3c;
+  background: rgba(var(--error-rgb), 0.1);
+  color: var(--error);
 }
 
 .settings-status--info {
-  background: rgba(124, 108, 255, 0.1);
+  background: rgba(var(--accent-rgb), 0.1);
   color: var(--accent);
 }
 
@@ -181,7 +181,7 @@
 
 .subject-preview-text {
   font-size: 12px;
-  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
   padding: 6px 10px;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -196,4 +196,8 @@
 
 .settings-link:hover {
   text-decoration: underline;
+}
+
+.settings-theme-control {
+  max-width: 320px;
 }

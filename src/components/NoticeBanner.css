@@ -11,20 +11,20 @@
 }
 
 .notice-banner--info {
-  background: rgba(124, 108, 255, 0.08);
-  border-color: rgba(124, 108, 255, 0.25);
+  background: rgba(var(--accent-rgb), 0.08);
+  border-color: rgba(var(--accent-rgb), 0.25);
   color: var(--text-primary);
 }
 
 .notice-banner--success {
-  background: rgba(61, 220, 151, 0.08);
-  border-color: rgba(61, 220, 151, 0.25);
+  background: rgba(var(--success-rgb), 0.08);
+  border-color: rgba(var(--success-rgb), 0.25);
   color: var(--text-primary);
 }
 
 .notice-banner--error {
-  background: rgba(255, 107, 107, 0.08);
-  border-color: rgba(255, 107, 107, 0.25);
+  background: rgba(var(--error-rgb), 0.08);
+  border-color: rgba(var(--error-rgb), 0.25);
   color: var(--error);
 }
 
