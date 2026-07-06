@@ -140,6 +140,23 @@ jobs:
           # NOTE: renamed from `includeUpdaterJson` in tauri-action v1.
           uploadUpdaterJson: true
 
+      # Pin GitHub's "Latest" flag to THIS desktop release, after its assets are
+      # uploaded. release-please creates several releases per version (the linked
+      # chaos-scheduler-tauri-v*, plus sdk-ts-v* / mcp-server-v*), and GitHub's
+      # default make_latest marks the last-created non-prerelease release "Latest".
+      # That was landing on chaos-scheduler-tauri-v* (which carries NO assets), so
+      # the updater endpoint /releases/latest/download/latest.json 404'd and
+      # auto-update broke. The desktop release is the only one holding latest.json,
+      # so force it to "Latest" here — after upload, to avoid a transient 404.
+      # See docs/RELEASING.md → "Updater publishing" (multi-release 'Latest' pitfall).
+      - name: Pin "Latest" to the desktop release (updater endpoint)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ inputs.desktop_tag }}" \
+            --repo "${{ github.repository }}" \
+            --latest
+
   # ---------------------------------------------------------------------------
   # npm: publish the TypeScript SDK with provenance.
   # ---------------------------------------------------------------------------
