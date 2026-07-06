@@ -4976,10 +4976,16 @@ mod tests {
             utc_next, ny_next,
             "same cron in UTC vs New York should produce different UTC instants"
         );
-        // New York is behind UTC, so the UTC instant for NY 9:00 should be later
+        // New York is behind UTC, so 9:00 AM local maps to a later UTC
+        // time-of-day (13:00 EDT / 14:00 EST) than UTC 9:00 (09:00). Compare the
+        // UTC hour-of-day rather than the absolute instants: the two "next
+        // Monday 9am" occurrences can otherwise land on different calendar weeks
+        // depending on the current wall clock, which is irrelevant to the
+        // timezone offset this test asserts.
+        assert_eq!(utc_next.hour(), 9, "UTC 9:00 AM should map to 09:00 UTC");
         assert!(
-            ny_next > utc_next,
-            "New York 9:00 AM should map to a later UTC instant than UTC 9:00 AM"
+            ny_next.hour() > utc_next.hour(),
+            "New York 9:00 AM should map to a later UTC hour-of-day than UTC 9:00 AM"
         );
     }
 
