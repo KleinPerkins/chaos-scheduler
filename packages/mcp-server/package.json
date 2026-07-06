@@ -51,16 +51,16 @@
     "provenance": true
   },
   "dependencies": {
-    "@chaos-scheduler/sdk": "file:../sdk-ts",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "zod": "^4.4.3"
+    "@chaos-scheduler/sdk": "file:../sdk-ts"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^26.1.0",
     "esbuild": "^0.28.1",
     "tsup": "^8.5.1",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.9",
+    "zod": "^4.4.3"
   },
   "overrides": {
     "esbuild": "^0.28.1"
