@@ -1,6 +1,6 @@
 {
-  ".": "0.5.0",
-  "src-tauri": "0.5.0",
-  "packages/sdk-ts": "0.3.0",
-  "packages/mcp-server": "0.4.0"
+  ".": "0.6.0",
+  "src-tauri": "0.6.0",
+  "packages/sdk-ts": "0.4.0",
+  "packages/mcp-server": "0.5.0"
 }

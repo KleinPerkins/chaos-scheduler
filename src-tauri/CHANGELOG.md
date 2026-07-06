@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v0.5.0...chaos-scheduler-tauri-v0.6.0) (2026-07-06)
+
+
+### Features
+
+* expose email profiles over REST, SDK, and MCP ([#104](https://github.com/KleinPerkins/chaos-scheduler/issues/104)) ([6be9e0d](https://github.com/KleinPerkins/chaos-scheduler/commit/6be9e0d67126566478f10938e80d56ed5dff437b))
+
+
+### Bug Fixes
+
+* **cursor_agent:** correct Cloud Agents v1 schema and harden execution ([#105](https://github.com/KleinPerkins/chaos-scheduler/issues/105)) ([ae1ca39](https://github.com/KleinPerkins/chaos-scheduler/commit/ae1ca3994b6833e131978a8fc087c2fe199f22f4))
+
 ## [0.5.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v0.4.0...chaos-scheduler-tauri-v0.5.0) (2026-07-06)
 
 

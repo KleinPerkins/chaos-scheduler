@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/KleinPerkins/chaos-scheduler/compare/sdk-ts-v0.3.0...sdk-ts-v0.4.0) (2026-07-06)
+
+
+### Features
+
+* expose email profiles over REST, SDK, and MCP ([#104](https://github.com/KleinPerkins/chaos-scheduler/issues/104)) ([6be9e0d](https://github.com/KleinPerkins/chaos-scheduler/commit/6be9e0d67126566478f10938e80d56ed5dff437b))
+
 ## [0.3.0](https://github.com/KleinPerkins/chaos-scheduler/compare/sdk-ts-v0.2.0...sdk-ts-v0.3.0) (2026-07-05)
 
 
