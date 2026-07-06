@@ -301,21 +301,23 @@ pub fn set_updater_preferences(
     Ok(snapshot.clone())
 }
 
-/// Download + install the available update, then relaunch. Returns
-/// `applied: false` when there is nothing to install.
+/// Download + install the available update, then relaunch. Routed through
+/// [`crate::update::apply`] so download progress and the pre-install
+/// scheduler drain are visible through the same `update-status` event the
+/// check path emits. `expected_version`, when supplied, must match the
+/// version currently on offer or the call is refused (Section 6 consent
+/// guard) — the frontend passes the version shown in the banner/dialog the
+/// user actually clicked "Install" on.
+///
+/// On success this only returns for the "nothing to install" case; once an
+/// install is underway the process restarts (`app.restart()` never returns),
+/// so the frontend should not expect a response for a real update.
 #[tauri::command]
-pub async fn apply_update(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    use tauri_plugin_updater::UpdaterExt;
-    let updater = app.updater().map_err(|e| e.to_string())?;
-    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
-        return Ok(serde_json::json!({ "applied": false, "reason": "no update available" }));
-    };
-    update
-        .download_and_install(|_downloaded, _total| {}, || {})
-        .await
-        .map_err(|e| e.to_string())?;
-    // Relaunch into the freshly-installed version.
-    app.restart();
+pub async fn apply_update(
+    app: tauri::AppHandle,
+    expected_version: Option<String>,
+) -> Result<crate::update::UpdateSnapshot, String> {
+    crate::update::apply(&app, expected_version).await
 }
 
 /// Read-only status for the managed Cursor/MCP integration card in

@@ -1,10 +1,18 @@
-//! Background update-check state machine (updater UX plan, Sections 1-2, 4).
+//! Background update-check + apply/restart state machine (updater UX plan,
+//! Sections 1-4 & 6).
 //!
-//! A single Rust-owned snapshot (`Arc<Mutex<UpdateSnapshot>>`, managed as
-//! Tauri state) tracks the updater lifecycle. One background task performs a
+//! A single Rust-owned snapshot (`Mutex<UpdateSnapshot>`, managed as Tauri
+//! state) tracks the updater lifecycle. One background task performs a
 //! delayed launch check and a 6h periodic check; the manual Settings "Check
 //! for updates" button routes through the exact same [`run_check`] function
-//! so there is only one code path that ever talks to the updater plugin.
+//! so there is only one code path that ever talks to the updater plugin for
+//! checking, and [`apply`] is the one path for downloading/installing.
+//!
+//! [`apply`] re-verifies the offered version, refuses if `expected_version`
+//! no longer matches (Section 6 consent guard), downloads with progress
+//! emitted through the snapshot, then calls [`drain_before_install`] to stop
+//! the scheduler admitting new work before the (already signature-verified)
+//! artifact is installed and the app restarts.
 //!
 //! Persisted preferences (`updater.background_check_enabled`,
 //! `updater.skipped_version`) live in `scheduler_config` via [`crate::db`];
@@ -256,6 +264,182 @@ pub async fn run_check(app: &AppHandle, manual: bool) -> UpdateSnapshot {
     result
 }
 
+/// Signals the scheduler to stop admitting/launching new work, then waits a
+/// fixed grace period before the caller proceeds to install + restart
+/// (Section 6: "do not install while the scheduler can still admit or launch
+/// new work"). Takes an explicit duration so tests can prove the shutdown
+/// signal fires without waiting out the real (multi-second) production
+/// grace window; [`apply`] always passes [`crate::scheduler::process_exit_grace`].
+async fn drain_before_install(grace: Duration) {
+    crate::scheduler::initiate_shutdown();
+    tokio::time::sleep(grace).await;
+}
+
+fn fail_with(
+    app: &AppHandle,
+    state: &UpdateState,
+    phase: UpdatePhase,
+    err: &tauri_plugin_updater::Error,
+) -> String {
+    let mut snapshot = state
+        .snapshot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let info = UpdateErrorInfo {
+        kind: classify_updater_error(err).to_string(),
+        message: err.to_string(),
+    };
+    let message = info.message.clone();
+    snapshot.phase = phase;
+    snapshot.last_error = Some(info);
+    snapshot.progress = None;
+    let result = snapshot.clone();
+    drop(snapshot);
+    emit_snapshot(app, &result);
+    message
+}
+
+/// Downloads, drains, installs, and restarts into the currently-offered
+/// update (Sections 3, 4 & 6). `expected_version`, when provided, must match
+/// exactly or the call is refused — the exact-version consent guard v5 adds
+/// on top of v3's plain "apply the pending update".
+///
+/// Re-checks the endpoint rather than reusing a cached [`tauri_plugin_updater::Update`]
+/// handle, so the artifact that gets installed is always the one just
+/// verified against the accepted version, and the download URL/signature
+/// pair can never go stale between "banner shown" and "user clicks install".
+pub async fn apply(
+    app: &AppHandle,
+    expected_version: Option<String>,
+) -> Result<UpdateSnapshot, String> {
+    let state = app.state::<UpdateState>();
+
+    {
+        let snapshot = state
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if snapshot.phase == UpdatePhase::Downloading {
+            return Err("An update is already downloading.".to_string());
+        }
+    }
+
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = match updater.check().await {
+        Ok(Some(update)) => update,
+        Ok(None) => {
+            let mut snapshot = state
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            snapshot.phase = UpdatePhase::Idle;
+            snapshot.latest_version = None;
+            snapshot.notes = None;
+            let result = snapshot.clone();
+            drop(snapshot);
+            emit_snapshot(app, &result);
+            return Ok(result);
+        }
+        // Same error classification as `run_check` (Section 2), so a re-check
+        // that fails right as the user clicks "Install" leaves the same kind
+        // of actionable `last_error` behind rather than a bare string.
+        Err(err) => return Err(fail_with(app, &state, UpdatePhase::Available, &err)),
+    };
+
+    if let Some(expected) = expected_version.as_deref() {
+        if expected != update.version {
+            let mut snapshot = state
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            snapshot.phase = UpdatePhase::Available;
+            snapshot.latest_version = Some(update.version.clone());
+            snapshot.notes = update.body.clone();
+            drop(snapshot);
+            let result = state.snapshot();
+            emit_snapshot(app, &result);
+            return Err(format!(
+                "A newer version (v{}) is now available; refresh before installing.",
+                update.version
+            ));
+        }
+    }
+
+    {
+        let mut snapshot = state
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshot.phase = UpdatePhase::Downloading;
+        snapshot.latest_version = Some(update.version.clone());
+        snapshot.notes = update.body.clone();
+        snapshot.progress = Some(UpdateProgress { percent: Some(0.0) });
+        snapshot.last_error = None;
+        let result = snapshot.clone();
+        drop(snapshot);
+        emit_snapshot(app, &result);
+    }
+
+    let progress_app = app.clone();
+    let mut downloaded: usize = 0;
+    let download_result = update
+        .download(
+            move |chunk_len, content_length| {
+                downloaded += chunk_len;
+                let percent = content_length
+                    .filter(|total| *total > 0)
+                    .map(|total| (downloaded as f64 / total as f64) * 100.0);
+                let state = progress_app.state::<UpdateState>();
+                let mut snapshot = state
+                    .snapshot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                snapshot.progress = Some(UpdateProgress { percent });
+                let result = snapshot.clone();
+                drop(snapshot);
+                emit_snapshot(&progress_app, &result);
+            },
+            || {},
+        )
+        .await;
+
+    let bytes = match download_result {
+        Ok(bytes) => bytes,
+        Err(err) => return Err(fail_with(app, &state, UpdatePhase::Available, &err)),
+    };
+
+    // Point of no return: stop the scheduler from admitting/launching new
+    // work and give in-flight runs a bounded window before the artifact
+    // (already signature-verified inside `download()`) gets installed.
+    {
+        let mut snapshot = state
+            .snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshot.phase = UpdatePhase::ReadyToRestart;
+        let result = snapshot.clone();
+        drop(snapshot);
+        emit_snapshot(app, &result);
+    }
+
+    drain_before_install(crate::scheduler::process_exit_grace()).await;
+
+    if let Err(err) = update.install(bytes) {
+        // The artifact's signature was already verified during `download()`,
+        // so an `install()` failure here is an OS-mechanics issue (disk,
+        // permissions), not an integrity failure. The scheduler has already
+        // stopped admitting work for this process (Section 6 has no "un-
+        // shutdown" — matches how a normal quit behaves too), so restarting
+        // into the still-intact current binary is the only way back to a
+        // healthy scheduler; log loudly and proceed rather than leaving the
+        // app running with a permanently-dead scheduler.
+        log::error!(
+            "Update install failed after scheduler drain; restarting into the current version anyway: {err}"
+        );
+    }
+    app.restart();
+}
+
 async fn run_background_tick(app: &AppHandle) {
     let should_check = {
         let state = app.state::<UpdateState>();
@@ -384,5 +568,27 @@ mod tests {
         let snap = state.snapshot();
         assert_eq!(snap.current_version, "2.0.0");
         assert!(!snap.background_check_enabled);
+    }
+
+    // Plain (non-`#[tokio::test]`) test so the process-global test-serialization
+    // guard — a `std::sync::MutexGuard` — never has to be held across an
+    // `.await` point in its own generator, which `clippy::await_holding_lock`
+    // (rightly) forbids. The runtime lives entirely inside this sync fn; the
+    // guard is never captured by the inner `async move` block.
+    #[test]
+    fn drain_before_install_signals_shutdown_before_the_grace_elapses() {
+        let _guard = crate::scheduler::lock_shutdown_test_state();
+        assert!(!crate::scheduler::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed));
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            let handle = tokio::spawn(drain_before_install(Duration::from_millis(100)));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert!(
+                crate::scheduler::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed),
+                "drain should call initiate_shutdown() well before its grace period elapses"
+            );
+            handle.await.unwrap();
+        });
     }
 }
