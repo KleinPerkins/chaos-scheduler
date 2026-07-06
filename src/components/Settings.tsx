@@ -16,6 +16,7 @@ import {
 } from "../lib/commands";
 import { PRODUCT_NAME, EMAIL_FROM_NAME, APP_VERSION } from "../lib/branding";
 import Notice from "./ui/Notice";
+import EmailProfiles from "./EmailProfiles";
 import ThemeToggle from "./ThemeToggle";
 import { useTheme } from "../hooks/useTheme";
 import "./Settings.css";
@@ -578,6 +579,11 @@ export default function Settings() {
               </div>
             </div>
           )}
+        </section>
+
+        <section className="settings-section">
+          <h2 className="settings-section-title">Email Profiles</h2>
+          <EmailProfiles />
         </section>
 
         <section className="settings-section">

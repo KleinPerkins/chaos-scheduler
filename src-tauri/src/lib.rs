@@ -435,6 +435,11 @@ pub fn run() {
             commands::get_email_config,
             commands::set_email_config,
             commands::test_email_config,
+            commands::list_email_profiles,
+            commands::save_email_profile,
+            commands::delete_email_profile,
+            commands::test_email_profile,
+            commands::set_workflow_email_profile,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

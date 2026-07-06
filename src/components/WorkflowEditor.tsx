@@ -6,6 +6,8 @@ import {
   setWorkflowSpec,
   listAvailableScripts,
   listWorkflows,
+  listEmailProfiles,
+  setWorkflowEmailProfile,
   generateWorkflowDescription,
   environmentOf,
   isCommandUnavailable,
@@ -18,6 +20,7 @@ import type {
   StepSpec,
   TypedSpec,
   ActionSpec,
+  EmailProfile,
 } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
 import ScheduleBuilder, { cronToHuman } from "./ScheduleBuilder";
@@ -76,6 +79,10 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
   const [emailOnFailure, setEmailOnFailure] = useState(
     workflow?.email_on_failure ?? true,
   );
+  const [emailProfileId, setEmailProfileId] = useState(
+    workflow?.email_profile_id ?? "",
+  );
+  const [emailProfiles, setEmailProfiles] = useState<EmailProfile[]>([]);
   const [triggerConfig, setTriggerConfig] = useState(
     workflow?.trigger_config ?? "",
   );
@@ -123,6 +130,9 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
     listWorkflows()
       .then((w) => setAllWorkflows(w))
       .catch(() => setAllWorkflows([]));
+    listEmailProfiles()
+      .then(setEmailProfiles)
+      .catch(() => setEmailProfiles([]));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectedScript = scripts.find((s) => s.path === scriptPath);
@@ -251,6 +261,17 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           triggerConfig: triggerConfig || undefined,
           queueConfig: queueConfig || undefined,
         });
+      }
+
+      // Persist the selected failure-alert email profile (a nullable pointer;
+      // null falls back to the global config). Guarded so an older backend
+      // without the command still saves the base workflow.
+      if (!isManaged) {
+        try {
+          await setWorkflowEmailProfile(saved.id, emailProfileId || null);
+        } catch (profErr) {
+          if (!isCommandUnavailable(profErr)) throw profErr;
+        }
       }
 
       // Persist the execution spec (kind + steps/operator + actions +
@@ -520,6 +541,31 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
             Convenience flag preserved for compatibility. For finer control, add
             an Email action below. Requires email alerts configured in Settings.
           </span>
+          {emailOnFailure && (
+            <div style={{ marginTop: 10 }}>
+              <label className="editor-label" htmlFor="wf-email-profile">
+                Delivery profile
+              </label>
+              <select
+                id="wf-email-profile"
+                value={emailProfileId}
+                onChange={(e) => setEmailProfileId(e.target.value)}
+                disabled={isManaged}
+              >
+                <option value="">Global default (Settings)</option>
+                {emailProfiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                    {p.enabled ? "" : " (disabled)"}
+                  </option>
+                ))}
+              </select>
+              <span className="editor-hint">
+                Which named email profile receives failure alerts. Manage
+                profiles in Settings → Email Profiles.
+              </span>
+            </div>
+          )}
         </div>
 
         <div className="editor-field editor-actions-section">

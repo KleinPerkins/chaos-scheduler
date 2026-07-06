@@ -89,6 +89,10 @@ pub struct Workflow {
     pub timezone: String,
     pub trigger_config: Option<String>,
     pub queue_config: Option<String>,
+    /// Optional named [`EmailProfile`] selected for this workflow's failure
+    /// alerts. `None` falls back to the global email config.
+    #[serde(default)]
+    pub email_profile_id: Option<String>,
     pub last_run_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -587,6 +591,46 @@ impl Default for EmailConfig {
     }
 }
 
+/// A named, reusable email-delivery profile. Workflows may select one for
+/// their failure alerts via [`Workflow::email_profile_id`]; when none is
+/// selected the global [`EmailConfig`] is used. Additive over the singleton
+/// `email_config` — the global config remains the master enable switch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailProfile {
+    #[serde(default)]
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub alert_email: String,
+    pub smtp_host: String,
+    pub smtp_port: i32,
+    pub smtp_user: String,
+    pub smtp_password: String,
+    pub from_address: String,
+    pub from_name: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+impl EmailProfile {
+    /// Project a profile onto the transport-level [`EmailConfig`] used by the
+    /// send path.
+    pub fn to_email_config(&self) -> EmailConfig {
+        EmailConfig {
+            enabled: self.enabled,
+            alert_email: self.alert_email.clone(),
+            smtp_host: self.smtp_host.clone(),
+            smtp_port: self.smtp_port,
+            smtp_user: self.smtp_user.clone(),
+            smtp_password: self.smtp_password.clone(),
+            from_address: self.from_address.clone(),
+            from_name: self.from_name.clone(),
+        }
+    }
+}
+
 /// A user-managed execution environment: the first-class replacement for the
 /// overloaded `corpus`. Partitions queues/telemetry and can carry a default
 /// working directory and queue caps.
@@ -781,6 +825,7 @@ impl Database {
         let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN error_analysis TEXT;");
         let _ = conn
             .execute_batch("ALTER TABLE workflows ADD COLUMN email_on_failure INTEGER DEFAULT 1;");
+        let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN email_profile_id TEXT;");
         let _ = conn.execute_batch(
             "ALTER TABLE workflows ADD COLUMN corpus TEXT NOT NULL DEFAULT 'source';",
         );
@@ -811,6 +856,22 @@ impl Database {
                 from_name TEXT DEFAULT 'Chaos Scheduler'
             );
             INSERT OR IGNORE INTO email_config (id) VALUES (1);",
+        )?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS email_profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                alert_email TEXT NOT NULL DEFAULT '',
+                smtp_host TEXT NOT NULL DEFAULT 'smtp.gmail.com',
+                smtp_port INTEGER NOT NULL DEFAULT 587,
+                smtp_user TEXT NOT NULL DEFAULT '',
+                smtp_password TEXT NOT NULL DEFAULT '',
+                from_address TEXT NOT NULL DEFAULT '',
+                from_name TEXT NOT NULL DEFAULT 'Chaos Scheduler',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
         )?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS run_attempts (
@@ -1497,7 +1558,7 @@ impl Database {
     pub fn list_workflows(&self) -> rusqlite::Result<Vec<Workflow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), corpus), COALESCE(managed_externally, CASE WHEN corpus = 'source' THEN 1 ELSE 0 END), COALESCE(kind, 'generic'), spec_json FROM workflows ORDER BY corpus, name"
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), corpus), COALESCE(managed_externally, CASE WHEN corpus = 'source' THEN 1 ELSE 0 END), COALESCE(kind, 'generic'), spec_json, email_profile_id FROM workflows ORDER BY corpus, name"
         )?;
         let rows = stmt.query_map([], Self::row_to_workflow)?;
         rows.collect()
@@ -1534,13 +1595,14 @@ impl Database {
             domain: row.get(13).unwrap_or(None),
             trigger_config: row.get(14).unwrap_or(None),
             queue_config: row.get(15).unwrap_or(None),
+            email_profile_id: row.get(20).unwrap_or(None),
         })
     }
 
     pub fn get_workflow(&self, id: &str) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), corpus), COALESCE(managed_externally, CASE WHEN corpus = 'source' THEN 1 ELSE 0 END), COALESCE(kind, 'generic'), spec_json FROM workflows WHERE id = ?1",
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), corpus), COALESCE(managed_externally, CASE WHEN corpus = 'source' THEN 1 ELSE 0 END), COALESCE(kind, 'generic'), spec_json, email_profile_id FROM workflows WHERE id = ?1",
             params![id],
             Self::row_to_workflow,
         )
@@ -3075,7 +3137,7 @@ impl Database {
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), corpus), COALESCE(managed_externally, CASE WHEN corpus = 'source' THEN 1 ELSE 0 END), COALESCE(kind, 'generic'), spec_json
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, corpus, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), corpus), COALESCE(managed_externally, CASE WHEN corpus = 'source' THEN 1 ELSE 0 END), COALESCE(kind, 'generic'), spec_json, email_profile_id
              FROM workflows w
              WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), w.corpus) = ?1)
                AND (?2 = 'all'
@@ -4588,6 +4650,123 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    /// List all named email profiles, most-recently-updated first.
+    pub fn list_email_profiles(&self) -> rusqlite::Result<Vec<EmailProfile>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, enabled, alert_email, smtp_host, smtp_port, smtp_user, smtp_password, from_address, from_name, created_at, updated_at FROM email_profiles ORDER BY updated_at DESC, name",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_email_profile)?;
+        rows.collect()
+    }
+
+    /// Fetch a single email profile by id.
+    pub fn get_email_profile(&self, id: &str) -> rusqlite::Result<EmailProfile> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT id, name, enabled, alert_email, smtp_host, smtp_port, smtp_user, smtp_password, from_address, from_name, created_at, updated_at FROM email_profiles WHERE id = ?1",
+            params![id],
+            Self::row_to_email_profile,
+        )
+    }
+
+    fn row_to_email_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<EmailProfile> {
+        Ok(EmailProfile {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            enabled: row.get::<_, i32>(2)? != 0,
+            alert_email: row.get(3)?,
+            smtp_host: row.get(4)?,
+            smtp_port: row.get(5)?,
+            smtp_user: row.get(6)?,
+            smtp_password: row.get(7)?,
+            from_address: row.get(8)?,
+            from_name: row.get(9)?,
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
+        })
+    }
+
+    /// Insert or update an email profile. A blank `id` is treated as a new
+    /// profile and a uuid is generated. Returns the persisted profile.
+    pub fn upsert_email_profile(&self, profile: &EmailProfile) -> rusqlite::Result<EmailProfile> {
+        let conn = self.conn()?;
+        let id = if profile.id.trim().is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            profile.id.clone()
+        };
+        conn.execute(
+            "INSERT INTO email_profiles (id, name, enabled, alert_email, smtp_host, smtp_port, smtp_user, smtp_password, from_address, from_name, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'), datetime('now'))
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                enabled = excluded.enabled,
+                alert_email = excluded.alert_email,
+                smtp_host = excluded.smtp_host,
+                smtp_port = excluded.smtp_port,
+                smtp_user = excluded.smtp_user,
+                smtp_password = excluded.smtp_password,
+                from_address = excluded.from_address,
+                from_name = excluded.from_name,
+                updated_at = datetime('now')",
+            params![
+                id,
+                profile.name,
+                profile.enabled as i32,
+                profile.alert_email,
+                profile.smtp_host,
+                profile.smtp_port,
+                profile.smtp_user,
+                profile.smtp_password,
+                profile.from_address,
+                profile.from_name,
+            ],
+        )?;
+        self.get_email_profile(&id)
+    }
+
+    /// Delete an email profile and clear it from any workflow that referenced
+    /// it (those workflows fall back to the global config).
+    pub fn delete_email_profile(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE workflows SET email_profile_id = NULL WHERE email_profile_id = ?1",
+            params![id],
+        )?;
+        conn.execute("DELETE FROM email_profiles WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Set (or clear, with `None`) the email profile a workflow uses for
+    /// failure alerts.
+    pub fn set_workflow_email_profile(
+        &self,
+        workflow_id: &str,
+        profile_id: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE workflows SET email_profile_id = ?2, updated_at = datetime('now') WHERE id = ?1",
+            params![workflow_id, profile_id],
+        )?;
+        Ok(())
+    }
+
+    /// Resolve the transport-level email config for a send: a selected profile
+    /// overrides SMTP/sender/recipient; a missing/blank profile id falls back
+    /// to the global [`EmailConfig`].
+    pub fn resolve_email_config(&self, profile_id: Option<&str>) -> rusqlite::Result<EmailConfig> {
+        match profile_id {
+            Some(id) if !id.trim().is_empty() => match self.get_email_profile(id) {
+                Ok(profile) => Ok(profile.to_email_config()),
+                Err(rusqlite::Error::QueryReturnedNoRows) => self.get_email_config(),
+                Err(e) => Err(e),
+            },
+            _ => self.get_email_config(),
+        }
     }
 }
 

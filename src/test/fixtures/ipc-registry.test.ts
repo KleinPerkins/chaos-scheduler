@@ -75,6 +75,11 @@ describe("ipc fixture registry", () => {
       "get_email_config",
       "set_email_config",
       "test_email_config",
+      "list_email_profiles",
+      "save_email_profile",
+      "delete_email_profile",
+      "test_email_profile",
+      "set_workflow_email_profile",
     ];
 
     const registry = createDefaultIpcRegistry();

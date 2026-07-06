@@ -73,7 +73,12 @@ export type IpcCommand =
   | "generate_workflow_description"
   | "get_email_config"
   | "set_email_config"
-  | "test_email_config";
+  | "test_email_config"
+  | "list_email_profiles"
+  | "save_email_profile"
+  | "delete_email_profile"
+  | "test_email_profile"
+  | "set_workflow_email_profile";
 
 export type IpcArgs = Record<string, unknown>;
 
@@ -273,6 +278,23 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
     get_email_config: () => defaultEmailConfig,
     set_email_config: () => undefined,
     test_email_config: () => ({ success: true }),
+    list_email_profiles: () => [],
+    save_email_profile: (args) => ({
+      id: "profile-1",
+      name: "Profile",
+      enabled: true,
+      alert_email: "",
+      smtp_host: "smtp.gmail.com",
+      smtp_port: 587,
+      smtp_user: "",
+      smtp_password: "",
+      from_address: "",
+      from_name: "Chaos Scheduler",
+      ...((args?.profile as Record<string, unknown>) ?? {}),
+    }),
+    delete_email_profile: () => undefined,
+    test_email_profile: () => ({ success: true }),
+    set_workflow_email_profile: () => undefined,
   };
 }
 
