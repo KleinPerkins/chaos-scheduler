@@ -1039,6 +1039,40 @@ pub fn remove(
 /// because `provision` performs blocking subprocess/HTTP calls. Never blocks
 /// or fails app startup: a failure only updates the manifest's `last_error`
 /// field for the Integrations card to surface.
+/// Best-effort cleanup of leftover `mcp/staging-*` and `mcp/displaced-*`
+/// directories left behind by an install that was interrupted before it
+/// could finish or clean up after itself (OOM, force-quit, crash, or a
+/// racing `apply_update` restart). [`promote_staging`]'s "displaced" dirs
+/// and [`npm_install`]'s staging dirs are both meant to be transient — the
+/// happy path always removes them — but nothing previously reclaimed them
+/// if the process died mid-install, so they could accumulate indefinitely.
+/// Pure/filesystem-only so it's unit-testable without a real app handle.
+fn sweep_orphaned_staging_dirs(app_data_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(mcp_root(app_data_dir)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("staging-") || name.starts_with("displaced-") {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Production wrapper around [`sweep_orphaned_staging_dirs`]: resolves the
+/// real app data dir and sweeps it. Must be called before
+/// [`spawn_reprovision_on_startup`] so a fresh re-provision attempt never
+/// mistakes a stale in-progress staging dir left over from a previous crash
+/// for anything meaningful.
+pub fn sweep_orphaned_staging_dirs_on_startup(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    match app.path().app_data_dir() {
+        Ok(dir) => sweep_orphaned_staging_dirs(&dir),
+        Err(err) => log::warn!("Skipping orphaned MCP staging-dir sweep: {err}"),
+    }
+}
+
 pub fn spawn_reprovision_on_startup(app: tauri::AppHandle) {
     use tauri::Manager;
     std::thread::spawn(move || {
@@ -1697,6 +1731,38 @@ exit 0
             leftovers.is_empty(),
             "displaced staging dir must be cleaned up"
         );
+    }
+
+    /// Regression test for the "no cleanup of orphaned staging directories"
+    /// finding: leftover `staging-*` / `displaced-*` dirs from an install
+    /// interrupted before it could finish or clean up after itself (crash,
+    /// force-quit, OOM) must be swept, while a legitimately promoted
+    /// `versions/<version>` dir is left completely untouched.
+    #[test]
+    fn sweep_orphaned_staging_dirs_removes_stale_staging_and_displaced_dirs_only() {
+        let app_data_dir = tmpdir();
+        let root = mcp_root(&app_data_dir);
+        std::fs::create_dir_all(root.join("staging-0.5.0-abc123")).unwrap();
+        std::fs::create_dir_all(root.join("displaced-def456")).unwrap();
+        std::fs::create_dir_all(version_dir(&app_data_dir, "0.5.0")).unwrap();
+        std::fs::write(version_dir(&app_data_dir, "0.5.0").join("marker"), "keep").unwrap();
+
+        sweep_orphaned_staging_dirs(&app_data_dir);
+
+        assert!(!root.join("staging-0.5.0-abc123").exists());
+        assert!(!root.join("displaced-def456").exists());
+        assert!(version_dir(&app_data_dir, "0.5.0").exists());
+        assert_eq!(
+            std::fs::read_to_string(version_dir(&app_data_dir, "0.5.0").join("marker")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn sweep_orphaned_staging_dirs_is_a_no_op_when_mcp_root_does_not_exist() {
+        let app_data_dir = tmpdir();
+        // No mcp/ dir created at all — must not panic.
+        sweep_orphaned_staging_dirs(&app_data_dir);
     }
 
     #[test]
