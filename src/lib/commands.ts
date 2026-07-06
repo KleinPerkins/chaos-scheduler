@@ -139,6 +139,9 @@ export interface ApiKey {
   scopes: string;
   created_at?: string | null;
   last_used_at?: string | null;
+  /** Soft-deleted keys stay in the listing (as revoked) so the UI can reflect
+   * that a revoke persisted; the backend rejects them on auth. */
+  revoked?: boolean;
 }
 
 // --- Updater (Phase 11) ---
