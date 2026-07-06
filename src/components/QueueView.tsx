@@ -121,7 +121,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
       setDrafts((current) => {
         const next = { ...current };
         for (const queue of queueRows) {
-          const key = `${queue.corpus}/${queue.name}`;
+          const key = `${environmentOf(queue)}/${queue.name}`;
           if (!next[key]) next[key] = draftFromQueue(queue);
         }
         return next;
@@ -144,14 +144,14 @@ export default function QueueView({ onBack }: QueueViewProps) {
   const validationByQueue = useMemo(() => {
     const result: Record<string, string | null> = {};
     for (const queue of queues) {
-      const key = `${queue.corpus}/${queue.name}`;
+      const key = `${environmentOf(queue)}/${queue.name}`;
       result[key] = validateDraft(queue, drafts[key] ?? draftFromQueue(queue));
     }
     return result;
   }, [drafts, queues]);
 
   const saveQueue = async (queue: QueueInfo) => {
-    const key = `${queue.corpus}/${queue.name}`;
+    const key = `${environmentOf(queue)}/${queue.name}`;
     const draft = drafts[key] ?? draftFromQueue(queue);
     const validation = validateDraft(queue, draft);
     if (validation) {
@@ -163,7 +163,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
     try {
       await updateQueue(
         queue.name,
-        queue.corpus,
+        queue.environment,
         Number.parseInt(draft.capacity, 10),
         parseOptionalInt(draft.tagCap),
         parseOptionalInt(draft.maxQueued),
@@ -328,7 +328,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
         ) : (
           <div className="queue-grid">
             {queues.map((queue) => {
-              const key = `${queue.corpus}/${queue.name}`;
+              const key = `${environmentOf(queue)}/${queue.name}`;
               const draft = drafts[key] ?? draftFromQueue(queue);
               const validation = validationByQueue[key];
               return (

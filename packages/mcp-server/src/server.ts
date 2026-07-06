@@ -82,7 +82,7 @@ export function buildServer(deps: ServerDeps): McpServer {
     let env: string | undefined;
     try {
       const wf = await client.getWorkflow(id);
-      env = wf.environment ?? wf.corpus;
+      env = wf.environment;
     } catch (err) {
       // Fail closed: if we cannot resolve the workflow's environment while
       // protection is active, refuse the write rather than silently

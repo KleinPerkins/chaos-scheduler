@@ -33,16 +33,13 @@ const ROUTES: Record<string, unknown> = {
     environments: [{ id: "e1", name: "instance" }],
   },
   "GET /api/v1/workflows": {
-    workflows: [
-      { id: "w1", name: "A", environment: "instance", corpus: "instance" },
-    ],
+    workflows: [{ id: "w1", name: "A", environment: "instance" }],
   },
   "GET /api/v1/workflows/w1": {
     workflow: {
       id: "w1",
       name: "A",
       environment: "instance",
-      corpus: "instance",
     },
   },
   "POST /api/v1/workflows/w1/run": {
@@ -118,7 +115,6 @@ const ROUTES: Record<string, unknown> = {
       id: "w1",
       name: "A",
       environment: "instance",
-      corpus: "instance",
     },
   },
   "POST /api/v1/workflows/w1/rerun": {

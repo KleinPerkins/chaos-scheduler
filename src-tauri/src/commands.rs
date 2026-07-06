@@ -72,17 +72,12 @@ pub fn create_workflow(
     async_mode: Option<bool>,
     email_on_failure: Option<bool>,
     timezone: Option<String>,
-    corpus: Option<String>,
     environment: Option<String>,
     domain: Option<String>,
     trigger_config: Option<String>,
     queue_config: Option<String>,
 ) -> Result<Workflow, String> {
-    // Back-compat: accept `environment` (preferred) or legacy `corpus` as an
-    // alias so older frontends keep working; defaults to `instance`.
-    let environment = environment
-        .or(corpus)
-        .unwrap_or_else(|| "instance".to_string());
+    let environment = environment.unwrap_or_else(|| "instance".to_string());
     let draft = WorkflowDraft {
         name,
         description,
@@ -116,18 +111,13 @@ pub fn update_workflow(
     async_mode: Option<bool>,
     email_on_failure: Option<bool>,
     timezone: Option<String>,
-    corpus: Option<String>,
     environment: Option<String>,
     domain: Option<String>,
     trigger_config: Option<String>,
     queue_config: Option<String>,
 ) -> Result<Workflow, String> {
     let existing = state.db.get_workflow(&id).map_err(|e| e.to_string())?;
-    // Back-compat: accept `environment` (preferred) or legacy `corpus` alias,
-    // falling back to the existing partition.
-    let environment = environment
-        .or(corpus)
-        .unwrap_or_else(|| existing.environment.clone());
+    let environment = environment.unwrap_or_else(|| existing.environment.clone());
     let draft = WorkflowDraft {
         name,
         description,
@@ -882,7 +872,7 @@ pub fn query_token_usage_rollup(
         vec![
             "time_bucket".to_string(),
             "workflow_id".to_string(),
-            "corpus".to_string(),
+            "environment".to_string(),
             "domain".to_string(),
             "queue_name".to_string(),
             "provider".to_string(),
@@ -1257,7 +1247,6 @@ pub fn get_mission_control_snapshot(
                         MissionControlUpcomingRun {
                             workflow_id: workflow.id.clone(),
                             workflow_name: workflow.name.clone(),
-                            corpus: workflow.corpus.clone(),
                             environment: workflow.environment.clone(),
                             domain: workflow_owner(workflow),
                             trigger_kind,
@@ -1365,7 +1354,6 @@ pub fn get_scheduler_status(state: State<AppState>) -> Result<SchedulerStatus, S
                     scheduler::get_next_run_time(&cron, &w.timezone).map(|t| NextRun {
                         workflow_id: w.id.clone(),
                         workflow_name: w.name.clone(),
-                        corpus: w.corpus.clone(),
                         environment: w.environment.clone(),
                         next_time: t,
                     })
@@ -1398,7 +1386,6 @@ mod tests {
             enabled: true,
             async_mode: false,
             email_on_failure: true,
-            corpus: "source".to_string(),
             environment: "source".to_string(),
             managed_externally: true,
             kind: "generic".to_string(),
