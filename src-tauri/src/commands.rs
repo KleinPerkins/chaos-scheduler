@@ -1,9 +1,10 @@
 use crate::db::{
-    Database, EmailConfig, MissionControlNeedsAttentionItem, MissionControlPanelAvailability,
-    MissionControlPreferences, MissionControlSnapshot, MissionControlUpcomingRun, NextRun,
-    QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask,
-    SchedulerAsset, SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow,
-    WorkflowHistoryBucket, WorkflowResourceSample, WorkflowTokenUsageRollup,
+    Database, EmailConfig, EmailProfile, MissionControlNeedsAttentionItem,
+    MissionControlPanelAvailability, MissionControlPreferences, MissionControlSnapshot,
+    MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt,
+    RunMetric, RunRelationship, RunTask, SchedulerAsset, SchedulerDeadLetter, SchedulerStatus,
+    SlaViolation, Workflow, WorkflowHistoryBucket, WorkflowResourceSample,
+    WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use crate::service::{SchedulerService, WorkflowDraft};
@@ -1407,6 +1408,7 @@ mod tests {
             timezone: "UTC".to_string(),
             trigger_config: trigger_config.map(str::to_string),
             queue_config: None,
+            email_profile_id: None,
             last_run_at: None,
             created_at: "2026-05-12T00:00:00Z".to_string(),
             updated_at: "2026-05-12T00:00:00Z".to_string(),
@@ -1862,6 +1864,74 @@ pub fn test_email_config(state: State<AppState>) -> Result<serde_json::Value, St
     }
 
     send_email_alert(&config, None, "test")
+}
+
+fn mask_profile_password(mut profile: EmailProfile) -> EmailProfile {
+    if !profile.smtp_password.is_empty() {
+        profile.smtp_password = "••••••••".to_string();
+    }
+    profile
+}
+
+#[tauri::command]
+pub fn list_email_profiles(state: State<AppState>) -> Result<Vec<EmailProfile>, String> {
+    let profiles = state.db.list_email_profiles().map_err(|e| e.to_string())?;
+    Ok(profiles.into_iter().map(mask_profile_password).collect())
+}
+
+#[tauri::command]
+pub fn save_email_profile(
+    state: State<AppState>,
+    mut profile: EmailProfile,
+) -> Result<EmailProfile, String> {
+    // Restore the stored password when the client echoes back the mask.
+    if profile.smtp_password == "••••••••" {
+        profile.smtp_password = if profile.id.trim().is_empty() {
+            String::new()
+        } else {
+            state
+                .db
+                .get_email_profile(&profile.id)
+                .map(|p| p.smtp_password)
+                .unwrap_or_default()
+        };
+    }
+    let saved = state
+        .db
+        .upsert_email_profile(&profile)
+        .map_err(|e| e.to_string())?;
+    Ok(mask_profile_password(saved))
+}
+
+#[tauri::command]
+pub fn delete_email_profile(state: State<AppState>, id: String) -> Result<(), String> {
+    state
+        .db
+        .delete_email_profile(&id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn test_email_profile(state: State<AppState>, id: String) -> Result<serde_json::Value, String> {
+    let profile = state.db.get_email_profile(&id).map_err(|e| e.to_string())?;
+    let config = profile.to_email_config();
+    if config.alert_email.is_empty() || config.smtp_host.is_empty() {
+        return Err("Email profile is incomplete".to_string());
+    }
+    send_email_alert(&config, None, "test")
+}
+
+#[tauri::command]
+pub fn set_workflow_email_profile(
+    state: State<AppState>,
+    workflow_id: String,
+    profile_id: Option<String>,
+) -> Result<(), String> {
+    let profile_id = profile_id.filter(|s| !s.trim().is_empty());
+    state
+        .db
+        .set_workflow_email_profile(&workflow_id, profile_id.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 /// Send scheduler email natively via `lettre` (replaces the former

@@ -36,6 +36,9 @@ export interface Workflow {
   timezone: string;
   trigger_config?: string | null;
   queue_config?: string | null;
+  /** Named email profile used for this workflow's failure alerts; null falls
+   * back to the global email config. */
+  email_profile_id?: string | null;
   last_run_at: string | null;
   created_at: string;
   updated_at: string;
@@ -523,6 +526,23 @@ export interface EmailConfig {
   from_name: string;
 }
 
+/** A named, reusable email-delivery profile that workflows can select for
+ * their failure alerts. Mirrors `db::EmailProfile`. */
+export interface EmailProfile {
+  id: string;
+  name: string;
+  enabled: boolean;
+  alert_email: string;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_user: string;
+  smtp_password: string;
+  from_address: string;
+  from_name: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface ErrorAnalysis {
   diagnosis?: string;
   summary?: string;
@@ -883,6 +903,32 @@ export function testEmailConfig(): Promise<{
   error?: string;
 }> {
   return invoke("test_email_config");
+}
+
+export function listEmailProfiles(): Promise<EmailProfile[]> {
+  return invoke("list_email_profiles");
+}
+
+export function saveEmailProfile(profile: EmailProfile): Promise<EmailProfile> {
+  return invoke("save_email_profile", { profile });
+}
+
+export function deleteEmailProfile(id: string): Promise<void> {
+  return invoke("delete_email_profile", { id });
+}
+
+export function testEmailProfile(id: string): Promise<{
+  success?: boolean;
+  error?: string;
+}> {
+  return invoke("test_email_profile", { id });
+}
+
+export function setWorkflowEmailProfile(
+  workflowId: string,
+  profileId: string | null,
+): Promise<void> {
+  return invoke("set_workflow_email_profile", { workflowId, profileId });
 }
 
 // --- Environments (Phase 3) ---

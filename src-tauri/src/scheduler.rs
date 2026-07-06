@@ -3713,7 +3713,7 @@ fn dispatch_completion_actions_impl(
     };
 
     let email_configured = db
-        .get_email_config()
+        .resolve_email_config(workflow.email_profile_id.as_deref())
         .map(|c| c.enabled && !c.alert_email.trim().is_empty())
         .unwrap_or(false);
     let actions = select_completion_actions(
@@ -3750,6 +3750,7 @@ fn dispatch_completion_actions_impl(
                 run_id: run.id.clone(),
                 success,
                 result_payload: payload,
+                email_profile_id: workflow.email_profile_id.clone(),
             };
             for outcome in crate::actions::dispatch_actions_with_budget(
                 &actions,
@@ -3842,17 +3843,23 @@ fn send_sla_notifications(app: &tauri::AppHandle, db: &Arc<Database>) {
 }
 
 fn send_failure_email(db: &Database, _workspace_root: &str, result: &RunResult) {
-    let config = match db.get_email_config() {
-        Ok(c) if c.enabled && !c.alert_email.is_empty() => c,
-        _ => return,
-    };
-
     let run = match db.get_run(&result.run_id) {
         Ok(r) => r,
         Err(e) => {
             log::warn!("Failed to fetch run for email alert: {}", e);
             return;
         }
+    };
+
+    // Resolve the workflow's selected email profile (if any); a missing
+    // profile falls back to the global email config.
+    let profile_id = db
+        .get_workflow(&run.workflow_id)
+        .ok()
+        .and_then(|w| w.email_profile_id);
+    let config = match db.resolve_email_config(profile_id.as_deref()) {
+        Ok(c) if c.enabled && !c.alert_email.is_empty() => c,
+        _ => return,
     };
 
     let run_context = serde_json::json!({

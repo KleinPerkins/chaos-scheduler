@@ -2229,6 +2229,7 @@ mod tests {
                 "run_id": "smoke-run",
                 "status": "failed"
             }),
+            email_profile_id: None,
         };
         let action = ActionSpec::Webhook {
             url: "http://127.0.0.1:9/results".into(),

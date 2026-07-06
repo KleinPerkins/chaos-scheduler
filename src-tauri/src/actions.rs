@@ -207,6 +207,9 @@ pub struct ActionContext {
     pub success: bool,
     /// Serializable run result posted to webhooks / used to compose email.
     pub result_payload: serde_json::Value,
+    /// Optional named email profile selected by the workflow; `None` uses the
+    /// global email config for the email action's transport/sender/recipient.
+    pub email_profile_id: Option<String>,
 }
 
 /// Dispatch a list of actions, returning per-action outcomes. Never panics; a
@@ -280,7 +283,10 @@ fn dispatch_one(action: &ActionSpec, ctx: &ActionContext, budget: Duration) -> A
 }
 
 fn dispatch_email(to_override: Option<&str>, ctx: &ActionContext) -> Result<String, String> {
-    let mut config: EmailConfig = ctx.db.get_email_config().map_err(|e| e.to_string())?;
+    let mut config: EmailConfig = ctx
+        .db
+        .resolve_email_config(ctx.email_profile_id.as_deref())
+        .map_err(|e| e.to_string())?;
     if let Some(to) = to_override {
         config.alert_email = to.to_string();
     }
@@ -478,6 +484,7 @@ mod tests {
             run_id: "run-1".into(),
             success: true,
             result_payload: serde_json::json!({"status":"success","run_id":"run-1"}),
+            email_profile_id: None,
         };
         let action = ActionSpec::DesktopNotification { title: None };
 
@@ -504,6 +511,7 @@ mod tests {
             run_id: "run-1".into(),
             success: false,
             result_payload: serde_json::json!({"status":"failed","run_id":"run-1"}),
+            email_profile_id: None,
         };
         let action = ActionSpec::Webhook {
             url: "http://127.0.0.1:9/hook".into(),
@@ -530,6 +538,7 @@ mod tests {
             run_id: "run-1".into(),
             success: false,
             result_payload: serde_json::json!({"status":"failed","run_id":"run-1"}),
+            email_profile_id: None,
         };
         // A public-looking host that resolves to loopback must be rejected before
         // the connect, even though the literal host passes the string blocklist.
