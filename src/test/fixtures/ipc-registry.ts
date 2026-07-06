@@ -244,7 +244,7 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
     get_mission_control_preferences: () => defaultMissionControlPreferences,
     set_mission_control_preferences: (args) => ({
       default_landing: args.defaultLanding ?? "mission_control",
-      corpus_filter: String(args.corpusFilter ?? "all"),
+      environment_filter: String(args.environmentFilter ?? "all"),
       domain_filter: String(args.domainFilter ?? "all"),
     }),
     get_mission_control_snapshot: () => snapshot,

@@ -17,7 +17,7 @@ fn default_kind() -> String {
 /// Normalize a mission-control environment filter. Environments are
 /// user-managed, so any non-empty value is accepted verbatim as the partition
 /// to filter on; empty or "all" means no environment filter.
-fn normalize_mission_corpus_filter(value: &str) -> String {
+fn normalize_mission_environment_filter(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
         "all".to_string()
@@ -427,7 +427,7 @@ pub struct DomainOption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionControlPreferences {
     pub default_landing: String,
-    pub corpus_filter: String,
+    pub environment_filter: String,
     pub domain_filter: String,
 }
 
@@ -662,7 +662,7 @@ pub enum IdempotencyReservation {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 9;
+pub const CURRENT_SCHEMA_VERSION: i64 = 10;
 
 pub struct Database {
     path: String,
@@ -1125,6 +1125,7 @@ impl Database {
             (7, Self::migrate_v7_idempotency_contract),
             (8, Self::migrate_v8_execution_metadata),
             (9, Self::migrate_v9_drop_workflow_corpus),
+            (10, Self::migrate_v10_rename_mission_filter_key),
         ]
     }
 
@@ -1158,6 +1159,22 @@ impl Database {
                 SET environment = COALESCE(NULLIF(environment, ''), corpus, 'source')
                 WHERE environment IS NULL OR environment = '';
              ALTER TABLE workflows DROP COLUMN corpus;",
+        )?;
+        Ok(())
+    }
+
+    /// v10: rename the persisted mission-control filter preference key from the
+    /// legacy `mission_control.corpus_filter` to `mission_control.environment_filter`
+    /// so a user's saved partition filter survives the corpus->environment
+    /// rename. Idempotent: only moves the row when the new key is absent, then
+    /// clears any lingering legacy row.
+    fn migrate_v10_rename_mission_filter_key(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO scheduler_config (key, value, updated_at)
+                SELECT 'mission_control.environment_filter', value, updated_at
+                FROM scheduler_config
+                WHERE key = 'mission_control.corpus_filter';
+             DELETE FROM scheduler_config WHERE key = 'mission_control.corpus_filter';",
         )?;
         Ok(())
     }
@@ -3022,13 +3039,13 @@ impl Database {
         &self,
         status_filter: Option<&str>,
         trigger_kind: Option<&str>,
-        corpus_filter: Option<&str>,
+        environment_filter: Option<&str>,
         domain_filter: Option<&str>,
         limit: i64,
     ) -> rusqlite::Result<Vec<Run>> {
         let status_filter = status_filter.unwrap_or("all");
         let trigger_kind = trigger_kind.unwrap_or("all");
-        let corpus_filter = corpus_filter.unwrap_or("all");
+        let environment_filter = environment_filter.unwrap_or("all");
         let domain_filter = domain_filter.unwrap_or("all");
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -3048,7 +3065,7 @@ impl Database {
             params![
                 status_filter,
                 trigger_kind,
-                corpus_filter,
+                environment_filter,
                 domain_filter,
                 limit
             ],
@@ -3127,10 +3144,10 @@ impl Database {
 
     pub fn list_workflows_filtered(
         &self,
-        corpus_filter: &str,
+        environment_filter: &str,
         domain_filter: &str,
     ) -> rusqlite::Result<Vec<Workflow>> {
-        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -3142,15 +3159,18 @@ impl Database {
                  OR TRIM(w.domain) = ?2)
              ORDER BY COALESCE(NULLIF(w.environment, ''), 'source'), COALESCE(NULLIF(TRIM(w.domain), ''), 'Unowned'), w.name",
         )?;
-        let rows = stmt.query_map(params![corpus_filter, domain_filter], Self::row_to_workflow)?;
+        let rows = stmt.query_map(
+            params![environment_filter, domain_filter],
+            Self::row_to_workflow,
+        )?;
         rows.collect()
     }
 
     pub fn mission_control_domains(
         &self,
-        corpus_filter: &str,
+        environment_filter: &str,
     ) -> rusqlite::Result<Vec<DomainOption>> {
-        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT COALESCE(NULLIF(TRIM(domain), ''), 'Unowned') AS owner, COUNT(*)
@@ -3159,7 +3179,7 @@ impl Database {
              GROUP BY owner
              ORDER BY CASE owner WHEN 'Unowned' THEN 1 ELSE 0 END, owner",
         )?;
-        let rows = stmt.query_map(params![corpus_filter], |row| {
+        let rows = stmt.query_map(params![environment_filter], |row| {
             let label: String = row.get(0)?;
             Ok(DomainOption {
                 value: if label == "Unowned" {
@@ -3174,7 +3194,9 @@ impl Database {
         let mut out = vec![DomainOption {
             value: "all".to_string(),
             label: "All".to_string(),
-            workflow_count: self.list_workflows_filtered(&corpus_filter, "all")?.len() as i64,
+            workflow_count: self
+                .list_workflows_filtered(&environment_filter, "all")?
+                .len() as i64,
         }];
         out.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
         Ok(out)
@@ -3182,10 +3204,10 @@ impl Database {
 
     pub fn mission_control_header(
         &self,
-        corpus_filter: &str,
+        environment_filter: &str,
         domain_filter: &str,
     ) -> rusqlite::Result<MissionControlHeader> {
-        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         conn.query_row(
@@ -3208,7 +3230,7 @@ impl Database {
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
-            params![corpus_filter, domain_filter],
+            params![environment_filter, domain_filter],
             |row| {
                 Ok(MissionControlHeader {
                     active_workflows: row.get::<_, Option<i64>>(0)?.unwrap_or(0),
@@ -3222,11 +3244,11 @@ impl Database {
 
     pub fn mission_control_sla_summary(
         &self,
-        corpus_filter: &str,
+        environment_filter: &str,
         domain_filter: &str,
         violations_count: i64,
     ) -> rusqlite::Result<MissionControlSlaSummary> {
-        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         let (total, succeeded): (i64, i64) = conn.query_row(
@@ -3240,7 +3262,7 @@ impl Database {
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
-            params![corpus_filter, domain_filter],
+            params![environment_filter, domain_filter],
             |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
         )?;
         let median_wait_seconds = conn
@@ -3266,7 +3288,7 @@ impl Database {
                        OR (?2 = '__unowned__' AND (mw.domain IS NULL OR TRIM(mw.domain) = ''))
                        OR TRIM(mw.domain) = ?2)
                  )",
-                params![corpus_filter, domain_filter],
+                params![environment_filter, domain_filter],
                 |row| row.get(0),
             )
             .optional()?;
@@ -3278,7 +3300,7 @@ impl Database {
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
-            params![corpus_filter, domain_filter],
+            params![environment_filter, domain_filter],
             |row| row.get(0),
         )?;
         Ok(MissionControlSlaSummary {
@@ -3296,11 +3318,11 @@ impl Database {
 
     pub fn mission_control_recent_runs(
         &self,
-        corpus_filter: &str,
+        environment_filter: &str,
         domain_filter: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<Run>> {
-        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -3314,7 +3336,7 @@ impl Database {
              ORDER BY r.started_at DESC
              LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![corpus_filter, domain_filter, limit], |row| {
+        let rows = stmt.query_map(params![environment_filter, domain_filter, limit], |row| {
             Ok(run_from_row(row))
         })?;
         rows.collect()
@@ -3322,11 +3344,11 @@ impl Database {
 
     pub fn mission_control_failed_runs(
         &self,
-        corpus_filter: &str,
+        environment_filter: &str,
         domain_filter: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<Run>> {
-        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -3353,7 +3375,7 @@ impl Database {
              ORDER BY COALESCE(r.finished_at, r.started_at) DESC
              LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![corpus_filter, domain_filter, limit], |row| {
+        let rows = stmt.query_map(params![environment_filter, domain_filter, limit], |row| {
             Ok(run_from_row(row))
         })?;
         rows.collect()
@@ -3361,10 +3383,10 @@ impl Database {
 
     pub fn mission_control_failed_run_count(
         &self,
-        corpus_filter: &str,
+        environment_filter: &str,
         domain_filter: &str,
     ) -> rusqlite::Result<i64> {
-        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         conn.query_row(
@@ -3388,18 +3410,18 @@ impl Database {
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
-            params![corpus_filter, domain_filter],
+            params![environment_filter, domain_filter],
             |row| row.get(0),
         )
     }
 
     pub fn mission_control_live_activity(
         &self,
-        corpus_filter: &str,
+        environment_filter: &str,
         domain_filter: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<MissionControlActivityItem>> {
-        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -3413,7 +3435,7 @@ impl Database {
              ORDER BY CASE r.status WHEN 'running' THEN 0 ELSE 1 END, r.started_at DESC
              LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![corpus_filter, domain_filter, limit], |row| {
+        let rows = stmt.query_map(params![environment_filter, domain_filter, limit], |row| {
             let run_id: String = row.get(0)?;
             Ok(MissionControlActivityItem {
                 id: run_id.clone(),
@@ -3432,12 +3454,12 @@ impl Database {
 
     pub fn mission_control_freshness_ledger(
         &self,
-        corpus_filter: &str,
+        environment_filter: &str,
         domain_filter: &str,
         max_age_seconds: i64,
         limit: i64,
     ) -> rusqlite::Result<Vec<MissionControlFreshnessItem>> {
-        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let modifier = format!("-{} seconds", max_age_seconds.max(0));
         let conn = self.conn()?;
@@ -3460,7 +3482,7 @@ impl Database {
              LIMIT ?4",
         )?;
         let rows = stmt.query_map(
-            params![corpus_filter, domain_filter, modifier, limit],
+            params![environment_filter, domain_filter, modifier, limit],
             |row| {
                 let workflow_id: Option<String> = row.get(6)?;
                 Ok(MissionControlFreshnessItem {
@@ -3487,12 +3509,12 @@ impl Database {
 
     pub fn mission_control_workflow_telemetry(
         &self,
-        corpus_filter: &str,
+        environment_filter: &str,
         domain_filter: &str,
         window_modifier: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<MissionControlWorkflowTelemetry>> {
-        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -3538,7 +3560,7 @@ impl Database {
              ORDER BY vw.environment, COALESCE(NULLIF(TRIM(vw.domain), ''), 'Unowned'), vw.name",
         )?;
         let rows = stmt.query_map(
-            params![corpus_filter, domain_filter, window_modifier, limit],
+            params![environment_filter, domain_filter, window_modifier, limit],
             |row| {
                 Ok(MissionControlWorkflowTelemetry {
                     workflow_id: row.get(0)?,
@@ -4041,9 +4063,9 @@ impl Database {
             "dashboard" => "dashboard".to_string(),
             _ => "mission_control".to_string(),
         };
-        let corpus_filter = normalize_mission_corpus_filter(
+        let environment_filter = normalize_mission_environment_filter(
             &self
-                .get_string_config("mission_control.corpus_filter")?
+                .get_string_config("mission_control.environment_filter")?
                 .unwrap_or_else(|| "all".to_string()),
         );
         let domain_filter = normalize_mission_domain_filter(
@@ -4053,7 +4075,7 @@ impl Database {
         );
         Ok(MissionControlPreferences {
             default_landing,
-            corpus_filter,
+            environment_filter,
             domain_filter,
         })
     }
@@ -4061,20 +4083,23 @@ impl Database {
     pub fn set_mission_control_preferences(
         &self,
         default_landing: &str,
-        corpus_filter: &str,
+        environment_filter: &str,
         domain_filter: &str,
     ) -> rusqlite::Result<MissionControlPreferences> {
         let default_landing = match default_landing.trim() {
             "dashboard" => "dashboard".to_string(),
             _ => "mission_control".to_string(),
         };
-        let corpus_filter = normalize_mission_corpus_filter(corpus_filter);
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         for (key, value) in [
             ("mission_control.default_landing", default_landing.as_str()),
-            ("mission_control.corpus_filter", corpus_filter.as_str()),
+            (
+                "mission_control.environment_filter",
+                environment_filter.as_str(),
+            ),
             ("mission_control.domain_filter", domain_filter.as_str()),
         ] {
             tx.execute(
@@ -5129,11 +5154,11 @@ mod tests {
     }
 
     #[test]
-    fn migration_fixture_v7_to_v9_adds_execution_metadata_and_drops_workflow_corpus() {
+    fn migration_fixture_v7_to_v10_adds_execution_metadata_drops_corpus_renames_filter() {
         // Tripwire: refresh this fixture (seed schema + asserted columns) the
         // next time a migration lands so the newest N-1 -> N paths stay covered.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 9,
+            CURRENT_SCHEMA_VERSION, 10,
             "add a v(N-1)->v(N) fixture when a new migration ships"
         );
 
@@ -5144,12 +5169,13 @@ mod tests {
             path: db_path.to_string_lossy().to_string(),
         };
 
-        // Seed the pre-v8 shape of `runs` (no execution/truncation metadata) and
+        // Seed the pre-v8 shape of `runs` (no execution/truncation metadata),
         // the pre-v9 shape of `workflows` (still carrying the legacy `corpus`
-        // shadow alongside the authoritative `environment`), then stamp the DB
-        // at v7 so exactly the v8 and v9 migrations are pending. We drive
-        // `run_migrations` directly to isolate the transitions rather than
-        // rebuilding the entire intermediate schema through `init`.
+        // shadow alongside the authoritative `environment`), and the pre-v10
+        // `scheduler_config` (still holding `mission_control.corpus_filter`),
+        // then stamp the DB at v7 so exactly the v8, v9, and v10 migrations are
+        // pending. We drive `run_migrations` directly to isolate the transitions
+        // rather than rebuilding the entire intermediate schema through `init`.
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(
@@ -5182,12 +5208,19 @@ mod tests {
                     created_at TEXT,
                     updated_at TEXT
                 );
+                CREATE TABLE scheduler_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT
+                );
                 INSERT INTO runs (id, workflow_id, started_at, status)
                     VALUES ('run-mig', 'wf-mig', '2026-01-01T00:00:00Z', 'running');
                 INSERT INTO workflows (id, name, script_path, cron_schedule, corpus, environment)
                     VALUES ('wf-mig', 'Mig', 's.py', '0 0 * * *', 'staging', 'staging');
                 INSERT INTO workflows (id, name, script_path, cron_schedule, corpus, environment)
                     VALUES ('wf-legacy', 'Legacy', 'l.py', '0 0 * * *', 'prod', NULL);
+                INSERT INTO scheduler_config (key, value, updated_at)
+                    VALUES ('mission_control.corpus_filter', 'staging', '2026-01-01T00:00:00Z');
                 PRAGMA user_version = 7;",
             )
             .unwrap();
@@ -5207,7 +5240,7 @@ mod tests {
             assert_eq!(v, 7);
         }
 
-        // Apply the pending v8 + v9 migrations.
+        // Apply the pending v8 + v9 + v10 migrations.
         let conn = db.conn().unwrap();
         db.run_migrations(&conn, 7).unwrap();
 
@@ -5267,6 +5300,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(legacy_env, "prod");
+
+        // v10 renames the persisted mission-control filter key, carrying the
+        // saved partition preference across the corpus->environment rename.
+        let renamed: String = conn
+            .query_row(
+                "SELECT value FROM scheduler_config WHERE key = 'mission_control.environment_filter'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(renamed, "staging");
+        let legacy_key_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM scheduler_config WHERE key = 'mission_control.corpus_filter'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            legacy_key_count, 0,
+            "v10 migration should remove the legacy mission filter key"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -6148,7 +6203,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         )
         .unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO scheduler_config (key, value) VALUES ('mission_control.corpus_filter', 'both')",
+            "INSERT OR REPLACE INTO scheduler_config (key, value) VALUES ('mission_control.environment_filter', 'both')",
             [],
         )
         .unwrap();
@@ -6162,14 +6217,14 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(prefs.default_landing, "mission_control");
         // Environments are user-managed: an arbitrary environment filter value
         // is now preserved verbatim (no longer collapsed to "all").
-        assert_eq!(prefs.corpus_filter, "both");
+        assert_eq!(prefs.environment_filter, "both");
         assert_eq!(prefs.domain_filter, "all");
 
         let prefs = db
             .set_mission_control_preferences("dashboard", "source", "Unowned")
             .unwrap();
         assert_eq!(prefs.default_landing, "dashboard");
-        assert_eq!(prefs.corpus_filter, "source");
+        assert_eq!(prefs.environment_filter, "source");
         assert_eq!(prefs.domain_filter, "__unowned__");
 
         let _ = std::fs::remove_dir_all(dir);

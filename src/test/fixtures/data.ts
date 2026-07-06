@@ -79,7 +79,7 @@ export const sampleEnvironments: Environment[] = [
 
 export const defaultMissionControlPreferences: MissionControlPreferences = {
   default_landing: "mission_control",
-  corpus_filter: "all",
+  environment_filter: "all",
   domain_filter: "all",
 };
 

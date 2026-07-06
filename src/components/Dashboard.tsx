@@ -50,7 +50,7 @@ interface NavState {
   workflow?: Workflow;
   runId?: string;
   missionTab?: MissionTab;
-  missionCorpus?: MissionControlReturnState["corpus"];
+  missionEnvironment?: MissionControlReturnState["environmentFilter"];
   missionDomain?: string;
   returnTo?: NavState;
 }
@@ -80,7 +80,7 @@ export default function Dashboard() {
     const returnTo: NavState = {
       view: "mission",
       missionTab: returnState.tab,
-      missionCorpus: returnState.corpus,
+      missionEnvironment: returnState.environmentFilter,
       missionDomain: returnState.domain,
     };
     try {
@@ -98,7 +98,7 @@ export default function Dashboard() {
     const returnTo: NavState = {
       view: "mission",
       missionTab: returnState.tab,
-      missionCorpus: returnState.corpus,
+      missionEnvironment: returnState.environmentFilter,
       missionDomain: returnState.domain,
     };
     try {
@@ -226,7 +226,7 @@ export default function Dashboard() {
         {nav.view === "mission" && (
           <MissionControl
             initialTab={nav.missionTab}
-            initialCorpus={nav.missionCorpus}
+            initialEnvironment={nav.missionEnvironment}
             initialDomain={nav.missionDomain}
             onOpenRun={openRunFromMission}
             onOpenQueues={(returnState) =>
@@ -235,7 +235,7 @@ export default function Dashboard() {
                 returnTo: {
                   view: "mission",
                   missionTab: returnState.tab,
-                  missionCorpus: returnState.corpus,
+                  missionEnvironment: returnState.environmentFilter,
                   missionDomain: returnState.domain,
                 },
               })

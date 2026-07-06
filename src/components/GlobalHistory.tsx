@@ -27,7 +27,7 @@ export default function GlobalHistory({ onViewRun }: Props) {
   const [runs, setRuns] = useState<Run[]>([]);
   const [statusFilter, setStatusFilter] = useState("all");
   const [triggerKind, setTriggerKind] = useState("all");
-  const [corpusFilter, setCorpusFilter] = useState("all");
+  const [environmentFilter, setEnvironmentFilter] = useState("all");
   const [domainFilter, setDomainFilter] = useState("all");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +38,7 @@ export default function GlobalHistory({ onViewRun }: Props) {
     getGlobalRunHistory(
       statusFilter,
       triggerKind,
-      corpusFilter,
+      environmentFilter,
       domainFilter,
       100,
     )
@@ -103,8 +103,8 @@ export default function GlobalHistory({ onViewRun }: Props) {
           <label>
             Environment
             <select
-              value={corpusFilter}
-              onChange={(e) => setCorpusFilter(e.target.value)}
+              value={environmentFilter}
+              onChange={(e) => setEnvironmentFilter(e.target.value)}
             >
               <option value="all">All</option>
               {environments.map((env) => (
