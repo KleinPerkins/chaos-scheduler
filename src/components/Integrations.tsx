@@ -3,9 +3,18 @@ import {
   createApiKey,
   listApiKeys,
   revokeApiKey,
+  getMcpIntegrationStatus,
+  provisionMcpIntegration,
+  removeMcpIntegration,
   isCommandUnavailable,
 } from "../lib/commands";
-import type { ApiKey, ApiKeyScope, NewApiKey } from "../lib/commands";
+import type {
+  ApiKey,
+  ApiKeyScope,
+  McpInstallStatus,
+  McpIntegrationStatus,
+  NewApiKey,
+} from "../lib/commands";
 import { PRODUCT_NAME, REPO_SLUG, RELEASES_URL } from "../lib/branding";
 import Notice from "./ui/Notice";
 import { openExternalSafe } from "../lib/openExternalSafe";
@@ -22,7 +31,7 @@ function mcpConfigSnippet(token: string): string {
           args: ["-y", "@chaos-scheduler/mcp-server"],
           env: {
             CHAOS_SCHEDULER_API_KEY: token || "<your-api-key>",
-            CHAOS_SCHEDULER_API_URL: "http://127.0.0.1:9618",
+            CHAOS_SCHEDULER_URL: "http://127.0.0.1:9618",
           },
         },
       },
@@ -38,12 +47,26 @@ function addToCursorLink(token: string): string {
     args: ["-y", "@chaos-scheduler/mcp-server"],
     env: {
       CHAOS_SCHEDULER_API_KEY: token || "<your-api-key>",
-      CHAOS_SCHEDULER_API_URL: "http://127.0.0.1:9618",
+      CHAOS_SCHEDULER_URL: "http://127.0.0.1:9618",
     },
   };
   const encoded = btoa(JSON.stringify(config));
   return `cursor://anysphere.cursor-deeplink/mcp/install?name=chaos-scheduler&config=${encoded}`;
 }
+
+const MCP_STATUS_LABEL: Record<McpInstallStatus, string> = {
+  not_installed: "Not installed",
+  installed: "Installed",
+  stale: "Update available",
+  node_unavailable: "Node.js not found",
+};
+
+const MCP_STATUS_VARIANT: Record<McpInstallStatus, "good" | "warn" | "bad"> = {
+  not_installed: "warn",
+  installed: "good",
+  stale: "warn",
+  node_unavailable: "bad",
+};
 
 export default function Integrations() {
   const [keys, setKeys] = useState<ApiKey[]>([]);
@@ -60,6 +83,12 @@ export default function Integrations() {
   const [revokePendingId, setRevokePendingId] = useState<string | null>(null);
   const revokeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const [mcpStatus, setMcpStatus] = useState<McpIntegrationStatus | null>(null);
+  const [mcpUnavailable, setMcpUnavailable] = useState(false);
+  const [mcpBusy, setMcpBusy] = useState(false);
+  const [mcpRemovePending, setMcpRemovePending] = useState(false);
+  const mcpRemoveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const clearRevokeTimer = () => {
     if (revokeTimerRef.current) {
       clearTimeout(revokeTimerRef.current);
@@ -67,7 +96,15 @@ export default function Integrations() {
     }
   };
 
+  const clearMcpRemoveTimer = () => {
+    if (mcpRemoveTimerRef.current) {
+      clearTimeout(mcpRemoveTimerRef.current);
+      mcpRemoveTimerRef.current = null;
+    }
+  };
+
   useEffect(() => () => clearRevokeTimer(), []);
+  useEffect(() => () => clearMcpRemoveTimer(), []);
 
   const notify = (msg: string, type: "info" | "error" | "success" = "info") => {
     setStatus(msg);
@@ -88,14 +125,74 @@ export default function Integrations() {
     }
   };
 
+  const loadMcpStatus = async () => {
+    try {
+      const s = await getMcpIntegrationStatus();
+      setMcpStatus(s);
+      setMcpUnavailable(false);
+    } catch (err) {
+      if (isCommandUnavailable(err)) {
+        setMcpUnavailable(true);
+      } else {
+        notify(String(err), "error");
+      }
+    }
+  };
+
   // Defer the initial load to a macrotask so the fetch's state updates do
   // not run inside the effect body (avoids react-hooks/set-state-in-effect).
   // Mirrors the established pattern in useSchedulerStatus.
   useEffect(() => {
-    const id = setTimeout(() => void loadKeys(), 0);
+    const id = setTimeout(() => {
+      void loadKeys();
+      void loadMcpStatus();
+    }, 0);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const handleMcpProvision = async (force = false) => {
+    setMcpBusy(true);
+    try {
+      const s = await provisionMcpIntegration(force);
+      setMcpStatus(s);
+      notify(
+        s.matches
+          ? "Managed integration is provisioned and registered in Cursor."
+          : (s.last_error ??
+              "Managed integration needs attention — see status below."),
+        s.matches ? "success" : "error",
+      );
+    } catch (err) {
+      notify(String(err), "error");
+    } finally {
+      setMcpBusy(false);
+    }
+  };
+
+  const handleMcpRemove = async (prepareToUninstall: boolean) => {
+    if (!mcpRemovePending) {
+      clearMcpRemoveTimer();
+      setMcpRemovePending(true);
+      mcpRemoveTimerRef.current = setTimeout(
+        () => setMcpRemovePending(false),
+        3000,
+      );
+      return;
+    }
+    clearMcpRemoveTimer();
+    setMcpRemovePending(false);
+    setMcpBusy(true);
+    try {
+      const s = await removeMcpIntegration(prepareToUninstall);
+      setMcpStatus(s);
+      notify("Managed integration removed.", "success");
+    } catch (err) {
+      notify(String(err), "error");
+    } finally {
+      setMcpBusy(false);
+    }
+  };
 
   const copy = async (label: string, value: string) => {
     try {
@@ -319,12 +416,136 @@ export default function Integrations() {
         </p>
       </section>
 
-      <section className="intg-section">
-        <h2 className="intg-section-title">Cursor MCP server</h2>
+      <section className="intg-section" data-testid="mcp-managed-card">
+        <h2 className="intg-section-title">Managed Cursor/MCP integration</h2>
         <p className="intg-copy">
-          Connect Cursor to {PRODUCT_NAME} so agents can register, run, and
-          inspect workflows. Create an API key above, then add the MCP server to
-          Cursor.
+          Let {PRODUCT_NAME} install, register, and keep the Cursor MCP server
+          up to date for you — a pinned version, an app-owned API key, and a
+          non-destructive <code>~/.cursor/mcp.json</code> entry, with no manual
+          snippet or floating <code>npx</code>.
+        </p>
+
+        {mcpUnavailable ? (
+          <p className="intg-hint">
+            The managed integration needs a backend command that is not
+            available yet. Use the manual setup below instead.
+          </p>
+        ) : !mcpStatus ? (
+          <p className="intg-hint">Loading status…</p>
+        ) : (
+          <>
+            <div className="mcp-status-row">
+              <span
+                className={`mcp-badge mcp-badge--${MCP_STATUS_VARIANT[mcpStatus.install_status]}`}
+              >
+                {MCP_STATUS_LABEL[mcpStatus.install_status]}
+              </span>
+              {mcpStatus.enabled && (
+                <span
+                  className={`mcp-badge mcp-badge--${mcpStatus.matches ? "good" : "warn"}`}
+                >
+                  {mcpStatus.matches ? "Healthy" : "Needs attention"}
+                </span>
+              )}
+            </div>
+
+            <dl className="mcp-detail-grid">
+              <dt>Provisioned version</dt>
+              <dd>{mcpStatus.provisioned_version ?? "none"}</dd>
+              <dt>Pinned version</dt>
+              <dd>{mcpStatus.pinned_version}</dd>
+              <dt>Node.js</dt>
+              <dd>
+                {mcpStatus.node_available
+                  ? (mcpStatus.node_path ?? "available")
+                  : "Not found — install Node ≥18 to enable this"}
+              </dd>
+              <dt>npm</dt>
+              <dd>
+                {mcpStatus.npm_available
+                  ? (mcpStatus.npm_path ?? "available")
+                  : "Not found"}
+              </dd>
+              <dt>Cursor registration</dt>
+              <dd>
+                {mcpStatus.cursor_config_conflict
+                  ? "Conflict — an unmanaged chaos-scheduler entry already exists"
+                  : mcpStatus.registered_in_cursor
+                    ? "Registered"
+                    : "Not registered"}
+              </dd>
+              <dt>API reachable</dt>
+              <dd>{mcpStatus.api_reachable ? "Yes" : "No"}</dd>
+            </dl>
+
+            {mcpStatus.last_error && (
+              <Notice variant="error">{mcpStatus.last_error}</Notice>
+            )}
+
+            <div className="intg-mcp-actions">
+              {!mcpStatus.enabled ? (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={mcpBusy}
+                  onClick={() => handleMcpProvision(false)}
+                >
+                  {mcpBusy ? "Working…" : "Enable managed integration"}
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={mcpBusy}
+                    onClick={() => handleMcpProvision(false)}
+                  >
+                    {mcpBusy ? "Working…" : "Re-provision"}
+                  </button>
+                  {mcpStatus.cursor_config_conflict && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={mcpBusy}
+                      onClick={() => handleMcpProvision(true)}
+                    >
+                      Take over conflicting entry
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn btn-danger"
+                    disabled={mcpBusy}
+                    onClick={() => handleMcpRemove(false)}
+                    aria-label={
+                      mcpRemovePending
+                        ? "Confirm remove managed integration"
+                        : "Remove managed integration"
+                    }
+                  >
+                    {mcpRemovePending ? "Confirm remove?" : "Remove"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    disabled={mcpBusy}
+                    onClick={() => handleMcpRemove(true)}
+                  >
+                    Prepare to uninstall
+                  </button>
+                </>
+              )}
+            </div>
+          </>
+        )}
+      </section>
+
+      <section className="intg-section">
+        <h2 className="intg-section-title">Advanced: manual MCP setup</h2>
+        <p className="intg-copy">
+          Prefer to manage the connection yourself, or connecting from another
+          machine? Create an API key above, then add the MCP server to Cursor
+          manually.
         </p>
         <div className="intg-mcp-actions">
           <button

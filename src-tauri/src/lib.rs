@@ -295,6 +295,8 @@ pub fn run() {
                 workspace_root: chaos_labs_root.clone(),
                 python_path: python_path.clone(),
             });
+            app.manage(mcp::McpState::default());
+            mcp::spawn_reprovision_on_startup(app.handle().clone());
 
             let current_version = app.package_info().version.to_string();
             let (updater_background_check_enabled, updater_skipped_version) = db
@@ -376,7 +378,6 @@ pub fn run() {
                 .build(app)?;
 
             app.manage(TrayState { _icon: tray });
-            app.manage(mcp::McpState::default());
 
             log::info!("Chaos Scheduler started, tray icon created");
 

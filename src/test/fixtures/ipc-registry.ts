@@ -6,6 +6,7 @@ import type {
 } from "../../lib/commands";
 import {
   defaultEmailConfig,
+  defaultMcpIntegrationStatus,
   defaultMissionControlPreferences,
   defaultQueues,
   emptyApiKeys,
@@ -37,6 +38,9 @@ export type IpcCommand =
   | "apply_update"
   | "get_app_update_status"
   | "set_updater_preferences"
+  | "get_mcp_integration_status"
+  | "provision_mcp_integration"
+  | "remove_mcp_integration"
   | "trigger_workflow"
   | "enqueue_workflow"
   | "rerun_workflow"
@@ -179,6 +183,28 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       }
       return updateSnapshot;
     },
+    get_mcp_integration_status: () => defaultMcpIntegrationStatus,
+    provision_mcp_integration: () => ({
+      ...defaultMcpIntegrationStatus,
+      enabled: true,
+      install_status: "installed",
+      provisioned_version: defaultMcpIntegrationStatus.pinned_version,
+      registered_in_cursor: true,
+      cursor_config_conflict: false,
+      api_reachable: true,
+      managed_key_id: "mcp-key-1",
+      matches: true,
+      last_error: null,
+    }),
+    remove_mcp_integration: () => ({
+      ...defaultMcpIntegrationStatus,
+      enabled: false,
+      install_status: "not_installed",
+      provisioned_version: null,
+      registered_in_cursor: false,
+      managed_key_id: null,
+      matches: false,
+    }),
     trigger_workflow: () => sampleRun.id,
     enqueue_workflow: () => ({
       workflow_id: sampleWorkflow.id,
