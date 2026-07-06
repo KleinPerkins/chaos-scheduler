@@ -227,27 +227,78 @@ pub fn list_api_keys(state: State<AppState>) -> Result<Vec<crate::db::ApiKeyInfo
     state.service.list_api_keys().map_err(|e| e.to_string())
 }
 
-/// Check the configured updater endpoint for a newer release. Degrades
-/// gracefully (returns `available: false` with an `error` note) when the
-/// updater is unconfigured or the network is unavailable, so the UI never hard-
-/// fails.
+/// Check the configured updater endpoint for a newer release, routed through
+/// the shared background-check path (`update::run_check`) so the manual
+/// Settings button and the launch/6h timer are one code path (updater UX
+/// plan, Section 1). Degrades gracefully (returns `available: false` with an
+/// `error` note) when the updater is unconfigured or the network is
+/// unavailable, so the UI never hard-fails.
 #[tauri::command]
 pub async fn check_for_update(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    use tauri_plugin_updater::UpdaterExt;
-    let updater = match app.updater() {
-        Ok(u) => u,
-        Err(e) => return Ok(serde_json::json!({ "available": false, "error": e.to_string() })),
-    };
-    match updater.check().await {
-        Ok(Some(update)) => Ok(serde_json::json!({
-            "available": true,
-            "version": update.version,
-            "current_version": update.current_version,
-            "notes": update.body,
-        })),
-        Ok(None) => Ok(serde_json::json!({ "available": false })),
-        Err(e) => Ok(serde_json::json!({ "available": false, "error": e.to_string() })),
+    let snapshot = crate::update::run_check(&app, true).await;
+    Ok(serde_json::json!({
+        "available": snapshot.phase == crate::update::UpdatePhase::Available,
+        // `version` kept for one release cycle alongside the `latest_version`
+        // alias the frontend actually reads (Section 4 discrepancy fix).
+        "version": snapshot.latest_version,
+        "latest_version": snapshot.latest_version,
+        "current_version": snapshot.current_version,
+        "notes": snapshot.notes,
+        "error": snapshot.last_error.as_ref().map(|e| e.message.clone()),
+    }))
+}
+
+/// No-network hydration for the frontend update hook (mount) and for any
+/// window created after the launch background check already ran.
+#[tauri::command]
+pub fn get_app_update_status(
+    update_state: State<crate::update::UpdateState>,
+) -> crate::update::UpdateSnapshot {
+    update_state.snapshot()
+}
+
+/// Persists the two updater preferences (Sections 2 & 5): background checks
+/// and a single per-exact-version skip. `clear_skip` is a distinct flag
+/// rather than a nullable `skipped_version` so the Tauri IPC boundary never
+/// has to distinguish "omitted" from "explicit null" — both collapse to the
+/// same `None` once they cross serde's `Option` handling.
+#[tauri::command]
+pub fn set_updater_preferences(
+    state: State<AppState>,
+    update_state: State<crate::update::UpdateState>,
+    background_check_enabled: Option<bool>,
+    skipped_version: Option<String>,
+    clear_skip: Option<bool>,
+) -> Result<crate::update::UpdateSnapshot, String> {
+    if let Some(enabled) = background_check_enabled {
+        state
+            .db
+            .set_updater_background_check_enabled(enabled)
+            .map_err(|e| e.to_string())?;
     }
+    let clearing_skip = clear_skip.unwrap_or(false);
+    if clearing_skip {
+        state
+            .db
+            .set_updater_skipped_version(None)
+            .map_err(|e| e.to_string())?;
+    } else if let Some(version) = skipped_version.as_deref() {
+        state
+            .db
+            .set_updater_skipped_version(Some(version))
+            .map_err(|e| e.to_string())?;
+    }
+
+    let mut snapshot = update_state.snapshot.lock().map_err(|e| e.to_string())?;
+    if let Some(enabled) = background_check_enabled {
+        snapshot.background_check_enabled = enabled;
+    }
+    if clearing_skip {
+        snapshot.skipped_version = None;
+    } else if let Some(version) = skipped_version {
+        snapshot.skipped_version = Some(version);
+    }
+    Ok(snapshot.clone())
 }
 
 /// Download + install the available update, then relaunch. Returns

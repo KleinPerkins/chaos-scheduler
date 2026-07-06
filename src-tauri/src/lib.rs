@@ -8,6 +8,7 @@ mod operators;
 mod scheduler;
 mod service;
 mod steps;
+mod update;
 mod workflow_spec;
 
 use commands::AppState;
@@ -294,6 +295,20 @@ pub fn run() {
                 python_path: python_path.clone(),
             });
 
+            let current_version = app.package_info().version.to_string();
+            let (updater_background_check_enabled, updater_skipped_version) = db
+                .get_updater_preferences()
+                .unwrap_or_else(|e| {
+                    log::warn!("Failed to read updater preferences, using defaults: {e}");
+                    (true, None)
+                });
+            app.manage(update::UpdateState::new(
+                current_version,
+                updater_background_check_enabled,
+                updater_skipped_version,
+            ));
+            update::spawn_background_task(app.handle().clone());
+
             start_scheduler_loop(
                 scheduler.clone(),
                 db.clone(),
@@ -390,6 +405,8 @@ pub fn run() {
             commands::revoke_api_key,
             commands::check_for_update,
             commands::apply_update,
+            commands::get_app_update_status,
+            commands::set_updater_preferences,
             commands::trigger_workflow,
             commands::enqueue_workflow,
             commands::rerun_workflow,

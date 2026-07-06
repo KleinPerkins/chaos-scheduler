@@ -4072,6 +4072,45 @@ impl Database {
         Ok(())
     }
 
+    /// Updater preferences (updater UX plan, Section 2): whether the
+    /// background launch/6h check is enabled (default on) and the single
+    /// per-exact-version skip escape hatch. An empty/whitespace-only stored
+    /// value normalizes to "no skip" rather than an empty-string version.
+    pub fn get_updater_preferences(&self) -> rusqlite::Result<(bool, Option<String>)> {
+        Ok((
+            self.get_bool_config("updater.background_check_enabled", true)?,
+            self.get_string_config("updater.skipped_version")?
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+        ))
+    }
+
+    pub fn set_updater_background_check_enabled(&self, enabled: bool) -> rusqlite::Result<()> {
+        self.set_bool_config("updater.background_check_enabled", enabled)
+    }
+
+    /// `None` clears the skip (deletes the row) rather than storing an empty
+    /// string, keeping `get_updater_preferences` a simple round-trip.
+    pub fn set_updater_skipped_version(&self, version: Option<&str>) -> rusqlite::Result<()> {
+        let conn = self.conn()?;
+        match version.map(str::trim).filter(|v| !v.is_empty()) {
+            Some(v) => {
+                conn.execute(
+                    "INSERT INTO scheduler_config (key, value, updated_at) VALUES ('updater.skipped_version', ?1, datetime('now'))
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                    params![v],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "DELETE FROM scheduler_config WHERE key = 'updater.skipped_version'",
+                    [],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn get_mission_control_preferences(&self) -> rusqlite::Result<MissionControlPreferences> {
         let default_landing = match self
             .get_string_config("mission_control.default_landing")?
@@ -7055,6 +7094,70 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(db.get_notification_prefs().unwrap(), (true, false));
         db.set_notification_prefs(false, true).unwrap();
         assert_eq!(db.get_notification_prefs().unwrap(), (false, true));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn updater_preferences_default_to_enabled_with_no_skip() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        assert_eq!(db.get_updater_preferences().unwrap(), (true, None));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn updater_preferences_persist_background_toggle_and_skip_round_trip() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        db.set_updater_background_check_enabled(false).unwrap();
+        db.set_updater_skipped_version(Some("1.2.3")).unwrap();
+        assert_eq!(
+            db.get_updater_preferences().unwrap(),
+            (false, Some("1.2.3".to_string()))
+        );
+
+        // Clearing the skip deletes the row rather than storing an empty
+        // string, so a fresh read comes back to a clean `None`.
+        db.set_updater_skipped_version(None).unwrap();
+        assert_eq!(db.get_updater_preferences().unwrap(), (false, None));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn updater_skipped_version_normalizes_whitespace_only_to_none() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        db.set_updater_skipped_version(Some("   ")).unwrap();
+        assert_eq!(db.get_updater_preferences().unwrap(), (true, None));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn updater_background_check_enabled_resets_to_default_on_corrupt_value() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let conn = db.conn().unwrap();
+        conn.execute(
+            "INSERT INTO scheduler_config (key, value) VALUES ('updater.background_check_enabled', 'not-a-bool')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Corrupt/unrecognized values fall back to the documented default
+        // (on) rather than erroring, matching `get_bool_config`'s contract.
+        assert_eq!(db.get_updater_preferences().unwrap(), (true, None));
 
         let _ = std::fs::remove_dir_all(dir);
     }
