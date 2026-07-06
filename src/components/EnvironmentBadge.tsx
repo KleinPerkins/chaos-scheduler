@@ -1,3 +1,4 @@
+import { Lock } from "lucide-react";
 import "./EnvironmentBadge.css";
 
 interface Props {
@@ -51,7 +52,7 @@ export default function EnvironmentBadge({
     >
       {managed && (
         <span className="env-badge-lock" aria-hidden="true">
-          &#128274;
+          <Lock size={size === "sm" ? 10 : 11} strokeWidth={2.25} />
         </span>
       )}
       {labelFor(environment)}

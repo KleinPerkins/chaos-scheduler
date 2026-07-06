@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Play } from "lucide-react";
 import { useSchedulerStatus } from "../hooks/useSchedulerStatus";
 import {
   triggerWorkflow,
@@ -147,9 +148,15 @@ export default function MenuBarPopup() {
                           title="Run now"
                           aria-label={`Run ${nr.workflow_name} now`}
                         >
-                          {runningWorkflowId === nr.workflow_id
-                            ? "..."
-                            : "\u25B6"}
+                          {runningWorkflowId === nr.workflow_id ? (
+                            "..."
+                          ) : (
+                            <Play
+                              size={12}
+                              strokeWidth={2.5}
+                              aria-hidden="true"
+                            />
+                          )}
                         </button>
                       </div>
                     ))}

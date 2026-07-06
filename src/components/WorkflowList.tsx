@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { Play, Clock } from "lucide-react";
 import { useWorkflows } from "../hooks/useWorkflows";
 import { useEnvironments } from "../hooks/useEnvironments";
 import {
@@ -344,6 +345,7 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
       )}
       <div className="wf-card-meta">
         <span className="wf-card-schedule">
+          <Clock size={12} strokeWidth={2} aria-hidden="true" />
           {cronToHuman(w.cron_schedule, w.timezone)}
         </span>
         <span className="wf-card-script">{w.script_path}</span>
@@ -362,7 +364,14 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
           title="Run now (immediate)"
           aria-label={`Run ${w.name} now`}
         >
-          {isPending(w, "run") ? "Running…" : "▶ Run"}
+          {isPending(w, "run") ? (
+            "Running…"
+          ) : (
+            <>
+              <Play size={12} strokeWidth={2.5} aria-hidden="true" />
+              Run
+            </>
+          )}
         </button>
         <button
           type="button"

@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { Lock, Sparkles } from "lucide-react";
 import {
   createWorkflow,
   updateWorkflow,
@@ -318,11 +319,19 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
         )}
         {isManaged && (
           <div className="editor-hint editor-managed-banner">
-            <strong>&#128274; Managed externally.</strong> This workflow&rsquo;s
-            definition is owned by an external source of truth (
-            {environmentOf(workflow!)} environment) and is read-only here.
-            Runtime preferences (enabled state, email alerts, timezone) can
-            still be saved.
+            <strong>
+              <Lock
+                size={13}
+                strokeWidth={2.25}
+                aria-hidden="true"
+                style={{ verticalAlign: "-2px" }}
+              />{" "}
+              Managed externally.
+            </strong>{" "}
+            This workflow&rsquo;s definition is owned by an external source of
+            truth ({environmentOf(workflow!)} environment) and is read-only
+            here. Runtime preferences (enabled state, email alerts, timezone)
+            can still be saved.
           </div>
         )}
 
@@ -359,7 +368,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
                 ) : (
                   <>
                     <span className="btn-ai-icon" aria-hidden="true">
-                      &#10022;
+                      <Sparkles size={13} strokeWidth={2} />
                     </span>
                     AI Describe
                   </>

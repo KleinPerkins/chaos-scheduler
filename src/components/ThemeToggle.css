@@ -1,0 +1,44 @@
+.theme-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  margin-bottom: 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.theme-toggle-option {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 5px 6px;
+  border-radius: calc(var(--radius) - 3px);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+
+.theme-toggle-option:hover {
+  color: var(--text-primary);
+}
+
+.theme-toggle-option.active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.theme-toggle-label {
+  line-height: 1;
+}
+
+/* Collapse labels in the narrow sidebar footer; icons carry the meaning. */
+.sidebar-footer .theme-toggle-label {
+  display: none;
+}

@@ -155,12 +155,12 @@
 }
 
 .wf-corpus-badge.source {
-  background: rgba(124, 108, 255, 0.12);
+  background: rgba(var(--accent-rgb), 0.12);
   color: var(--accent);
 }
 
 .wf-corpus-badge.instance {
-  background: rgba(61, 220, 151, 0.12);
+  background: rgba(var(--success-rgb), 0.12);
   color: var(--success);
 }
 
@@ -189,12 +189,12 @@
 
 .wf-card-desc-zone:hover .wf-card-desc {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(var(--elevate-rgb), 0.03);
 }
 
 .wf-card-desc-active {
   color: var(--text-primary) !important;
-  background: rgba(124, 108, 255, 0.04) !important;
+  background: rgba(var(--accent-rgb), 0.04) !important;
 }
 
 .wf-card-desc-tooltip {
@@ -235,13 +235,6 @@
   align-items: center;
   gap: 5px;
   white-space: nowrap;
-}
-
-.wf-card-schedule::before {
-  content: "◷";
-  font-size: 13px;
-  opacity: 0.6;
-  line-height: 1;
 }
 
 .wf-card-script {

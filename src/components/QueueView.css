@@ -13,7 +13,7 @@
 }
 
 .queue-error {
-  background: rgba(234, 67, 53, 0.1);
+  background: rgba(var(--error-rgb), 0.1);
   color: var(--error);
   padding: 10px 14px;
   border-radius: var(--radius);
@@ -195,16 +195,16 @@
 }
 
 .queue-status.queued {
-  background: rgba(251, 188, 5, 0.14);
+  background: rgba(var(--warning-rgb), 0.14);
   color: var(--warning);
 }
 
 .queue-status.admitted {
-  background: rgba(124, 108, 255, 0.12);
+  background: rgba(var(--accent-rgb), 0.12);
   color: var(--accent);
 }
 
 .queue-status.cancelled {
-  background: rgba(234, 67, 53, 0.1);
+  background: rgba(var(--error-rgb), 0.1);
   color: var(--error);
 }

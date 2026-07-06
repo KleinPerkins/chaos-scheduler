@@ -1,6 +1,18 @@
 import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
+import {
+  Gauge,
+  Workflow as WorkflowIcon,
+  History as HistoryIcon,
+  ArrowLeftRight,
+  Boxes,
+  Plug,
+  Settings as SettingsIcon,
+  CalendarClock,
+  type LucideIcon,
+} from "lucide-react";
 import WorkflowList from "./WorkflowList";
+import ThemeToggle from "./ThemeToggle";
 import WorkflowEditor from "./WorkflowEditor";
 import RunHistory from "./RunHistory";
 import RunDetail from "./RunDetail";
@@ -16,6 +28,7 @@ import MissionControl, {
 import { getWorkflow } from "../lib/commands";
 import type { Workflow } from "../lib/commands";
 import { PRODUCT_SHORT_NAME, APP_VERSION } from "../lib/branding";
+import { useTheme } from "../hooks/useTheme";
 import "./Dashboard.css";
 
 type View =
@@ -47,6 +60,7 @@ const WORKFLOW_VIEWS: View[] = ["workflows", "editor", "history", "detail"];
 export default function Dashboard() {
   const [nav, setNav] = useState<NavState>({ view: "mission" });
   const [refreshKey, setRefreshKey] = useState(0);
+  const theme = useTheme();
 
   const triggerRefresh = () => setRefreshKey((k) => k + 1);
 
@@ -119,48 +133,57 @@ export default function Dashboard() {
     };
   }, []);
 
-  const navItems: { view: View; label: string; icon: string; match: View[] }[] =
-    [
-      { view: "mission", label: "Home", icon: "\u25C9", match: ["mission"] },
-      {
-        view: "workflows",
-        label: "Workflows",
-        icon: "\u2630",
-        match: WORKFLOW_VIEWS,
-      },
-      {
-        view: "global_history",
-        label: "History",
-        icon: "\u21BB",
-        match: ["global_history"],
-      },
-      { view: "queues", label: "Queues", icon: "\u21C4", match: ["queues"] },
-      {
-        view: "environments",
-        label: "Environments",
-        icon: "\u25ED",
-        match: ["environments"],
-      },
-      {
-        view: "integrations",
-        label: "Integrations",
-        icon: "\u21F9",
-        match: ["integrations"],
-      },
-      {
-        view: "settings",
-        label: "Settings",
-        icon: "\u2699",
-        match: ["settings"],
-      },
-    ];
+  const navItems: {
+    view: View;
+    label: string;
+    Icon: LucideIcon;
+    match: View[];
+  }[] = [
+    { view: "mission", label: "Home", Icon: Gauge, match: ["mission"] },
+    {
+      view: "workflows",
+      label: "Workflows",
+      Icon: WorkflowIcon,
+      match: WORKFLOW_VIEWS,
+    },
+    {
+      view: "global_history",
+      label: "History",
+      Icon: HistoryIcon,
+      match: ["global_history"],
+    },
+    {
+      view: "queues",
+      label: "Queues",
+      Icon: ArrowLeftRight,
+      match: ["queues"],
+    },
+    {
+      view: "environments",
+      label: "Environments",
+      Icon: Boxes,
+      match: ["environments"],
+    },
+    {
+      view: "integrations",
+      label: "Integrations",
+      Icon: Plug,
+      match: ["integrations"],
+    },
+    {
+      view: "settings",
+      label: "Settings",
+      Icon: SettingsIcon,
+      match: ["settings"],
+    },
+  ];
 
   return (
     <div className="dashboard">
       <aside className="dashboard-sidebar">
         <div className="sidebar-brand">
           <span className="brand-icon" aria-hidden="true">
-            &#9673;
+            <CalendarClock size={18} strokeWidth={2.25} />
           </span>
           <span className="brand-text">{PRODUCT_SHORT_NAME}</span>
         </div>
@@ -175,7 +198,7 @@ export default function Dashboard() {
                 onClick={() => setNav({ view: item.view })}
               >
                 <span className="sidebar-icon" aria-hidden="true">
-                  {item.icon}
+                  <item.Icon size={16} strokeWidth={2} />
                 </span>
                 {item.label}
               </button>
@@ -183,6 +206,10 @@ export default function Dashboard() {
           })}
         </nav>
         <div className="sidebar-footer">
+          <ThemeToggle
+            preference={theme.preference}
+            onChange={theme.setPreference}
+          />
           <span className="sidebar-version">v{APP_VERSION}</span>
         </div>
       </aside>

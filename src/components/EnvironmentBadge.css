@@ -11,6 +11,12 @@
   border: 1px solid hsl(var(--env-hue) 55% 45% / 0.45);
 }
 
+:root[data-theme="light"] .env-badge {
+  color: hsl(var(--env-hue) 60% 26%);
+  background: hsl(var(--env-hue) 62% 91%);
+  border-color: hsl(var(--env-hue) 45% 66%);
+}
+
 .env-badge--md {
   padding: 3px 9px;
   font-size: 11px;
