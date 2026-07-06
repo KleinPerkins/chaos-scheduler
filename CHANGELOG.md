@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.4.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v0.3.1...chaos-scheduler-v0.4.0) (2026-07-06)
+
+
+### Features
+
+* **mcp-server:** advertise server icon + website in MCP handshake ([#91](https://github.com/KleinPerkins/chaos-scheduler/issues/91)) ([538bd89](https://github.com/KleinPerkins/chaos-scheduler/commit/538bd8990aadbd78ccd4c5333d91b397a48781da))
+* **ui:** consolidate to a single Mission Control home ([#92](https://github.com/KleinPerkins/chaos-scheduler/issues/92)) ([9491039](https://github.com/KleinPerkins/chaos-scheduler/commit/949103946d08a9560d8d6c7b6d61ec8bd435804c))
+
+
+### Bug Fixes
+
+* correct desktop version drift and auto-bump on release ([#90](https://github.com/KleinPerkins/chaos-scheduler/issues/90)) ([8d1fd6f](https://github.com/KleinPerkins/chaos-scheduler/commit/8d1fd6f4ee976ad3386dfef31f9ab378bb23c459))
+* **release:** pin GitHub's Latest flag to the desktop release ([#85](https://github.com/KleinPerkins/chaos-scheduler/issues/85)) ([b5fc1e3](https://github.com/KleinPerkins/chaos-scheduler/commit/b5fc1e3b4fefab527f9c9ebd213618dcc27dfbc3))
+
+
+### Documentation
+
+* **memory:** publish session learnings (hardening + release + tauri CI gate + signing correction) ([#89](https://github.com/KleinPerkins/chaos-scheduler/issues/89)) ([c90cffa](https://github.com/KleinPerkins/chaos-scheduler/commit/c90cffaef0748e37fbca2a7c967a59338281a059))
+
 ## [0.3.1](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v0.3.0...chaos-scheduler-v0.3.1) (2026-07-06)
 
 
