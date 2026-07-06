@@ -895,6 +895,56 @@ pub fn remove(
     ))
 }
 
+/// Startup re-provision hook (plan Section 12 "Auto-update (re-provision)").
+/// If the managed integration was previously enabled, silently repair it in
+/// the background: [`provision`] is already idempotent, so this is a no-op
+/// unless the pinned version, the Cursor registration, or the managed key
+/// have drifted since the last launch (e.g. an app auto-update just stamped
+/// a new pinned `mcp-server` version). Takes the same single-flight
+/// [`McpState`] lock as the `provision_mcp_integration` /
+/// `remove_mcp_integration` commands (plan invariant: "UI clicks, launch
+/// retry, and post-update re-provision must share one lock"), so it simply
+/// skips this launch if a user-initiated call is already in flight rather
+/// than racing it. Runs on a plain OS thread rather than the async runtime
+/// because `provision` performs blocking subprocess/HTTP calls. Never blocks
+/// or fails app startup: a failure only updates the manifest's `last_error`
+/// field for the Integrations card to surface.
+pub fn spawn_reprovision_on_startup(app: tauri::AppHandle) {
+    use tauri::Manager;
+    std::thread::spawn(move || {
+        let app_data_dir = match app.path().app_data_dir() {
+            Ok(dir) => dir,
+            Err(err) => {
+                log::warn!("Skipping startup MCP re-provision: {err}");
+                return;
+            }
+        };
+        if !ManagedManifest::load(&app_data_dir).enabled {
+            return;
+        }
+        let config_path = match cursor_mcp_config_path() {
+            Ok(path) => path,
+            Err(err) => {
+                log::warn!("Skipping startup MCP re-provision: {err}");
+                return;
+            }
+        };
+        let mcp_state = app.state::<McpState>();
+        let Ok(_guard) = mcp_state.lock.try_lock() else {
+            log::info!(
+                "Skipping startup MCP re-provision: a provisioning call is already in flight"
+            );
+            return;
+        };
+        let service = app.state::<crate::commands::AppState>().service.clone();
+        if let Err(err) = provision(&app_data_dir, &service, &config_path, false) {
+            log::warn!(
+                "Startup MCP re-provision failed (previous integration state is left in place): {err}"
+            );
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1070,3 +1070,53 @@ export function setUpdaterPreferences(
 export function applyUpdate(expectedVersion?: string): Promise<UpdateSnapshot> {
   return invokeOptional("apply_update", { expectedVersion });
 }
+
+// --- Managed MCP/SDK integration (Section 12) ---
+
+/** Mirrors `src-tauri/src/mcp.rs` `InstallStatus`. */
+export type McpInstallStatus =
+  "not_installed" | "installed" | "stale" | "node_unavailable";
+
+/** Mirrors `src-tauri/src/mcp.rs` `McpIntegrationStatus`. */
+export interface McpIntegrationStatus {
+  enabled: boolean;
+  install_status: McpInstallStatus;
+  node_available: boolean;
+  node_path?: string | null;
+  npm_available: boolean;
+  npm_path?: string | null;
+  provisioned_version?: string | null;
+  pinned_version: string;
+  registered_in_cursor: boolean;
+  cursor_config_conflict: boolean;
+  api_reachable: boolean;
+  managed_key_id?: string | null;
+  matches: boolean;
+  last_error?: string | null;
+}
+
+/** Read-only status for the managed-MCP Integrations card. Registered on the
+ * backend; guarded via {@link invokeOptional} for older builds. */
+export function getMcpIntegrationStatus(): Promise<McpIntegrationStatus> {
+  return invokeOptional("get_mcp_integration_status");
+}
+
+/** Enable (or repair/re-provision) the managed integration. `force` takes
+ * over a pre-existing unmanaged `chaos-scheduler` Cursor config entry.
+ * Registered on the backend; guarded via {@link invokeOptional} for older
+ * builds. */
+export function provisionMcpIntegration(
+  force = false,
+): Promise<McpIntegrationStatus> {
+  return invokeOptional("provision_mcp_integration", { force });
+}
+
+/** Remove the managed integration (config entry, install dir, API key).
+ * `prepareToUninstall` additionally removes the launch-at-login agent.
+ * Registered on the backend; guarded via {@link invokeOptional} for older
+ * builds. */
+export function removeMcpIntegration(
+  prepareToUninstall = false,
+): Promise<McpIntegrationStatus> {
+  return invokeOptional("remove_mcp_integration", { prepareToUninstall });
+}

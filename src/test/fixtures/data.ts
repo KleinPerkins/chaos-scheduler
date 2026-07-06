@@ -2,6 +2,7 @@ import type {
   ApiKey,
   EmailConfig,
   Environment,
+  McpIntegrationStatus,
   MissionControlPreferences,
   MissionControlSnapshot,
   QueueInfo,
@@ -164,4 +165,23 @@ export const availableUpdateSnapshot: UpdateSnapshot = {
   latest_version: "0.2.0",
   notes: "Bug fixes and improvements.",
   last_checked_at: NOW,
+};
+
+/** Disabled/not-yet-provisioned managed-MCP integration — the default state
+ * for a fresh install before the user opts in from Integrations. */
+export const defaultMcpIntegrationStatus: McpIntegrationStatus = {
+  enabled: false,
+  install_status: "not_installed",
+  node_available: true,
+  node_path: "/usr/local/bin/node",
+  npm_available: true,
+  npm_path: "/usr/local/bin/npm",
+  provisioned_version: null,
+  pinned_version: "0.5.0",
+  registered_in_cursor: false,
+  cursor_config_conflict: false,
+  api_reachable: true,
+  managed_key_id: null,
+  matches: false,
+  last_error: null,
 };

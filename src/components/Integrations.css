@@ -161,6 +161,55 @@
   color: var(--error);
 }
 
+.mcp-status-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.mcp-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: var(--radius);
+}
+
+.mcp-badge--good {
+  background: rgba(var(--success-rgb), 0.12);
+  color: var(--success);
+}
+
+.mcp-badge--warn {
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--text-secondary);
+}
+
+.mcp-badge--bad {
+  background: rgba(var(--error-rgb), 0.1);
+  color: var(--error);
+}
+
+.mcp-detail-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  font-size: 13px;
+  margin: 0 0 12px;
+}
+
+.mcp-detail-grid dt {
+  color: var(--text-muted);
+}
+
+.mcp-detail-grid dd {
+  margin: 0;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
 .intg-mcp-actions {
   display: flex;
   gap: 10px;
