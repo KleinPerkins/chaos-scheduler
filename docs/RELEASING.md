@@ -17,10 +17,35 @@ merge the Release PR  →  git tag(s) + GitHub Release(s) created
         ↓
 release-please.yml calls release.yml (same run) gated on release-please outputs
         ↓
-  ├─ desktop: tauri-action builds universal macOS → codesign + notarize + minisign,
-  │           uploads signed .dmg + .app.tar.gz + .sig + latest.json to the Release
-  └─ npm:     publish @chaos-scheduler/sdk and @chaos-scheduler/mcp-server (provenance)
+  1. publish-sdk    → npm publish @chaos-scheduler/sdk (provenance)
+        ↓ (needs: success or skipped)
+  2. publish-mcp    → npm publish @chaos-scheduler/mcp-server (rewrites the
+                       file:../sdk-ts dev dependency to the published SDK
+                       semver first)
+        ↓ (needs: success or skipped)
+  3. mcp-consumer-smoke → clean `npm install --prefix <tmp>` of the exact
+                       pinned mcp-server version under Node 18 (the package's
+                       documented floor); asserts the SDK resolved from the
+                       npm registry (not file:) and the installed CLI runs
+        ↓ (needs: success — only if a desktop build is requested)
+  4. build-macos    → stamps that smoke-tested mcp-server version into
+                       src-tauri/mcp-pinned-version.txt, then tauri-action
+                       builds universal macOS → codesign + notarize + minisign,
+                       uploads signed .dmg + .app.tar.gz + .sig + latest.json,
+                       then re-pins GitHub "Latest" to this release
+  5. guard-latest-for-package-only-release → if this run published only npm
+                       packages (no desktop bump), re-pins "Latest" back to
+                       the most recent desktop release if a component release
+                       stole it
 ```
+
+Release ordering invariant: **sdk-ts → mcp-server → consumer-install smoke →
+desktop pin/build**. This exists because the desktop app is (or will become)
+the lifecycle owner of a managed, npm-provisioned MCP/SDK integration — see
+"Release ordering + package-installability gate (managed MCP/SDK)" below — so
+it must never advertise or pin a `mcp-server` version that is not actually
+installable by a clean npm consumer. The ordering is enforced by job `needs:`
+in [`release.yml`](../.github/workflows/release.yml), not by convention.
 
 ## How versioning triggers a release
 
@@ -120,11 +145,59 @@ component packages, which only excludes them from "Latest" while versions are
 404s despite a green build, verify with `gh release list --json tagName,isLatest`
 and re-run the one-liner above (idempotent).
 
-**Residual edge case:** a release that bumps **only** `sdk-ts` / `mcp-server`
-(no desktop bump) doesn't run `build-macos`, so a component release could
-transiently hold "Latest" until the next desktop release. This is low-impact —
-those packages ship via **npm**, not the GitHub updater — and is fixed on demand
-with the same `gh release edit chaos-scheduler-v<latest-desktop> --latest`.
+**Residual edge case (now automated):** a release that bumps **only**
+`sdk-ts` / `mcp-server` (no desktop bump) doesn't run `build-macos`, so a
+component release could transiently hold "Latest" until the next desktop
+release. The `guard-latest-for-package-only-release` job in
+[`release.yml`](../.github/workflows/release.yml) runs for exactly this case
+(`!build_desktop && (publish_sdk || publish_mcp)`) and re-pins "Latest" back
+to the most recent `chaos-scheduler-v*` release if it drifted. It is a no-op
+(and needs no secrets) when "Latest" already points at the desktop release.
+
+## Release ordering + package-installability gate (managed MCP/SDK)
+
+The desktop app is the lifecycle owner of a managed, npm-provisioned
+`@chaos-scheduler/mcp-server` (+ its `@chaos-scheduler/sdk` dependency)
+integration — it calls out to npm at runtime rather than bundling those bytes
+into the DMG (see [`packages/INTEGRATION.md`](../packages/INTEGRATION.md) for
+the wire protocol; the app-side provisioner lands as its own change). That
+only works if the desktop build never pins a version that turns out not to be
+cleanly installable. `release.yml` enforces this with three additions ahead of
+`build-macos`:
+
+1. **`publish-sdk` → `publish-mcp` ordering.** `publish-mcp` declares
+   `needs: [publish-sdk]` and only runs once `publish-sdk` has succeeded or
+   was skipped (a release that doesn't touch the SDK still lets mcp-server
+   publish). This matches the existing in-job dependency (`publish-mcp`
+   rewrites `@chaos-scheduler/sdk` to the just-published semver before
+   `npm publish`) with an explicit job-graph guarantee, not just step order
+   inside one job.
+2. **`mcp-consumer-smoke`.** A new job that resolves the target `mcp-server`
+   version from `packages/mcp-server/package.json` at the relevant tag
+   (the `mcp-server` release tag if one exists this run, else the desktop
+   tag — since this is a monorepo, that file always reflects the last
+   actually-published version even on a desktop-only release), then runs
+   [`scripts/smoke-mcp-install.mjs`](../scripts/smoke-mcp-install.mjs) under
+   **Node 18** (the package's documented `engines.node` floor, not whatever
+   newer version `.nvmrc` pins for everyday CI). That script does a clean
+   `npm install --prefix <tmp>` of the exact pinned version, asserts from the
+   resulting lockfile that `@chaos-scheduler/sdk` resolved from
+   `registry.npmjs.org` (not a leaked `file:../sdk-ts` link), and runs the
+   installed CLI's `--help` to prove it executes. This job runs whenever a
+   desktop build needs a version to pin, or whenever `mcp-server` was freshly
+   published (so a package-only release is validated too, independent of any
+   desktop build).
+3. **Stamp only after the smoke gate passes.** `build-macos` declares
+   `needs: [mcp-consumer-smoke]` and only runs if that job succeeded. Its
+   first build step overwrites the checked-in
+   `src-tauri/mcp-pinned-version.txt` with the smoke-tested version, in the
+   ephemeral CI checkout only (never committed back to git). The desktop app's
+   managed-integration provisioner embeds that file at compile time (via
+   `include_str!`), so the shipped binary's "pinned MCP version" — the exact
+   version it installs — is always a version this gate already proved
+   installable. Local/dev builds fall back to whatever value is checked into
+   the file (kept roughly in sync with the last-released `mcp-server`
+   version; harmless if stale since dev builds are never distributed).
 
 ## npm publishing (SDK + MCP server)
 
