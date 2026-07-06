@@ -7,7 +7,7 @@ test.describe("Run detail smoke", () => {
     page,
   }) => {
     await gotoDashboard(page);
-    await openSidebar(page, "Dashboard");
+    await openSidebar(page, "Workflows");
     await workflowCard(page).getByRole("button", { name: "History" }).click();
 
     await expect(

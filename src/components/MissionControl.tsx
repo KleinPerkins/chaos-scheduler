@@ -44,7 +44,6 @@ interface MissionControlProps {
     workflowId: string,
     returnState: MissionControlReturnState,
   ) => void;
-  onOpenDashboard: () => void;
 }
 
 interface MissionControlFilters {
@@ -462,7 +461,6 @@ export default function MissionControl({
   onOpenRun,
   onOpenQueues,
   onOpenHistory,
-  onOpenDashboard,
 }: MissionControlProps) {
   const { environments } = useEnvironments();
   const [snapshot, setSnapshot] = useState<MissionControlSnapshot | null>(null);
@@ -638,9 +636,6 @@ export default function MissionControl({
                 </option>
               ))}
             </select>
-            <button className="btn btn-ghost btn-sm" onClick={onOpenDashboard}>
-              Classic Dashboard
-            </button>
           </div>
         </div>
 

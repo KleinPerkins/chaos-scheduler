@@ -12,7 +12,7 @@ test.describe("Workflow list errors", () => {
       };
     });
     await gotoDashboard(page);
-    await openSidebar(page, "Dashboard");
+    await openSidebar(page, "Workflows");
 
     await expect(page.getByText(/database unavailable/)).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
@@ -29,7 +29,7 @@ test.describe("Workflow list errors", () => {
       };
     });
     await gotoDashboard(page);
-    await openSidebar(page, "Dashboard");
+    await openSidebar(page, "Workflows");
     await expect(page.getByText("Nightly sync")).toBeVisible();
 
     await page.getByRole("button", { name: "Run Nightly sync now" }).click();
@@ -49,7 +49,7 @@ test.describe("Workflow list errors", () => {
       window.__CHAOS_FIXTURE_FLAGS__ = { workflowDeleted: false };
     });
     await gotoDashboard(page);
-    await openSidebar(page, "Dashboard");
+    await openSidebar(page, "Workflows");
     await expect(page.getByText("Nightly sync")).toBeVisible();
 
     const deleteBtn = workflowCard(page).getByRole("button", {

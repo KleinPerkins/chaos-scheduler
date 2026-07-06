@@ -8,9 +8,16 @@ test.describe("Dashboard navigation", () => {
     ).toBeVisible();
   });
 
-  test("lands on Mission Control with brand visible", async ({ page }) => {
+  test("lands on Mission Control home with brand visible", async ({ page }) => {
     await expect(
-      page.getByRole("button", { name: "Mission Control" }),
+      page
+        .getByRole("navigation", { name: "Primary navigation" })
+        .getByRole("button", { name: "Home" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", {
+        name: "Scheduler operations by environment and owner",
+      }),
     ).toBeVisible();
     await expect(page.getByText("Chaos Scheduler").first()).toBeVisible();
   });
@@ -18,7 +25,7 @@ test.describe("Dashboard navigation", () => {
   test("navigates primary sidebar views", async ({ page }) => {
     const nav = page.getByRole("navigation", { name: "Primary navigation" });
 
-    await nav.getByRole("button", { name: "Dashboard" }).click();
+    await nav.getByRole("button", { name: "Workflows" }).click();
     await expect(
       page.getByRole("heading", { name: "Workflows" }),
     ).toBeVisible();
@@ -51,7 +58,7 @@ test.describe("Dashboard navigation", () => {
   test("workflow list shows fixture workflow", async ({ page }) => {
     await page
       .getByRole("navigation", { name: "Primary navigation" })
-      .getByRole("button", { name: "Dashboard" })
+      .getByRole("button", { name: "Workflows" })
       .click();
 
     await expect(page.getByText("Nightly sync")).toBeVisible();
