@@ -17,6 +17,7 @@ import { buildEnqueueIdempotencyKey } from "../lib/workflowValidation";
 import "./WorkflowList.css";
 
 interface Props {
+  onOpen: (workflow: Workflow) => void;
   onEdit: (workflow: Workflow) => void;
   onNew: () => void;
   onHistory: (workflow: Workflow) => void;
@@ -112,7 +113,12 @@ function DescriptionBlock({
   );
 }
 
-export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
+export default function WorkflowList({
+  onOpen,
+  onEdit,
+  onNew,
+  onHistory,
+}: Props) {
   const { workflows, loading, error, refresh } = useWorkflows();
   const { environments } = useEnvironments();
   const [envFilter, setEnvFilter] = useState<EnvFilter>("all");
@@ -317,7 +323,14 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
     <div key={w.id} className={`wf-card ${!w.enabled ? "disabled" : ""}`}>
       <div className="wf-card-header">
         <div className="wf-card-title-row">
-          <div className="wf-card-title">{w.name}</div>
+          <button
+            type="button"
+            className="wf-card-title wf-card-title-btn"
+            onClick={() => onOpen(w)}
+            title={`Open ${w.name}`}
+          >
+            {w.name}
+          </button>
           <EnvironmentBadge
             environment={environmentOf(w)}
             managed={w.managed_externally}
@@ -387,6 +400,13 @@ export default function WorkflowList({ onEdit, onNew, onHistory }: Props) {
           aria-label={`Enqueue ${w.name}`}
         >
           {pendingEnqueueId === w.id ? "Enqueueing…" : "Enqueue"}
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={() => onOpen(w)}
+        >
+          Details
         </button>
         <button
           type="button"

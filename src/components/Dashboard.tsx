@@ -14,6 +14,7 @@ import {
 import WorkflowList from "./WorkflowList";
 import ThemeToggle from "./ThemeToggle";
 import WorkflowEditor from "./WorkflowEditor";
+import WorkflowDetail from "./WorkflowDetail";
 import RunHistory from "./RunHistory";
 import RunDetail from "./RunDetail";
 import GlobalHistory from "./GlobalHistory";
@@ -35,6 +36,7 @@ type View =
   | "mission"
   | "workflows"
   | "editor"
+  | "workflow_detail"
   | "history"
   | "detail"
   | "global_history"
@@ -55,7 +57,13 @@ interface NavState {
 
 // The workflow-management surface and its sub-views (editor / per-workflow
 // history / run detail) all keep the "Workflows" nav entry highlighted.
-const WORKFLOW_VIEWS: View[] = ["workflows", "editor", "history", "detail"];
+const WORKFLOW_VIEWS: View[] = [
+  "workflows",
+  "editor",
+  "workflow_detail",
+  "history",
+  "detail",
+];
 
 export default function Dashboard() {
   const [nav, setNav] = useState<NavState>({ view: "mission" });
@@ -238,9 +246,38 @@ export default function Dashboard() {
         {nav.view === "workflows" && (
           <WorkflowList
             key={refreshKey}
+            onOpen={(w) => setNav({ view: "workflow_detail", workflow: w })}
             onEdit={(w) => setNav({ view: "editor", workflow: w })}
             onNew={() => setNav({ view: "editor" })}
             onHistory={(w) => setNav({ view: "history", workflow: w })}
+          />
+        )}
+        {nav.view === "workflow_detail" && nav.workflow && (
+          <WorkflowDetail
+            workflow={nav.workflow}
+            onBack={() => setNav({ view: "workflows" })}
+            onEdit={(w) =>
+              setNav({
+                view: "editor",
+                workflow: w,
+                returnTo: { view: "workflow_detail", workflow: w },
+              })
+            }
+            onFullHistory={(w) =>
+              setNav({
+                view: "history",
+                workflow: w,
+                returnTo: { view: "workflow_detail", workflow: w },
+              })
+            }
+            onViewRun={(runId) =>
+              setNav({
+                view: "detail",
+                workflow: nav.workflow,
+                runId,
+                returnTo: { view: "workflow_detail", workflow: nav.workflow },
+              })
+            }
           />
         )}
         {nav.view === "editor" && (
@@ -248,9 +285,9 @@ export default function Dashboard() {
             workflow={nav.workflow}
             onSaved={() => {
               triggerRefresh();
-              setNav({ view: "workflows" });
+              setNav(nav.returnTo ?? { view: "workflows" });
             }}
-            onCancel={() => setNav({ view: "workflows" })}
+            onCancel={() => setNav(nav.returnTo ?? { view: "workflows" })}
           />
         )}
         {nav.view === "history" && nav.workflow && (
