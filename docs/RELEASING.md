@@ -91,6 +91,41 @@ Auto-update uses a **GitHub Releases `latest.json` endpoint**:
   verification.
 - Generate the keypair once with `npx tauri signer generate -w ~/.tauri/chaos-scheduler.key`.
 
+### Pitfall: multi-release "Latest" flag (auto-update 404)
+
+The updater endpoint resolves through GitHub's `/releases/latest/download/`
+redirect, which serves assets from whichever release currently holds the
+repo-wide **"Latest"** flag. But release-please creates **several releases per
+version** in one batch — the desktop root `chaos-scheduler-v<version>` (the only
+one carrying `latest.json` + `.app.tar.gz`), its linked
+`chaos-scheduler-tauri-v<version>`, and the independent `sdk-ts-v*` /
+`mcp-server-v*` — and GitHub marks the **last-created** non-prerelease release
+"Latest". When that lands on an asset-less component release, the endpoint 404s
+and auto-update silently breaks. This bit `v0.3.1` (`chaos-scheduler-tauri-v0.3.1`
+grabbed "Latest") and was recovered with `gh release edit chaos-scheduler-v0.3.1
+--latest` (GitHub CDN-caches the redirect, so a manual re-pin can take a few
+minutes to propagate).
+
+**Fix (automated):** the `build-macos` job's final step re-pins "Latest" to the
+desktop release **after** its assets upload, so every desktop release ends with
+the updater endpoint resolvable:
+
+```sh
+gh release edit chaos-scheduler-v<version> --latest   # --repo, tag from inputs.desktop_tag
+```
+
+This is version-agnostic (unlike a release-please `prerelease: true` flag on the
+component packages, which only excludes them from "Latest" while versions are
+**pre-1.0.0** and would silently stop working at `1.0.0`). If the endpoint ever
+404s despite a green build, verify with `gh release list --json tagName,isLatest`
+and re-run the one-liner above (idempotent).
+
+**Residual edge case:** a release that bumps **only** `sdk-ts` / `mcp-server`
+(no desktop bump) doesn't run `build-macos`, so a component release could
+transiently hold "Latest" until the next desktop release. This is low-impact —
+those packages ship via **npm**, not the GitHub updater — and is fixed on demand
+with the same `gh release edit chaos-scheduler-v<latest-desktop> --latest`.
+
 ## npm publishing (SDK + MCP server)
 
 `release.yml` → `publish-sdk` / `publish-mcp` jobs (in the `release` Environment,
