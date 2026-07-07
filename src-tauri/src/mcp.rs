@@ -699,6 +699,13 @@ fn smoke_check(node_path: &str, cli_path: &Path) -> Result<(), String> {
 /// version that's already current), the old one is displaced via a same-
 /// filesystem rename first so the switch itself stays a single atomic
 /// rename, not a delete-then-move race.
+///
+/// If that second rename fails (disk pressure, a permissions change, or any
+/// other OS-mechanics error), `displaced` is renamed back to `target` rather
+/// than being deleted unconditionally — otherwise a failed promote would
+/// discard the previously-working version *and* fail to install the new
+/// one, leaving `target` missing entirely and bricking the managed
+/// integration until the next successful re-provision.
 fn promote_staging(app_data_dir: &Path, staging: &Path, version: &str) -> Result<PathBuf, String> {
     let target = version_dir(app_data_dir, version);
     if let Some(parent) = target.parent() {
@@ -707,13 +714,24 @@ fn promote_staging(app_data_dir: &Path, staging: &Path, version: &str) -> Result
     if target.exists() {
         let displaced = mcp_root(app_data_dir).join(format!("displaced-{}", uuid::Uuid::new_v4()));
         std::fs::rename(&target, &displaced).map_err(|e| e.to_string())?;
-        let rename_result = std::fs::rename(staging, &target);
-        let _ = std::fs::remove_dir_all(&displaced);
-        rename_result.map_err(|e| e.to_string())?;
+        match std::fs::rename(staging, &target) {
+            Ok(()) => {
+                let _ = std::fs::remove_dir_all(&displaced);
+                Ok(target)
+            }
+            Err(err) => {
+                // Best-effort rollback: if this also fails, `displaced` is
+                // deliberately left on disk (not deleted) rather than
+                // compounding the failure — the next startup's orphaned-dir
+                // sweep will reclaim it once the situation is unrecoverable.
+                let _ = std::fs::rename(&displaced, &target);
+                Err(err.to_string())
+            }
+        }
     } else {
         std::fs::rename(staging, &target).map_err(|e| e.to_string())?;
+        Ok(target)
     }
-    Ok(target)
 }
 
 /// Delete every promoted version dir except `keep_version`. Only ever called
@@ -1835,6 +1853,45 @@ exit 0
         assert!(
             leftovers.is_empty(),
             "displaced staging dir must be cleaned up"
+        );
+    }
+
+    /// Regression test for the "promote deletes the working version on a
+    /// failed swap" finding: if the final `rename(staging, target)` fails
+    /// after the previous-good `target` has already been moved aside to
+    /// `displaced-*`, the old code unconditionally deleted `displaced`
+    /// before propagating the error — leaving *neither* the new nor the
+    /// previously-working version at `target`. A re-provision attempt that
+    /// fails at exactly this step must roll back to the previous-good
+    /// version instead of bricking the managed integration.
+    #[test]
+    fn promote_staging_restores_the_previous_version_when_the_final_rename_fails() {
+        let app_data_dir = tmpdir();
+        let target = version_dir(&app_data_dir, "1.0.0");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("marker"), "previous-good").unwrap();
+
+        // `staging` deliberately does not exist, so the second `rename`
+        // inside `promote_staging` fails with ENOENT — *after* the first
+        // rename has already moved `target` aside to a `displaced-*` dir.
+        let staging = mcp_root(&app_data_dir).join("staging-missing");
+
+        let result = promote_staging(&app_data_dir, &staging, "1.0.0");
+        assert!(result.is_err(), "a failed promote must surface as an error");
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("marker")).unwrap(),
+            "previous-good",
+            "a failed promote must roll back to the previous working version, not lose it"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(mcp_root(&app_data_dir))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("displaced-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a successful rollback must not leave a displaced-* dir behind"
         );
     }
 
