@@ -64,3 +64,39 @@ describe("build output bundles every runtime dependency", () => {
     },
   );
 });
+
+// Regression test for the "@chaos-scheduler/sdk gets bundled, defeating the
+// release-ordering gate" finding: unlike zod/@modelcontextprotocol/sdk
+// above, @chaos-scheduler/sdk is our own package, published and versioned
+// independently (see the sdk-ts -> mcp-server ordering in release.yml /
+// docs/RELEASING.md, which rewrites this dependency to the real published
+// semver before `npm publish`). If tsup inlines its source instead of
+// leaving it external, a published mcp-server freezes whatever SDK code
+// happened to be on disk at its own build time — an SDK-only hotfix
+// republish would then never reach a user who already has mcp-server
+// installed, even though npm would still (uselessly) fetch the newer SDK
+// into node_modules alongside the stale bundled copy. This is the inverse
+// of the assertions above: the package must stay a live, unresolved import.
+describe("build output leaves @chaos-scheduler/sdk external, not bundled", () => {
+  const distDir = join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
+  const distFiles = readdirSync(distDir).filter((f) => f.endsWith(".js"));
+  const allSource = distFiles
+    .map((f) => readFileSync(join(distDir, f), "utf8"))
+    .join("\n");
+
+  it("does not inline @chaos-scheduler/sdk's own source", () => {
+    // The SDK's own package name never appears in bundled source comments
+    // when it's left external — esbuild only emits path-banner comments
+    // for modules it actually inlines.
+    expect(allSource.includes("sdk-ts")).toBe(false);
+  });
+
+  it("keeps a live import of @chaos-scheduler/sdk for node to resolve at runtime", () => {
+    const importPattern =
+      /from\s+["']@chaos-scheduler\/sdk["']|require\(["']@chaos-scheduler\/sdk["']\)/;
+    const matches = distFiles.filter((file) =>
+      importPattern.test(readFileSync(join(distDir, file), "utf8")),
+    );
+    expect(matches.length).toBeGreaterThan(0);
+  });
+});
