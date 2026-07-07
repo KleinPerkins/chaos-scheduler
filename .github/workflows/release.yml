@@ -56,6 +56,34 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Updater endpoint guard: release-please creates GitHub Releases before any
+  # environment-gated signing/build jobs run. If GitHub marks the new, assetless
+  # desktop/component release as "Latest" during that approval/build window, the
+  # live updater URL (/releases/latest/download/latest.json) 404s until
+  # build-macos uploads latest.json and re-pins "Latest" to the new desktop
+  # release. This ungated job runs as early as possible for desktop releases and
+  # pins "Latest" back to the newest prior root desktop release that already has
+  # a latest.json asset. build-macos still performs the final pin after upload.
+  # ---------------------------------------------------------------------------
+  guard-latest-before-desktop-release:
+    name: Guard GitHub "Latest" (pre-desktop build)
+    if: ${{ inputs.desktop_tag != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+      - name: Re-pin "Latest" to the last asset-bearing desktop release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DESKTOP_TAG: ${{ inputs.desktop_tag }}
+        run: node scripts/guard-latest-release.mjs --repo "$REPO" --desktop-tag "$DESKTOP_TAG"
+
+  # ---------------------------------------------------------------------------
   # Release ordering: sdk-ts -> mcp-server -> [consumer install smoke] -> desktop.
   # publish-mcp is a real npm dependent of the sdk (see its own "pin the exact
   # published semver" step), so it must not race publish-sdk. `needs` + a
@@ -188,8 +216,8 @@ jobs:
   # ---------------------------------------------------------------------------
   build-macos:
     name: macOS desktop (signed + notarized, universal)
-    if: ${{ inputs.desktop_tag != '' && needs.mcp-consumer-smoke.result == 'success' }}
-    needs: [mcp-consumer-smoke]
+    if: ${{ inputs.desktop_tag != '' && needs.mcp-consumer-smoke.result == 'success' && needs.guard-latest-before-desktop-release.result == 'success' }}
+    needs: [mcp-consumer-smoke, guard-latest-before-desktop-release]
     runs-on: macos-14
     environment: release
     permissions:
@@ -300,7 +328,7 @@ jobs:
   # "Latest" from the desktop release and 404 the updater endpoint (see
   # docs/RELEASING.md "Residual edge case"). This job automates the previously
   # manual `gh release edit <desktop> --latest` recovery whenever that happens.
-  # No-ops (and does not need the `release` environment/secrets) when there is
+  # No-ops (and does not need `release` Environment secrets) when there is
   # nothing to fix.
   # ---------------------------------------------------------------------------
   guard-latest-for-package-only-release:
@@ -311,27 +339,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Re-pin "Latest" to the most recent desktop release if it drifted
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+      - name: Re-pin "Latest" to the most recent asset-bearing desktop release if it drifted
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          current_latest=$(gh release list --repo "$REPO" --limit 50 \
-            --json tagName,isLatest --jq '.[] | select(.isLatest) | .tagName')
-          # Desktop releases are tagged chaos-scheduler-v<version> (root
-          # component); this excludes the linked chaos-scheduler-tauri-v* and
-          # the independent sdk-ts-v* / mcp-server-v* tags.
-          desktop_tag=$(gh release list --repo "$REPO" --limit 50 \
-            --json tagName,createdAt --jq \
-            '[.[] | select(.tagName | test("^chaos-scheduler-v[0-9]"))] | sort_by(.createdAt) | last | .tagName // ""')
-          if [ -z "$desktop_tag" ]; then
-            echo "No desktop release exists yet; nothing to guard."
-            exit 0
-          fi
-          if [ "$current_latest" != "$desktop_tag" ]; then
-            echo "GitHub 'Latest' ($current_latest) drifted from the desktop release ($desktop_tag) after a package-only release — re-pinning."
-            gh release edit "$desktop_tag" --repo "$REPO" --latest
-          else
-            echo "GitHub 'Latest' already points at the desktop release ($desktop_tag); nothing to do."
-          fi
+        run: node scripts/guard-latest-release.mjs --repo "$REPO"
