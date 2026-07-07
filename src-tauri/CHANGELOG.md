@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.0.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v0.6.1...chaos-scheduler-tauri-v1.0.0) (2026-07-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **env:** rename source/instance environments to production/sandbox ([#132](https://github.com/KleinPerkins/chaos-scheduler/issues/132))
+
+### Features
+
+* **env:** rename source/instance environments to production/sandbox ([#132](https://github.com/KleinPerkins/chaos-scheduler/issues/132)) ([f5017e5](https://github.com/KleinPerkins/chaos-scheduler/commit/f5017e5254984989c5bce70ebd350960af8d1e52))
+* **integrations:** add managed-MCP card + startup re-provision hook ([#114](https://github.com/KleinPerkins/chaos-scheduler/issues/114)) ([0eab261](https://github.com/KleinPerkins/chaos-scheduler/commit/0eab261fcd104dfffd76306e08b284f518a26a78))
+* **mcp:** add managed MCP provisioner backend ([#112](https://github.com/KleinPerkins/chaos-scheduler/issues/112)) ([c805af9](https://github.com/KleinPerkins/chaos-scheduler/commit/c805af9d7f30217cfd5dd54f4a30e0bc597810b0))
+* **mcp:** emit a status-changed event so Integrations stays live ([#128](https://github.com/KleinPerkins/chaos-scheduler/issues/128)) ([2316da4](https://github.com/KleinPerkins/chaos-scheduler/commit/2316da46aa3c26b0c0735b2d2158c7c4de477e05))
+* **updater:** add background check snapshot, status, and preferences ([#110](https://github.com/KleinPerkins/chaos-scheduler/issues/110)) ([ccf001d](https://github.com/KleinPerkins/chaos-scheduler/commit/ccf001d9c48879bb477caef2c9fb718b298272fa))
+* **updater:** add download/drain/install/restart apply flow + frontend hook ([#113](https://github.com/KleinPerkins/chaos-scheduler/issues/113)) ([73d8933](https://github.com/KleinPerkins/chaos-scheduler/commit/73d8933bb3769d7058fb4cba85a0446fd65730b9))
+* **updater:** add UX surfaces, Settings controls, e2e/axe, and release smoke ([#115](https://github.com/KleinPerkins/chaos-scheduler/issues/115)) ([189049e](https://github.com/KleinPerkins/chaos-scheduler/commit/189049e2223ca7c9b61e59fbbb812e600e8480ed))
+
+
+### Bug Fixes
+
+* **mcp:** bound npm install with a timeout instead of blocking forever ([#131](https://github.com/KleinPerkins/chaos-scheduler/issues/131)) ([5857838](https://github.com/KleinPerkins/chaos-scheduler/commit/58578383ae7f6d920333bdca1181c86da7e902cf))
+* **mcp:** don't trust managed_key_id as live until mcp.json merge succeeds ([#124](https://github.com/KleinPerkins/chaos-scheduler/issues/124)) ([b0b2c91](https://github.com/KleinPerkins/chaos-scheduler/commit/b0b2c915893cb70aa78397943ce043c16a9f3524))
+* **mcp:** give invalid-JSON mcp.json backups sub-second-unique filenames ([#125](https://github.com/KleinPerkins/chaos-scheduler/issues/125)) ([c8957ce](https://github.com/KleinPerkins/chaos-scheduler/commit/c8957ceabf26af043f582bc1938bee784e7b67f2))
+* **mcp:** harden npm install and validate resolved CLI path ([#116](https://github.com/KleinPerkins/chaos-scheduler/issues/116)) ([f6a89dd](https://github.com/KleinPerkins/chaos-scheduler/commit/f6a89ddb421b82b320f18858fa9c58c5a5c96483))
+* **mcp:** recover from mutex poisoning instead of bricking provisioning ([#119](https://github.com/KleinPerkins/chaos-scheduler/issues/119)) ([15312c4](https://github.com/KleinPerkins/chaos-scheduler/commit/15312c4cf2fc8316ab80dc8457d5bb4d5c466e6f))
+* **mcp:** resolve common nvm alias forms, not just literal versions ([#120](https://github.com/KleinPerkins/chaos-scheduler/issues/120)) ([8e8e040](https://github.com/KleinPerkins/chaos-scheduler/commit/8e8e04054e6a80a7fac8b7b02f6b7e7cfe889ddd))
+* **mcp:** roll back promote_staging when the final rename fails ([#130](https://github.com/KleinPerkins/chaos-scheduler/issues/130)) ([e7f38a3](https://github.com/KleinPerkins/chaos-scheduler/commit/e7f38a3241aa62edc1ba16f78f2382e039b7059b))
+* **mcp:** sweep orphaned staging/displaced dirs on startup ([#121](https://github.com/KleinPerkins/chaos-scheduler/issues/121)) ([0d8d7e2](https://github.com/KleinPerkins/chaos-scheduler/commit/0d8d7e2ff78005861dbf37f2a326187f945c70f7))
+* **updater:** broadcast preference changes to every window and the tray ([#126](https://github.com/KleinPerkins/chaos-scheduler/issues/126)) ([2507359](https://github.com/KleinPerkins/chaos-scheduler/commit/25073592493b231aa2ecf70784e04bf3ebb6ed5e))
+* **updater:** make apply() single-flight claim atomic ([#118](https://github.com/KleinPerkins/chaos-scheduler/issues/118)) ([2cec175](https://github.com/KleinPerkins/chaos-scheduler/commit/2cec1759acb7c708b861f9311e891916cfdb9c12))
+
 ## [0.6.1](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v0.6.0...chaos-scheduler-tauri-v0.6.1) (2026-07-06)
 
 
