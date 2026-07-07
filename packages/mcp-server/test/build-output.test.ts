@@ -33,20 +33,30 @@ describe("build output bundles every runtime dependency", () => {
       // esbuild/tsup emits a `// node_modules/<pkg>/...` banner comment
       // above every module it inlines from that package — a positive,
       // hard-to-fake signal that the package's actual source was bundled
-      // in, not left for npm to resolve at install time.
-      const escaped = pkg.replace(/[/]/g, "\\/");
-      const bannerPattern = new RegExp(`//\\s.*node_modules/${escaped}/`);
-      expect(bannerPattern.test(allSource)).toBe(true);
+      // in, not left for npm to resolve at install time. Literal string
+      // containment (no regex) avoids constructing a pattern from `pkg`.
+      expect(allSource.includes(`node_modules/${pkg}/`)).toBe(true);
     },
   );
+
+  /** True if `line` contains a live `import`/`require` reference to `pkg`. */
+  function hasLiveImportOf(line: string, pkg: string): boolean {
+    const needles = [
+      `from "${pkg}"`,
+      `from '${pkg}'`,
+      `from "${pkg}/`,
+      `from '${pkg}/`,
+      `require("${pkg}")`,
+      `require('${pkg}')`,
+      `require("${pkg}/`,
+      `require('${pkg}/`,
+    ];
+    return needles.some((needle) => line.includes(needle));
+  }
 
   it.each(["zod", "@modelcontextprotocol/sdk"])(
     "no live code import/require of %s remains (only bundled)",
     (pkg) => {
-      const escaped = pkg.replace(/[/]/g, "\\/");
-      const importPattern = new RegExp(
-        `from\\s+["']${escaped}(?:/[^"']*)?["']|require\\(["']${escaped}(?:/[^"']*)?["']\\)`,
-      );
       const offenders: string[] = [];
       for (const file of distFiles) {
         const contents = readFileSync(join(distDir, file), "utf8");
@@ -56,7 +66,7 @@ describe("build output bundles every runtime dependency", () => {
           // comments verbatim, which can *mention* a package name in prose
           // without it being a real, unresolved import.
           if (trimmed.startsWith("//") || trimmed.startsWith("*")) continue;
-          if (importPattern.test(line))
+          if (hasLiveImportOf(line, pkg))
             offenders.push(`${file}: ${line.trim()}`);
         }
       }
