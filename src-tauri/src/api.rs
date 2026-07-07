@@ -472,7 +472,7 @@ async fn register_workflow(
     Json(body): Json<RegisterWorkflowBody>,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&st, &headers, "write", "POST", "/api/v1/workflows", &audit)?;
-    let environment = body.environment.unwrap_or_else(|| "instance".to_string());
+    let environment = body.environment.unwrap_or_else(|| "production".to_string());
     let draft = WorkflowDraft {
         name: body.name,
         description: body.description,
@@ -1405,7 +1405,7 @@ mod tests {
             async_mode: false,
             email_on_failure: true,
             timezone: "UTC".into(),
-            environment: "instance".into(),
+            environment: "production".into(),
             domain: None,
             trigger_config: None,
             queue_config: None,
@@ -1413,7 +1413,7 @@ mod tests {
         let wf = state.service.create_workflow(draft, false).unwrap();
         let spec = WorkflowSpec {
             kind: crate::workflow_spec::WorkflowKind::Generic,
-            environment: Some("instance".into()),
+            environment: Some("production".into()),
             generic: Some(crate::workflow_spec::GenericSpec {
                 steps: vec![crate::workflow_spec::StepSpec {
                     id: "s1".into(),
@@ -1875,7 +1875,7 @@ mod tests {
             "name": "API WF",
             "script_path": "scripts/x.py",
             "cron_schedule": "0 0 * * *",
-            "environment": "instance"
+            "environment": "production"
         });
         let resp = app
             .clone()
@@ -1893,7 +1893,7 @@ mod tests {
         let (status, value) = body_json(resp).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(value["workflow"]["managed_externally"], json!(true));
-        assert_eq!(value["workflow"]["environment"], json!("instance"));
+        assert_eq!(value["workflow"]["environment"], json!("production"));
 
         // And it lists back.
         let resp = app
@@ -1942,7 +1942,7 @@ mod tests {
             "name": "Rollback WF",
             "script_path": "scripts/x.py",
             "cron_schedule": "0 0 * * *",
-            "environment": "instance",
+            "environment": "production",
             "spec": { "kind": "typed", "typed": { "operator_type": "does_not_exist" } }
         });
         let resp = app
@@ -1983,7 +1983,7 @@ mod tests {
                             "name": "Rollback WF",
                             "script_path": "scripts/x.py",
                             "cron_schedule": "0 0 * * *",
-                            "environment": "instance",
+                            "environment": "production",
                             "spec": {"kind":"generic", "generic":{"steps":[]}}
                         })
                         .to_string(),
@@ -2004,7 +2004,30 @@ mod tests {
 
     #[tokio::test]
     async fn protected_environment_write_endpoints_are_rejected() {
-        let (state, token) = test_state();
+        let dir = std::env::temp_dir().join(format!("chaos-api-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Database::new(&dir));
+        let service = SchedulerService::with_protection_config(
+            db.clone(),
+            Arc::new(NoopNotifier),
+            vec!["production".into()],
+            false,
+        );
+        let key = service
+            .create_api_key(Some("test"), &["read", "write"])
+            .unwrap();
+        let state = ApiState {
+            service,
+            db: db.clone(),
+            workspace_root: "/tmp".to_string(),
+            python_path: "python3".to_string(),
+            rate: Arc::new(Mutex::new(RateLimiter::new(1000, Duration::from_secs(60)))),
+            preauth_rate: Arc::new(Mutex::new(RateLimiter::new(1000, Duration::from_secs(60)))),
+            host_allowlist: vec![],
+            cors_allowlist: vec![],
+            webhook_replays: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let token = key.token;
         let wf = state
             .db
             .create_workflow(
@@ -2015,7 +2038,7 @@ mod tests {
                 false,
                 true,
                 "UTC",
-                "prod",
+                "production",
                 None,
                 None,
                 None,
@@ -2036,7 +2059,7 @@ mod tests {
                             "name": "blocked",
                             "script_path": "scripts/x.py",
                             "cron_schedule": "0 0 * * *",
-                            "environment": "prod"
+                            "environment": "production"
                         })
                         .to_string(),
                     ))
@@ -2128,7 +2151,8 @@ mod tests {
         let queues = value["queues"].as_array().unwrap();
         assert!(queues
             .iter()
-            .any(|q| q["environment"] == json!("source") && q["name"] == json!("source-default")));
+            .any(|q| q["environment"] == json!("production")
+                && q["name"] == json!("production-default")));
     }
 
     #[tokio::test]
@@ -2145,7 +2169,7 @@ mod tests {
                 false,
                 false,
                 "UTC",
-                "instance",
+                "production",
                 None,
                 None,
                 None,
@@ -2250,7 +2274,7 @@ mod tests {
                 false,
                 false,
                 "UTC",
-                "instance",
+                "production",
                 None,
                 None,
                 None,
@@ -2294,7 +2318,7 @@ mod tests {
                 true,
                 false,
                 "UTC",
-                "instance",
+                "production",
                 None,
                 None,
                 None,
@@ -2362,7 +2386,7 @@ mod tests {
                 false,
                 false,
                 "UTC",
-                "instance",
+                "production",
                 None,
                 None,
                 None,
@@ -2409,10 +2433,10 @@ mod tests {
                 false,
                 false,
                 "UTC",
-                "instance",
+                "production",
                 None,
                 None,
-                Some(r#"{"queue":"instance-default","depends_on":["upstream-never"]}"#),
+                Some(r#"{"queue":"production-default","depends_on":["upstream-never"]}"#),
             )
             .unwrap();
         let app = router(state);
@@ -2474,11 +2498,11 @@ mod tests {
                             "name": "Smoke WF",
                             "script_path": "scripts/smoke.py",
                             "cron_schedule": "0 0 * * *",
-                            "environment": "instance",
+                            "environment": "production",
                             // Depend on an upstream that never runs so the enqueue
                             // deterministically queues instead of admitting (no
                             // subprocess spawned during the test).
-                            "queue_config": "{\"queue\":\"instance-default\",\"depends_on\":[\"upstream-never\"]}"
+                            "queue_config": "{\"queue\":\"production-default\",\"depends_on\":[\"upstream-never\"]}"
                         })
                         .to_string(),
                     ))

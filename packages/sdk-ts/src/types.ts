@@ -184,7 +184,7 @@ export interface RegisterWorkflowInput {
   description?: string;
   script_path: string;
   cron_schedule: string;
-  /** Defaults to `"instance"` on the backend when omitted. */
+  /** Defaults to `"production"` on the backend when omitted. */
   environment?: string;
   async_mode?: boolean;
   /** Defaults to `true` on the backend when omitted. */

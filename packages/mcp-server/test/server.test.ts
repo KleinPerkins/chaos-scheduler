@@ -30,16 +30,29 @@ const ROUTES: Record<string, unknown> = {
     api: "v1",
   },
   "GET /api/v1/environments": {
-    environments: [{ id: "e1", name: "instance" }],
+    environments: [
+      { id: "e1", name: "production" },
+      { id: "e2", name: "sandbox" },
+    ],
   },
   "GET /api/v1/workflows": {
-    workflows: [{ id: "w1", name: "A", environment: "instance" }],
+    workflows: [
+      { id: "w1", name: "A", environment: "sandbox" },
+      { id: "w2", name: "Prod", environment: "production" },
+    ],
   },
   "GET /api/v1/workflows/w1": {
     workflow: {
       id: "w1",
       name: "A",
-      environment: "instance",
+      environment: "sandbox",
+    },
+  },
+  "GET /api/v1/workflows/w2": {
+    workflow: {
+      id: "w2",
+      name: "Prod",
+      environment: "production",
     },
   },
   "POST /api/v1/workflows/w1/run": {
@@ -47,7 +60,7 @@ const ROUTES: Record<string, unknown> = {
     status: "admitted",
     run_id: "r1",
     queued_run_id: null,
-    queue_name: "instance-default",
+    queue_name: "sandbox-default",
   },
   "GET /api/v1/runs/r1": {
     run: { id: "r1", workflow_id: "w1", status: "success", exit_code: 0 },
@@ -80,8 +93,17 @@ const ROUTES: Record<string, unknown> = {
   "GET /api/v1/queues": {
     queues: [
       {
-        name: "instance-default",
-        environment: "instance",
+        name: "production-default",
+        environment: "production",
+        capacity: 4,
+        active_count: 0,
+        queued_count: 0,
+        global_parallelism_cap: 8,
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      {
+        name: "sandbox-default",
+        environment: "sandbox",
         capacity: 4,
         active_count: 0,
         queued_count: 0,
@@ -96,8 +118,8 @@ const ROUTES: Record<string, unknown> = {
         id: "q1",
         run_id: null,
         workflow_id: "w1",
-        queue_name: "instance-default",
-        environment: "instance",
+        queue_name: "sandbox-default",
+        environment: "sandbox",
         status: "queued",
         queued_at: "2026-01-01T00:00:00Z",
       },
@@ -108,13 +130,13 @@ const ROUTES: Record<string, unknown> = {
     status: "queued",
     run_id: null,
     queued_run_id: "q2",
-    queue_name: "instance-default",
+    queue_name: "sandbox-default",
   },
   "PATCH /api/v1/workflows/w1": {
     workflow: {
       id: "w1",
       name: "A",
-      environment: "instance",
+      environment: "sandbox",
     },
   },
   "POST /api/v1/workflows/w1/rerun": {
@@ -122,7 +144,7 @@ const ROUTES: Record<string, unknown> = {
     status: "admitted",
     run_id: "r2",
     queued_run_id: null,
-    queue_name: "instance-default",
+    queue_name: "sandbox-default",
   },
   "GET /api/v1/email-profiles": {
     email_profiles: [
@@ -178,6 +200,16 @@ const ROUTES: Record<string, unknown> = {
   "POST /api/v1/workflows/w1/email-profile": {
     workflow_id: "w1",
     email_profile_id: "ep1",
+  },
+  "POST /api/v1/workflows": {
+    workflow: {
+      id: "w-reg",
+      name: "Registered",
+      environment: "sandbox",
+      script_path: "demo.sh",
+      cron_schedule: "0 0 * * *",
+      managed_externally: true,
+    },
   },
 };
 
@@ -295,19 +327,56 @@ describe("Chaos MCP server", () => {
   });
 
   it("blocks writes to a protected environment (guardrail)", async () => {
-    // Make the workflow's environment (instance) protected.
     const { client } = await connectedPair({
-      CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "instance",
+      CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "production",
     });
     const result = (await client.callTool({
       name: "run_workflow_now",
-      arguments: { id: "w1" },
+      arguments: { id: "w2" },
     })) as {
       content: Array<{ type: string; text?: string }>;
       isError?: boolean;
     };
     expect(result.isError).toBe(true);
     expect(textOf(result)).toMatch(/protected/i);
+  });
+
+  it("register_workflow injects the MCP default environment when omitted", async () => {
+    const bodies: string[] = [];
+    const fetch: FetchLike = async (url, init) => {
+      if (init?.method === "POST" && url.endsWith("/api/v1/workflows")) {
+        bodies.push(init.body as string);
+      }
+      return routedFetch(ROUTES)(url, init);
+    };
+    const config = configFromEnv({ CHAOS_SCHEDULER_API_KEY: "id.secret" });
+    const sdk = new ChaosSchedulerClient({
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      fetch,
+    });
+    const server = buildServer({ client: sdk, config });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+    const result = (await client.callTool({
+      name: "register_workflow",
+      arguments: {
+        name: "Registered",
+        script_path: "demo.sh",
+        cron_schedule: "0 0 * * *",
+      },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    expect(bodies).toHaveLength(1);
+    expect(JSON.parse(bodies[0]!).environment).toBe("sandbox");
   });
 
   it("reads the workflows resource", async () => {
@@ -347,14 +416,14 @@ describe("Chaos MCP server", () => {
       isError?: boolean;
     };
     expect(result.isError).toBeFalsy();
-    expect(JSON.parse(textOf(result))[0].name).toBe("instance-default");
+    expect(JSON.parse(textOf(result))[0].name).toBe("production-default");
   });
 
   it("fail-closed when getWorkflow returns 404 under active protection", async () => {
     const routes = { ...ROUTES };
     delete routes["GET /api/v1/workflows/w1"];
     const { client } = await connectedPair(
-      { CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "instance" },
+      { CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "production" },
       routes,
     );
     const result = (await client.callTool({
@@ -383,7 +452,7 @@ describe("Chaos MCP server", () => {
     };
     const config = configFromEnv({
       CHAOS_SCHEDULER_API_KEY: "id.secret",
-      CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "instance",
+      CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "production",
     });
     const sdk = new ChaosSchedulerClient({
       baseUrl: config.baseUrl,
@@ -411,11 +480,11 @@ describe("Chaos MCP server", () => {
 
   it("blocks update_workflow when destination environment is protected", async () => {
     const { client } = await connectedPair({
-      CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "prod",
+      CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "production",
     });
     const result = (await client.callTool({
       name: "update_workflow",
-      arguments: { id: "w1", environment: "prod" },
+      arguments: { id: "w1", environment: "production" },
     })) as {
       content: Array<{ type: string; text?: string }>;
       isError?: boolean;

@@ -112,12 +112,6 @@ export default function GlobalHistory({ onViewRun }: Props) {
                   {env.name.charAt(0).toUpperCase() + env.name.slice(1)}
                 </option>
               ))}
-              {environments.length === 0 && (
-                <>
-                  <option value="source">Source</option>
-                  <option value="instance">Instance</option>
-                </>
-              )}
             </select>
           </label>
           <label>

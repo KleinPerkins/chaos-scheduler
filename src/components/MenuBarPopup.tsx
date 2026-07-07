@@ -104,7 +104,7 @@ export default function MenuBarPopup() {
     }
   };
 
-  // Group upcoming runs by environment dynamically (no hardcoded corpus set).
+  // Group upcoming runs by environment dynamically.
   const groupedNextRuns = useMemo(() => {
     const groups = new Map<string, NextRun[]>();
     for (const nr of status?.next_runs ?? []) {
@@ -154,8 +154,8 @@ export default function MenuBarPopup() {
           ) : (
             <>
               {groupedNextRuns.map(([env, runs]) => (
-                <div key={env} className="popup-corpus-group">
-                  <div className="popup-corpus-title">
+                <div key={env} className="popup-env-group">
+                  <div className="popup-env-title">
                     {envLabel(env)} Workflows
                     <span>{runs.length}</span>
                   </div>

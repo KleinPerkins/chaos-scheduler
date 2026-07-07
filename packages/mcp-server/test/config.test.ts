@@ -11,7 +11,8 @@ describe("config", () => {
     const cfg = configFromEnv({});
     expect(cfg.baseUrl).toBe("http://127.0.0.1:9618");
     expect(cfg.transport).toBe("stdio");
-    expect(cfg.protectedEnvironments).toEqual(["prod", "production"]);
+    expect(cfg.protectedEnvironments).toEqual(["production"]);
+    expect(cfg.defaultEnvironment).toBe("sandbox");
     expect(cfg.allowProtectedWrites).toBe(false);
     expect(cfg.allowRemoteHttp).toBe(false);
     expect(cfg.httpMaxBodyBytes).toBe(1024 * 1024);
@@ -84,23 +85,23 @@ describe("guardrails", () => {
 
   it("blocks writes to protected environments", () => {
     const cfg = configFromEnv({
-      CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "prod",
+      CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "production",
     });
-    expect(() => assertEnvironmentWritable("prod", cfg)).toThrow(
+    expect(() => assertEnvironmentWritable("production", cfg)).toThrow(
       GuardrailError,
     );
-    expect(() => assertEnvironmentWritable("PROD", cfg)).toThrow(
+    expect(() => assertEnvironmentWritable("PRODUCTION", cfg)).toThrow(
       GuardrailError,
     );
-    expect(() => assertEnvironmentWritable("instance", cfg)).not.toThrow();
+    expect(() => assertEnvironmentWritable("sandbox", cfg)).not.toThrow();
     expect(() => assertEnvironmentWritable(undefined, cfg)).not.toThrow();
   });
 
   it("allows protected writes when overridden", () => {
     const cfg = configFromEnv({
-      CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "prod",
+      CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "production",
       CHAOS_SCHEDULER_MCP_ALLOW_PROTECTED_WRITES: "1",
     });
-    expect(() => assertEnvironmentWritable("prod", cfg)).not.toThrow();
+    expect(() => assertEnvironmentWritable("production", cfg)).not.toThrow();
   });
 });

@@ -23,7 +23,7 @@ export const sampleWorkflow: Workflow = {
   enabled: true,
   async_mode: false,
   email_on_failure: false,
-  environment: "source",
+  environment: "production",
   managed_externally: false,
   kind: "generic",
   spec_json: null,
@@ -41,7 +41,7 @@ export const sampleManagedWorkflow: Workflow = {
   id: "wf-managed-1",
   name: "Managed import",
   managed_externally: true,
-  environment: "instance",
+  environment: "production",
 };
 
 export const sampleRun: Run = {
@@ -60,20 +60,20 @@ export const sampleRun: Run = {
 
 export const sampleEnvironments: Environment[] = [
   {
-    id: "env-source",
-    name: "source",
-    description: "Default source environment",
+    id: "env-production",
+    name: "production",
+    description: "Default production environment",
     workflow_count: 1,
     managed_externally: false,
     created_at: NOW,
     updated_at: NOW,
   },
   {
-    id: "env-instance",
-    name: "instance",
-    description: "Managed instance environment",
-    workflow_count: 1,
-    managed_externally: true,
+    id: "env-sandbox",
+    name: "sandbox",
+    description: "Sandbox environment for integration tests",
+    workflow_count: 0,
+    managed_externally: false,
     created_at: NOW,
     updated_at: NOW,
   },
@@ -133,7 +133,7 @@ export const defaultEmailConfig: EmailConfig = {
 export const defaultQueues: QueueInfo[] = [
   {
     name: "default",
-    environment: "source",
+    environment: "production",
     capacity: 2,
     tag_cap: null,
     max_queued: null,
