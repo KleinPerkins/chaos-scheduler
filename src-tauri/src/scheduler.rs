@@ -39,9 +39,36 @@ pub fn initiate_shutdown() {
     SHUTDOWN.store(true, Ordering::Relaxed);
 }
 
+// Test-only accounting of the total *requested* sleep duration on the
+// current thread. Synchronous operator paths (e.g. `CursorAgentOperator`'s
+// poll loop) call `sleep_interruptible` directly on the calling thread, so a
+// thread-local lets a test assert on how many milliseconds of sleep a code
+// path *asked for* — exactly and independently of wall-clock jitter — where
+// a `cargo test`-parallel-safe global counter could not. Compiled only under
+// `cfg(test)`; a no-op in release/dev builds.
+#[cfg(test)]
+thread_local! {
+    static ACCOUNTED_SLEEP_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Reset the current thread's sleep accounting to zero and return what it was.
+/// Call at the start of a test to zero it, and again at the end to read the
+/// total requested since the reset.
+#[cfg(test)]
+pub(crate) fn take_accounted_sleep_ms() -> u64 {
+    ACCOUNTED_SLEEP_MS.with(|c| c.replace(0))
+}
+
 /// Sleep that returns early when [`SHUTDOWN`] is set (poll/retry backoff paths),
 /// so a fixed shutdown grace is actually sufficient to stop in-flight workers.
 pub fn sleep_interruptible(duration: Duration) {
+    #[cfg(test)]
+    ACCOUNTED_SLEEP_MS.with(|c| {
+        c.set(
+            c.get()
+                .saturating_add(duration.as_millis().min(u64::MAX as u128) as u64),
+        )
+    });
     let deadline = Instant::now() + duration;
     while Instant::now() < deadline {
         if SHUTDOWN.load(Ordering::Relaxed) {
@@ -4694,6 +4721,15 @@ mod tests {
                 self.0.get(key).cloned()
             }
         }
+
+        // This test drives the operator poll loop, which checks the
+        // process-global SHUTDOWN flag at the top of every iteration. Without
+        // this guard, a parallel test that flips SHUTDOWN true (e.g.
+        // `shutdown_interrupts_cursor_agent_poll_promptly`) makes this loop
+        // break with POLL_EXHAUSTED before the first GET — so the assertions
+        // inside `get_json` never run and `outcome.success` is false. The
+        // guard both serializes against those tests and resets SHUTDOWN false.
+        let _shutdown_guard = lock_shutdown_test_state();
 
         let (db, dir) = structured_test_db();
         let wf = make_orphan_workflow(&db, "Cursor Progress");

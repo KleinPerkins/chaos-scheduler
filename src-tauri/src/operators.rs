@@ -1694,8 +1694,7 @@ mod tests {
 
     #[test]
     fn cursor_agent_poll_retry_backoff_does_not_double_with_next_interval_sleep() {
-        use crate::scheduler::lock_shutdown_test_state;
-        use std::time::{Duration, Instant};
+        use crate::scheduler::{lock_shutdown_test_state, take_accounted_sleep_ms};
 
         // Guards against the process-global SHUTDOWN flag leaking `true` from
         // another test (e.g. `shutdown_interrupts_cursor_agent_poll_promptly`)
@@ -1724,8 +1723,14 @@ mod tests {
         let secrets = MapSecrets(m);
         let ctx = cursor_ctx(&runner, &http, &secrets);
 
+        // `execute` runs the poll loop synchronously on this thread, so its
+        // `sleep_interruptible` calls accrue to this thread's sleep account.
+        // Asserting on the total *requested* sleep is exact and independent
+        // of CI scheduling jitter — a wall-clock measurement of a single
+        // ~200ms sleep was flaky under load (it could overrun a 1.5x
+        // upper bound).
         let poll_interval_ms: u64 = 200;
-        let start = Instant::now();
+        take_accounted_sleep_ms(); // zero this thread's accounting first
         let outcome = CursorAgentOperator.execute(
             &ctx,
             &serde_json::json!({
@@ -1735,23 +1740,20 @@ mod tests {
                 "poll_interval_ms": poll_interval_ms
             }),
         );
-        let elapsed = start.elapsed();
+        let slept_ms = take_accounted_sleep_ms();
 
         assert!(outcome.success, "{}", outcome.summary);
         assert_eq!(*http.get_count.lock().unwrap(), 2);
         // Exactly one sleep should occur between the two GETs: the retry's
-        // own backoff (here equal to poll_interval_ms, since this is the
+        // own backoff (equal to poll_interval_ms here, since this is the
         // first consecutive failure). Before the dedup fix, the very next
         // iteration's unconditional top-of-loop interval sleep would fire
-        // too, roughly doubling this to ~2x poll_interval_ms.
-        assert!(
-            elapsed < Duration::from_millis(poll_interval_ms * 3 / 2),
-            "expected a single deduped sleep (~{poll_interval_ms}ms), got {elapsed:?} \
-             (looks like the backoff sleep and the next interval sleep both fired)"
-        );
-        assert!(
-            elapsed >= Duration::from_millis(poll_interval_ms / 2),
-            "expected the backoff sleep to still occur, got {elapsed:?}"
+        // too — the account would then read 2 * poll_interval_ms.
+        assert_eq!(
+            slept_ms, poll_interval_ms,
+            "expected exactly one deduped backoff sleep of {poll_interval_ms}ms, \
+             but {slept_ms}ms was requested (the backoff sleep and the next \
+             interval sleep both fired)"
         );
     }
 
