@@ -64,28 +64,32 @@ in [`release.yml`](../.github/workflows/release.yml), not by convention.
 outputs. This avoids the "a `GITHUB_TOKEN`-created release cannot trigger another
 workflow" limitation without needing a PAT/GitHub App token.
 
-### Output keys (verified against release-please-action v4)
+### Release gating (verified against the v1.0.0 and v1.0.1 run outputs)
 
-release-please-action prefixes outputs by **manifest path**, with one special
-case for the root:
+release-please-action prefixes outputs by **manifest path**, with the root path
+`.` un-prefixed. The gate uses each component's **`tag_name`** output — empty
+when that component did not release this run, the tag when it did:
 
-| Component           | Path                  | `release_created` output key                     |
-| ------------------- | --------------------- | ------------------------------------------------ |
-| Desktop app (root)  | `.`                   | `release_created` (root path is **un-prefixed**) |
-| Rust crate (linked) | `src-tauri`           | `src-tauri--release_created`                     |
-| TypeScript SDK      | `packages/sdk-ts`     | `packages/sdk-ts--release_created`               |
-| MCP server          | `packages/mcp-server` | `packages/mcp-server--release_created`           |
+| Component           | Path                  | Gating output key (`*_tag_name`)              |
+| ------------------- | --------------------- | --------------------------------------------- |
+| Desktop app (root)  | `.`                   | `tag_name` (root path is **un-prefixed**)     |
+| Rust crate (linked) | `src-tauri`           | linked to the desktop app; not gated directly |
+| TypeScript SDK      | `packages/sdk-ts`     | `packages/sdk-ts--tag_name`                   |
+| MCP server          | `packages/mcp-server` | `packages/mcp-server--tag_name`               |
 
-> **Correction to the Phase 0 draft:** the earlier `chaos-scheduler--release_created`
-> keys (component-name-prefixed) were wrong — outputs are **path**-prefixed and the
-> root path `.` is **un-prefixed**. `release-please.yml` now exposes the correct
-> keys (`release_created` / `tag_name` / `version` for the desktop app, and
-> `packages/*--...` for the npm packages). Do **not** gate on the aggregate
-> `releases_created` (unreliable in v4).
+> **Why `tag_name`, not `release_created` (2026-07-07 fix):** the v1.0.1 release
+> created `chaos-scheduler-v1.0.1` + `mcp-server-v1.0.1`, yet the per-path
+> `*--release_created` booleans did **not** evaluate to `'true'` when consumed as
+> job outputs, so `release.yml` and every build/publish job silently **skipped** —
+> shipping no DMG/`latest.json` and publishing nothing to npm (a broken auto-updater
+> 404). The `*_tag_name` outputs tracked exactly which components released in both
+> the v1.0.0 and v1.0.1 runs, so the gate now keys off `<component>_tag_name != ''`.
+> `release-please.yml` also exposes `releases_created` / `paths_released` and dumps
+> `toJSON(steps.release.outputs)` in a "Debug release-please outputs" step, so any
+> future skip regression is root-causable straight from the release-please job log.
 
-The desktop build gates on the root `release_created`; each npm publish gates on
-its `packages/*--release_created`. If nothing was released, `release.yml` is not
-called.
+The desktop build gates on the root `tag_name`; each npm publish gates on its
+`packages/*--tag_name`. If nothing was released, `release.yml` is not called.
 
 ## Desktop build, signing & notarization
 

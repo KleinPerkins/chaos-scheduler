@@ -5,15 +5,26 @@ name: release-please
 # Commits. Merging that PR tags + creates the GitHub Release(s), then this
 # workflow calls release.yml (as a reusable workflow) to build/sign/publish.
 #
-# Gating uses release-please's PATH-prefixed outputs (verified against the
-# release-please-action v4 docs):
-#   * root component (path ".") emits UN-prefixed outputs: release_created,
-#     tag_name, version  (the desktop app: root node + src-tauri rust, linked);
-#   * non-root paths are prefixed, e.g. `packages/sdk-ts--release_created`.
-# We do NOT gate on `releases_created` (unreliable in v4) or on GitHub
-# `release`/`push` events (a GITHUB_TOKEN-created release cannot trigger another
-# workflow). Calling release.yml as a reusable workflow keeps it in the same run,
-# so the token-trigger limitation does not apply. See docs/RELEASING.md.
+# Gating uses release-please's PER-COMPONENT `*_tag_name` outputs, which are the
+# reliable "did this component release?" signal: empty when the component did not
+# release this run, the tag name when it did. This was verified against the actual
+# outputs of the v1.0.0 and v1.0.1 runs (see docs/RELEASING.md → "Release gating").
+#
+#   * root component (path ".") emits UN-prefixed outputs: tag_name, version
+#     (the desktop app: root node + src-tauri rust, linked);
+#   * non-root paths are prefixed, e.g. `packages/sdk-ts--tag_name`.
+#
+# We do NOT gate on the per-path `*--release_created` booleans: for the v1.0.1
+# release those did not evaluate to 'true' even though releases were created
+# (root `chaos-scheduler-v1.0.1` + `mcp-server-v1.0.1` were made), so the whole
+# `release` call and every build/publish job silently skipped and v1.0.1 shipped
+# no DMG/latest.json and never published to npm. The `*_tag_name` outputs, by
+# contrast, tracked exactly which components released in both runs.
+#
+# We also do NOT gate on GitHub `release`/`push` events (a GITHUB_TOKEN-created
+# release cannot trigger another workflow). Calling release.yml as a reusable
+# workflow keeps it in the same run, so the token-trigger limitation does not
+# apply. See docs/RELEASING.md.
 
 on:
   push:
@@ -27,18 +38,16 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     outputs:
+      # Aggregate signals (exposed for observability / the debug dump below).
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      paths_released: ${{ steps.release.outputs.paths_released }}
+      # Per-component tag names — the gating signal (empty ⇒ not released).
       # Desktop app (root path "." — root node + src-tauri rust are lockstep-linked).
-      desktop_release_created: ${{ steps.release.outputs.release_created }}
       desktop_tag_name: ${{ steps.release.outputs.tag_name }}
-      desktop_version: ${{ steps.release.outputs.version }}
       # TypeScript SDK (path packages/sdk-ts).
-      sdk_release_created: ${{ steps.release.outputs['packages/sdk-ts--release_created'] }}
       sdk_tag_name: ${{ steps.release.outputs['packages/sdk-ts--tag_name'] }}
-      sdk_version: ${{ steps.release.outputs['packages/sdk-ts--version'] }}
       # MCP server (path packages/mcp-server).
-      mcp_release_created: ${{ steps.release.outputs['packages/mcp-server--release_created'] }}
       mcp_tag_name: ${{ steps.release.outputs['packages/mcp-server--tag_name'] }}
-      mcp_version: ${{ steps.release.outputs['packages/mcp-server--version'] }}
     steps:
       - uses: googleapis/release-please-action@v5
         id: release
@@ -46,23 +55,30 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      # Diagnostic: dump every output release-please emitted (names + values) so
+      # a future "release created but build/publish skipped" regression can be
+      # root-caused from this job's log alone, without re-deriving it by hand.
+      - name: Debug release-please outputs
+        env:
+          RP_OUTPUTS: ${{ toJSON(steps.release.outputs) }}
+        run: echo "$RP_OUTPUTS"
 
   # Build/sign/publish only when at least one component was actually released.
   release:
     needs: release-please
     if: >-
-      ${{ needs.release-please.outputs.desktop_release_created == 'true' ||
-          needs.release-please.outputs.sdk_release_created == 'true' ||
-          needs.release-please.outputs.mcp_release_created == 'true' }}
+      ${{ needs.release-please.outputs.desktop_tag_name != '' ||
+          needs.release-please.outputs.sdk_tag_name != '' ||
+          needs.release-please.outputs.mcp_tag_name != '' }}
     permissions:
       contents: write
       id-token: write
     uses: ./.github/workflows/release.yml
     secrets: inherit
     with:
-      build_desktop: ${{ needs.release-please.outputs.desktop_release_created == 'true' }}
+      build_desktop: ${{ needs.release-please.outputs.desktop_tag_name != '' }}
       desktop_tag: ${{ needs.release-please.outputs.desktop_tag_name }}
-      publish_sdk: ${{ needs.release-please.outputs.sdk_release_created == 'true' }}
+      publish_sdk: ${{ needs.release-please.outputs.sdk_tag_name != '' }}
       sdk_tag: ${{ needs.release-please.outputs.sdk_tag_name }}
-      publish_mcp: ${{ needs.release-please.outputs.mcp_release_created == 'true' }}
+      publish_mcp: ${{ needs.release-please.outputs.mcp_tag_name != '' }}
       mcp_tag: ${{ needs.release-please.outputs.mcp_tag_name }}
