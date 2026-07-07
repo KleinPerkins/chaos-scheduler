@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/KleinPerkins/chaos-scheduler/compare/sdk-ts-v0.4.0...sdk-ts-v1.0.0) (2026-07-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **env:** rename source/instance environments to production/sandbox ([#132](https://github.com/KleinPerkins/chaos-scheduler/issues/132))
+
+### Features
+
+* **env:** rename source/instance environments to production/sandbox ([#132](https://github.com/KleinPerkins/chaos-scheduler/issues/132)) ([f5017e5](https://github.com/KleinPerkins/chaos-scheduler/commit/f5017e5254984989c5bce70ebd350960af8d1e52))
+
 ## [0.4.0](https://github.com/KleinPerkins/chaos-scheduler/compare/sdk-ts-v0.3.0...sdk-ts-v0.4.0) (2026-07-06)
 
 
