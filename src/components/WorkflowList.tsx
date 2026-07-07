@@ -487,12 +487,12 @@ export default function WorkflowList({
       ) : (
         <>
           <div
-            className="wf-corpus-filter"
+            className="wf-env-filter"
             role="group"
             aria-label="Filter workflows by environment"
           >
             <button
-              className={`wf-corpus-pill ${envFilter === "all" ? "active" : ""}`}
+              className={`wf-env-pill ${envFilter === "all" ? "active" : ""}`}
               onClick={() => setEnvFilter("all")}
               aria-pressed={envFilter === "all"}
             >
@@ -502,7 +502,7 @@ export default function WorkflowList({
             {envOptions.map((name) => (
               <button
                 key={name}
-                className={`wf-corpus-pill ${envFilter === name ? "active" : ""}`}
+                className={`wf-env-pill ${envFilter === name ? "active" : ""}`}
                 onClick={() => setEnvFilter(name)}
                 aria-pressed={envFilter === name}
               >

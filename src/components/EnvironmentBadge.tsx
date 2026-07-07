@@ -10,7 +10,7 @@ interface Props {
 }
 
 // Deterministic hue from the environment name so any user-defined environment
-// gets a stable, distinct color without a hardcoded source/instance mapping.
+// gets a stable, distinct color without a hardcoded environment mapping.
 function hueFor(name: string): number {
   let hash = 0;
   for (let i = 0; i < name.length; i++) {
@@ -25,8 +25,7 @@ function labelFor(name: string): string {
 }
 
 /**
- * Dynamic environment pill. Replaces the former hardcoded source/instance
- * corpus badge; colors are derived from the environment name so newly created
+ * Dynamic environment pill; colors are derived from the environment name so newly created
  * environments render distinctly with no code change.
  */
 export default function EnvironmentBadge({

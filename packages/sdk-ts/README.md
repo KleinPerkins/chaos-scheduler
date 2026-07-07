@@ -35,7 +35,7 @@ const wf = await client.registerWorkflow({
   name: "Nightly digest",
   script_path: "scripts/digest.py",
   cron_schedule: "0 6 * * *",
-  environment: "instance",
+  environment: "production",
 });
 
 // 2) Run it now, safely retryable via an idempotency key (scope: write)

@@ -15,7 +15,7 @@
  *   name: "Nightly digest",
  *   script_path: "scripts/digest.py",
  *   cron_schedule: "0 6 * * *",
- *   environment: "instance",
+ *   environment: "production",
  * });
  * const outcome = await client.runWorkflow(wf.id, { idempotencyKey: crypto.randomUUID() });
  * ```

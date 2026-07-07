@@ -49,6 +49,17 @@ pub const METRICS_ADDR: &str = "127.0.0.1:9617";
 /// Default bind address for the versioned HTTP API (loopback by default).
 pub const DEFAULT_API_ADDR: &str = "127.0.0.1:9618";
 
+/// Default scheduler environment for real workflows (UI + API when omitted).
+pub const DEFAULT_ENVIRONMENT: &str = "production";
+
+/// Isolated environment for integration tests, SDK demos, and MCP smoke runs.
+pub const SANDBOX_ENVIRONMENT: &str = "sandbox";
+
+/// Default queue name for an environment (`{environment}-default`).
+pub fn default_queue_name(environment: &str) -> String {
+    format!("{}-default", environment.trim())
+}
+
 /// Window title for the popup shell.
 pub const POPUP_TITLE: &str = "Chaos Scheduler";
 /// Tray tooltip.

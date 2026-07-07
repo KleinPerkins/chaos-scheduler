@@ -313,7 +313,7 @@ mod tests {
     fn valid_generic_spec_round_trips() {
         let spec = WorkflowSpec {
             kind: WorkflowKind::Generic,
-            environment: Some("instance".into()),
+            environment: Some("production".into()),
             generic: Some(GenericSpec {
                 steps: vec![step("build", &[]), step("test", &["build"])],
             }),

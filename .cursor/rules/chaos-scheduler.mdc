@@ -46,11 +46,8 @@ hand-writing HTTP calls.
 - **Registration is authoritative:** workflows created via `register_workflow`
   are marked `managed_externally=true` (source-of-truth is external). Only change
   them through the API/MCP, not the UI.
-- **Environments are partitions.** Put a workflow in an existing environment
-  (`instance` by default) unless the user asks for a new one.
-- **Protected environments** (default `prod`, `production`) reject writes unless
-  the server was started with `--allow-protected-writes`. If a write is blocked,
-  surface the guardrail message and ask the user to confirm rather than retrying.
+- **Environments are partitions.** Put a workflow in `production` (the default) unless the user asks for a sandbox/UAT workflow or a new environment.
+- **Protected environments** (default `production`) reject MCP writes unless the server was started with `--allow-protected-writes`. The MCP default write target is `sandbox` — use that for integration tests and agent-driven registration.
 
 ## Reading state via @-references
 

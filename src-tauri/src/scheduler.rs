@@ -4131,7 +4131,7 @@ mod tests {
                 false,
                 false,
                 "UTC",
-                "instance",
+                "production",
                 None,
                 None,
                 None,
@@ -4304,7 +4304,7 @@ mod tests {
                 false,
                 true,
                 "UTC",
-                "instance",
+                "production",
                 None,
                 None,
                 None,
@@ -4313,8 +4313,8 @@ mod tests {
         let admitted = db
             .admit_run_with_context(
                 &wf.id,
-                "instance-default",
-                "instance",
+                "production-default",
+                "production",
                 &[],
                 Some("manual"),
                 None,
@@ -4375,8 +4375,8 @@ mod tests {
             "python3",
             "run-1",
             "wf-1",
-            "instance-default",
-            "instance",
+            "production-default",
+            "production",
             None,
             "/tmp/db.sqlite",
             None,
@@ -4401,7 +4401,7 @@ mod tests {
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 None,
                 None,
                 None,
@@ -4410,8 +4410,8 @@ mod tests {
         let admitted = db
             .admit_run_with_context(
                 &wf.id,
-                "source-default",
-                "source",
+                "production-default",
+                "production",
                 &[],
                 Some("manual"),
                 None,
@@ -4446,8 +4446,8 @@ mod tests {
         let admitted = db
             .admit_run_with_context(
                 workflow_id,
-                "source-default",
-                "source",
+                "production-default",
+                "production",
                 &[],
                 Some("manual"),
                 None,
@@ -4477,7 +4477,7 @@ mod tests {
             false,
             true,
             "UTC",
-            "source",
+            "production",
             None,
             None,
             None,
@@ -4932,7 +4932,7 @@ mod tests {
                 false,
                 false,
                 "UTC",
-                "instance",
+                "production",
                 None,
                 None,
                 None,
@@ -4986,7 +4986,7 @@ mod tests {
                 false,
                 false,
                 "UTC",
-                "instance",
+                "production",
                 None,
                 None,
                 None,
@@ -5051,7 +5051,7 @@ mod tests {
                 false,
                 false,
                 "UTC",
-                "instance",
+                "production",
                 None,
                 None,
                 None,
@@ -5097,7 +5097,7 @@ mod tests {
                 false,
                 false,
                 "UTC",
-                "instance",
+                "production",
                 None,
                 None,
                 None,
@@ -5134,8 +5134,8 @@ mod tests {
             "python3",
             "run-1",
             "wf-1",
-            "instance-default",
-            "instance",
+            "production-default",
+            "production",
             Some("owner"),
             "/tmp/scheduler.db",
             Some(r#"{"k":"v"}"#),
@@ -5156,7 +5156,7 @@ mod tests {
         );
         assert_eq!(
             envs.get("CHAOS_SCHEDULER_ENVIRONMENT").map(String::as_str),
-            Some("instance")
+            Some("production")
         );
         assert_eq!(
             envs.get("CHAOS_SCHEDULER_WORKSPACE_ROOT")
@@ -5170,7 +5170,7 @@ mod tests {
         );
         assert_eq!(
             envs.get("CHAOS_LABS_SCHEDULER_CORPUS").map(String::as_str),
-            Some("instance")
+            Some("production")
         );
         assert_eq!(
             envs.get("CHAOS_LABS_ROOT").map(String::as_str),
@@ -5577,9 +5577,9 @@ mod tests {
 
     #[test]
     fn queue_config_defaults_to_corpus_queue() {
-        let config = parse_queue_config(None, "source");
+        let config = parse_queue_config(None, "production");
 
-        assert_eq!(config.queue, "source-default");
+        assert_eq!(config.queue, "production-default");
         assert_eq!(config.priority, 0);
         assert!(config.depends_on.is_empty());
         assert!(config.waits_for.is_empty());
@@ -5598,10 +5598,10 @@ mod tests {
             false,
             true,
             "UTC",
-            "source",
+            "production",
             None,
             None,
-            Some(r#"{"queue":"source-default"}"#),
+            Some(r#"{"queue":"production-default"}"#),
         )
         .unwrap();
         let conn = rusqlite::Connection::open(dir.join("scheduler.db")).unwrap();
@@ -5626,7 +5626,7 @@ mod tests {
             Some(
                 r#"{"depends_on":["capture"],"waits_for":["gmail"],"queue":"source-heavy","priority":7}"#,
             ),
-            "source",
+            "production",
         );
 
         assert_eq!(config.depends_on, vec!["capture"]);
@@ -5674,10 +5674,10 @@ not json
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 None,
                 None,
-                Some(r#"{"queue":"source-default"}"#),
+                Some(r#"{"queue":"production-default"}"#),
             )
             .unwrap();
         let run = db
@@ -5727,10 +5727,10 @@ not json
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 None,
                 None,
-                Some(r#"{"queue":"source-default"}"#),
+                Some(r#"{"queue":"production-default"}"#),
             )
             .unwrap();
         let downstream = db
@@ -5742,10 +5742,10 @@ not json
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 None,
                 Some(r#"{"triggers":[{"kind":"asset_update","asset":{"kind":"source","namespace":"slack","partition":"C123"}}]}"#),
-                Some(r#"{"queue":"source-default"}"#),
+                Some(r#"{"queue":"production-default"}"#),
             )
             .unwrap();
         let run = db
@@ -5817,7 +5817,7 @@ not json
     fn mutex_keys_include_pair_groups() {
         let config = parse_queue_config(
             Some(r#"{"excludes":["refresh"],"tags":["heavy_io"],"queue":"source-heavy"}"#),
-            "source",
+            "production",
         );
 
         let keys = mutex_keys("capture", &config);
@@ -5840,10 +5840,10 @@ not json
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 Some("scheduler"),
                 None,
-                Some(r#"{"queue":"source-default","depends_on":["upstream"]}"#),
+                Some(r#"{"queue":"production-default","depends_on":["upstream"]}"#),
             )
             .unwrap();
 
@@ -5892,10 +5892,10 @@ not json
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 Some("scheduler"),
                 None,
-                Some(r#"{"queue":"source-default"}"#),
+                Some(r#"{"queue":"production-default"}"#),
             )
             .unwrap();
         let child = db
@@ -5907,10 +5907,10 @@ not json
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 Some("scheduler"),
                 None,
-                Some(r#"{"queue":"source-default","depends_on":["missing-upstream"]}"#),
+                Some(r#"{"queue":"production-default","depends_on":["missing-upstream"]}"#),
             )
             .unwrap();
         let parent_run = db
@@ -5957,10 +5957,10 @@ not json
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 Some("scheduler"),
                 None,
-                Some(r#"{"queue":"source-default"}"#),
+                Some(r#"{"queue":"production-default"}"#),
             )
             .unwrap();
         let parent_run = db

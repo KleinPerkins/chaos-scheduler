@@ -34,6 +34,8 @@ export interface ChaosMcpConfig {
   maxToolCalls: number;
   /** Per-request timeout forwarded to the SDK client (ms). */
   requestTimeoutMs: number;
+  /** Default environment for register/run tools when omitted. */
+  defaultEnvironment: string;
 }
 
 function envList(value: string | undefined): string[] {
@@ -60,7 +62,8 @@ const DEFAULTS = {
   httpHost: "127.0.0.1",
   httpPort: 9700,
   httpMaxBodyBytes: 1024 * 1024,
-  protectedEnvironments: ["prod", "production"],
+  protectedEnvironments: ["production"],
+  defaultEnvironment: "sandbox",
   requestTimeoutMs: 30_000,
 };
 
@@ -94,6 +97,9 @@ export function configFromEnv(
       env.CHAOS_SCHEDULER_MCP_REQUEST_TIMEOUT_MS,
       DEFAULTS.requestTimeoutMs,
     ),
+    defaultEnvironment:
+      env.CHAOS_SCHEDULER_MCP_DEFAULT_ENVIRONMENT?.trim() ||
+      DEFAULTS.defaultEnvironment,
   };
 }
 
