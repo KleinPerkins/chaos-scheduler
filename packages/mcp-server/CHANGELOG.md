@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.2](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v1.0.1...mcp-server-v1.0.2) (2026-07-07)
+
+
+### Bug Fixes
+
+* **security:** remove polynomial-time regexes flagged by CodeQL ([#139](https://github.com/KleinPerkins/chaos-scheduler/issues/139)) ([edbb395](https://github.com/KleinPerkins/chaos-scheduler/commit/edbb3950793058f6087a5a454653826b4ee2aa89))
+* **test:** avoid dynamic regexes in build output assertions ([#141](https://github.com/KleinPerkins/chaos-scheduler/issues/141)) ([8e98009](https://github.com/KleinPerkins/chaos-scheduler/commit/8e980094e6bae7601ca30990a3239535babbad00))
+
 ## [1.0.1](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v1.0.0...mcp-server-v1.0.1) (2026-07-07)
 
 

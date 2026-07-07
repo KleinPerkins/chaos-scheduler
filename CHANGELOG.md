@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.3](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.0.2...chaos-scheduler-v1.0.3) (2026-07-07)
+
+
+### Bug Fixes
+
+* **release:** pass release tags to release.yml as strings, not coerced booleans ([#142](https://github.com/KleinPerkins/chaos-scheduler/issues/142)) ([0ca02c4](https://github.com/KleinPerkins/chaos-scheduler/commit/0ca02c4b1f7b08b0755b6425e4e964cbc268a63d))
+* **security:** remove polynomial-time regexes flagged by CodeQL ([#139](https://github.com/KleinPerkins/chaos-scheduler/issues/139)) ([edbb395](https://github.com/KleinPerkins/chaos-scheduler/commit/edbb3950793058f6087a5a454653826b4ee2aa89))
+* **test:** avoid dynamic regexes in build output assertions ([#141](https://github.com/KleinPerkins/chaos-scheduler/issues/141)) ([8e98009](https://github.com/KleinPerkins/chaos-scheduler/commit/8e980094e6bae7601ca30990a3239535babbad00))
+
 ## [1.0.2](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.0.1...chaos-scheduler-v1.0.2) (2026-07-07)
 
 
