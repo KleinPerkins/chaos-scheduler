@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.0.1...chaos-scheduler-v1.0.2) (2026-07-07)
+
+
+### Bug Fixes
+
+* **release:** gate release build on tag_name, not the unreliable release_created ([#137](https://github.com/KleinPerkins/chaos-scheduler/issues/137)) ([7d2dd64](https://github.com/KleinPerkins/chaos-scheduler/commit/7d2dd64e1ff369c426c9952b0eb7f200c95a1b85))
+
 ## [1.0.1](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.0.0...chaos-scheduler-v1.0.1) (2026-07-07)
 
 
