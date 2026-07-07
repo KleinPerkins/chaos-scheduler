@@ -106,7 +106,11 @@ export interface WaitForRunOptions {
 }
 
 function trimTrailingSlash(url: string): string {
-  return url.replace(/\/+$/, "");
+  let end = url.length;
+  while (end > 0 && url[end - 1] === "/") {
+    end--;
+  }
+  return url.slice(0, end);
 }
 
 async function sleep(ms: number, signal?: AbortSignal): Promise<void> {

@@ -450,6 +450,46 @@ describe("ChaosSchedulerClient", () => {
     vi.useRealTimers();
   });
 
+  it("trims one or more trailing slashes from baseUrl", async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      status: 200,
+      json: { status: "ok" },
+    }));
+    const client = new ChaosSchedulerClient({
+      baseUrl: `${BASE}///`,
+      fetch,
+    });
+    await client.getHealth();
+    expect(calls[0]!.url).toBe(`${BASE}/api/v1/health`);
+  });
+
+  it("handles a long run of trailing slashes correctly (regression for ReDoS)", async () => {
+    // Deterministic correctness check standing in for manual timing evidence
+    // (see PR description): a backtracking regex here would make this test
+    // hang rather than fail, so completion itself is the signal.
+    const longSlashes = "/".repeat(50_000);
+    const { fetch, calls } = fakeFetch(() => ({
+      status: 200,
+      json: { status: "ok" },
+    }));
+    const client = new ChaosSchedulerClient({
+      baseUrl: `${BASE}${longSlashes}`,
+      fetch,
+    });
+    await client.getHealth();
+    expect(calls[0]!.url).toBe(`${BASE}/api/v1/health`);
+  });
+
+  it("leaves a baseUrl with no trailing slash unchanged", async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      status: 200,
+      json: { status: "ok" },
+    }));
+    const client = new ChaosSchedulerClient({ baseUrl: BASE, fetch });
+    await client.getHealth();
+    expect(calls[0]!.url).toBe(`${BASE}/api/v1/health`);
+  });
+
   it("wraps a network failure as a ChaosApiError with status 0", async () => {
     const fetch: FetchLike = async () => {
       throw new Error("connection refused");

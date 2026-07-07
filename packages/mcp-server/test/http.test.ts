@@ -126,6 +126,90 @@ describe("HTTP MCP transport guardrails", () => {
     expect(JSON.parse(res.body).error.message).toMatch(/host not allowed/i);
   });
 
+  it("accepts a mixed-case Bearer scheme", async () => {
+    const { baseUrl } = await startServer();
+
+    const res = await request(baseUrl, {
+      authorization: "bEaReR user.key",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+
+    expect(res.status).not.toBe(401);
+  });
+
+  it("accepts a tab separator between scheme and token", async () => {
+    const { baseUrl } = await startServer();
+
+    const res = await request(baseUrl, {
+      authorization: "Bearer\tuser.key",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+
+    expect(res.status).not.toBe(401);
+  });
+
+  it("accepts extra whitespace before the token", async () => {
+    const { baseUrl } = await startServer();
+
+    const res = await request(baseUrl, {
+      authorization: "Bearer     user.key",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+
+    expect(res.status).not.toBe(401);
+  });
+
+  it("rejects a non-Bearer scheme", async () => {
+    const { baseUrl } = await startServer();
+
+    const res = await request(baseUrl, {
+      authorization: "Basic dXNlcjpwYXNz",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+
+    expect(res.status).toBe(401);
+    expect(JSON.parse(res.body).error.message).toMatch(/missing bearer/i);
+  });
+
+  it("rejects a Bearer scheme with no token", async () => {
+    const { baseUrl } = await startServer();
+
+    const res = await request(baseUrl, {
+      authorization: "Bearer",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+
+    expect(res.status).toBe(401);
+    expect(JSON.parse(res.body).error.message).toMatch(/missing bearer/i);
+  });
+
+  it("rejects a Bearer scheme with only whitespace as the token", async () => {
+    const { baseUrl } = await startServer();
+
+    const res = await request(baseUrl, {
+      authorization: "Bearer    ",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+
+    expect(res.status).toBe(401);
+    expect(JSON.parse(res.body).error.message).toMatch(/missing bearer/i);
+  });
+
+  it("returns quickly for a long malformed header (regression for ReDoS)", async () => {
+    const { baseUrl } = await startServer();
+
+    // Stays under Node's default HTTP header size limit (~16KB) so the
+    // connection isn't reset before reaching the (now regex-free) parser.
+    const res = await request(baseUrl, {
+      authorization: `Bearer${" ".repeat(8_000)}`,
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+
+    // All whitespace, no token: still a well-formed rejection, not a hang.
+    expect(res.status).toBe(401);
+    expect(JSON.parse(res.body).error.message).toMatch(/missing bearer/i);
+  });
+
   it("refuses remote binds without explicit opt-in", async () => {
     await expect(
       runHttp({
