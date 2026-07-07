@@ -12,7 +12,7 @@ export interface Workflow {
   enabled: boolean;
   async_mode: boolean;
   email_on_failure: boolean;
-  /** First-class environment name (dynamic; seeded `source`/`instance`). */
+  /** First-class environment name (dynamic; seeded `production`/`sandbox`). */
   environment: string;
   /** True when the definition is owned by an external source of truth (git /
    * API-registered) and is therefore read-only in the app. */

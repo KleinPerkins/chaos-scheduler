@@ -104,7 +104,7 @@ describe("ChaosSchedulerClient", () => {
       json: {
         workflow: {
           id: "w2",
-          environment: "instance",
+          environment: "production",
           managed_externally: true,
         },
       },
@@ -118,12 +118,12 @@ describe("ChaosSchedulerClient", () => {
       name: "API WF",
       script_path: "scripts/x.py",
       cron_schedule: "0 0 * * *",
-      environment: "instance",
+      environment: "production",
     });
     expect(wf.managed_externally).toBe(true);
     const sent = JSON.parse(calls[0]!.body!);
     expect(sent.name).toBe("API WF");
-    expect(sent.environment).toBe("instance");
+    expect(sent.environment).toBe("production");
     expect(calls[0]!.headers?.["content-type"]).toBe("application/json");
   });
 
@@ -134,7 +134,7 @@ describe("ChaosSchedulerClient", () => {
         workflow_id: "w1",
         status: "admitted",
         run_id: "r1",
-        queue_name: "instance-default",
+        queue_name: "production-default",
       },
     }));
     const client = new ChaosSchedulerClient({
@@ -173,7 +173,7 @@ describe("ChaosSchedulerClient", () => {
         workflow_id: "w1",
         status: "queued",
         run_id: null,
-        queue_name: "instance-default",
+        queue_name: "production-default",
       },
     }));
     const client = new ChaosSchedulerClient({
@@ -411,7 +411,7 @@ describe("ChaosSchedulerClient", () => {
         status: "admitted",
         run_id: "r2",
         queued_run_id: null,
-        queue_name: "instance-default",
+        queue_name: "production-default",
       },
     }));
     const client = new ChaosSchedulerClient({

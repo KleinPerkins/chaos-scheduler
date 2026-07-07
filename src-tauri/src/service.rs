@@ -179,7 +179,7 @@ pub struct WorkflowDraft {
     pub email_on_failure: bool,
     pub timezone: String,
     /// First-class environment (authoritative partition). May be any registered
-    /// environment name (e.g. `instance`, `staging`, `prod`, or a per-org
+    /// environment name (e.g. `production`, `staging`, `prod`, or a per-org
     /// container). Governance is carried separately by the `managed` flag on
     /// the create/update call, not by the environment name.
     pub environment: String,
@@ -190,11 +190,11 @@ pub struct WorkflowDraft {
 
 impl WorkflowDraft {
     /// The effective environment (partition) for this draft. Falls back to
-    /// `instance` when a caller leaves it blank.
+    /// `production` when a caller leaves it blank.
     fn effective_environment(&self) -> String {
         let trimmed = self.environment.trim();
         if trimmed.is_empty() {
-            "instance".to_string()
+            "production".to_string()
         } else {
             trimmed.to_string()
         }
@@ -944,7 +944,7 @@ fn env_bool(value: Option<String>) -> bool {
 fn protected_environments_from_env() -> Vec<String> {
     normalize_environment_names(env_list(
         std::env::var("CHAOS_SCHEDULER_PROTECTED_ENVIRONMENTS").ok(),
-        &["prod", "production"],
+        &[],
     ))
 }
 
@@ -961,7 +961,7 @@ mod tests {
         SchedulerService::with_protection_config(
             db,
             Arc::new(NoopNotifier),
-            vec!["prod".into(), "production".into()],
+            vec![crate::branding::DEFAULT_ENVIRONMENT.into()],
             false,
         )
     }
@@ -1063,7 +1063,7 @@ mod tests {
         ));
 
         // Selection + delete round-trip.
-        let wf = svc.create_workflow(draft("wf", "instance"), false).unwrap();
+        let wf = svc.create_workflow(draft("wf", "sandbox"), false).unwrap();
         svc.set_workflow_email_profile(&wf.id, Some(&saved.id))
             .unwrap();
         assert_eq!(
@@ -1091,7 +1091,7 @@ mod tests {
     fn spec() -> crate::workflow_spec::WorkflowSpec {
         crate::workflow_spec::WorkflowSpec {
             kind: crate::workflow_spec::WorkflowKind::Generic,
-            environment: Some("instance".into()),
+            environment: Some("sandbox".into()),
             generic: Some(crate::workflow_spec::GenericSpec {
                 steps: vec![crate::workflow_spec::StepSpec {
                     id: "s1".into(),
@@ -1115,12 +1115,12 @@ mod tests {
     fn ui_create_is_never_externally_managed() {
         // Governance is decoupled from the environment name: a UI-originated
         // create (managed = false) is never externally-managed, even when it
-        // targets an environment that happens to be named "source".
+        // targets an environment that happens to be named "production".
         let dir = tmpdir();
         let svc = service(&dir);
-        let wf = svc.create_workflow(draft("wf", "source"), false).unwrap();
+        let wf = svc.create_workflow(draft("wf", "sandbox"), false).unwrap();
         assert!(!svc.is_managed_externally(&wf));
-        assert_eq!(wf.environment, "source");
+        assert_eq!(wf.environment, "sandbox");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1128,7 +1128,7 @@ mod tests {
     fn api_may_register_managed_workflow() {
         let dir = tmpdir();
         let svc = service(&dir);
-        let wf = svc.create_workflow(draft("wf", "source"), true).unwrap();
+        let wf = svc.create_workflow(draft("wf", "sandbox"), true).unwrap();
         assert!(svc.is_managed_externally(&wf));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1137,10 +1137,10 @@ mod tests {
     fn ui_edit_of_managed_definition_is_blocked_but_runtime_prefs_allowed() {
         let dir = tmpdir();
         let svc = service(&dir);
-        let wf = svc.create_workflow(draft("wf", "source"), true).unwrap();
+        let wf = svc.create_workflow(draft("wf", "sandbox"), true).unwrap();
 
         // Changing the script (a governed field) from the UI is blocked.
-        let mut changed = draft("wf", "source");
+        let mut changed = draft("wf", "sandbox");
         changed.script_path = "scripts/other.py".to_string();
         let err = svc
             .update_workflow(&wf.id, true, changed, false)
@@ -1148,7 +1148,7 @@ mod tests {
         assert!(matches!(err, ServiceError::Governance(_)));
 
         // Toggling enabled (a runtime pref) is allowed.
-        let same = draft("wf", "source");
+        let same = draft("wf", "sandbox");
         assert!(svc.update_workflow(&wf.id, false, same, false).is_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1207,7 +1207,7 @@ mod tests {
     fn set_workflow_spec_validates_and_persists() {
         let dir = tmpdir();
         let svc = service(&dir);
-        let wf = svc.create_workflow(draft("wf", "instance"), false).unwrap();
+        let wf = svc.create_workflow(draft("wf", "sandbox"), false).unwrap();
         let spec = spec();
         let updated = svc.set_workflow_spec(&wf.id, &spec, false).unwrap();
         assert_eq!(updated.kind, "generic");
@@ -1219,7 +1219,7 @@ mod tests {
     fn ui_cannot_set_managed_workflow_spec() {
         let dir = tmpdir();
         let svc = service(&dir);
-        let wf = svc.create_workflow(draft("wf", "source"), true).unwrap();
+        let wf = svc.create_workflow(draft("wf", "sandbox"), true).unwrap();
         let err = svc.set_workflow_spec(&wf.id, &spec(), false).unwrap_err();
         assert!(matches!(err, ServiceError::Governance(_)));
         assert!(svc.set_workflow_spec(&wf.id, &spec(), true).is_ok());
@@ -1270,18 +1270,18 @@ mod tests {
         let svc = service(&dir);
 
         assert!(matches!(
-            svc.create_environment("prod", None, None, None, None, None)
+            svc.create_environment("production", None, None, None, None, None)
                 .unwrap_err(),
             ServiceError::Governance(_)
         ));
 
         let source = svc
             .db
-            .get_environment_by_name("source")
+            .get_environment_by_name("production")
             .unwrap()
-            .expect("source env seeded");
+            .expect("production env seeded");
         assert!(matches!(
-            svc.update_environment(&source.id, "source2", None, None, None, None, None)
+            svc.update_environment(&source.id, "renamed", None, None, None, None, None)
                 .unwrap_err(),
             ServiceError::Governance(_)
         ));
@@ -1297,12 +1297,12 @@ mod tests {
     fn protected_write_override_is_explicit() {
         let dir = tmpdir();
         let db = Arc::new(Database::new(&dir));
-        let svc = service_with_db(db, vec!["prod"], true);
+        let svc = service_with_db(db, vec!["production"], true);
         let env = svc
-            .create_environment("prod", None, None, None, None, None)
+            .create_environment("staging", None, None, None, None, None)
             .unwrap();
-        assert_eq!(env.name, "prod");
-        let d = draft("prod wf", "prod");
+        assert_eq!(env.name, "staging");
+        let d = draft("staging wf", "staging");
         assert!(svc.create_workflow(d, false).is_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1322,7 +1322,7 @@ mod tests {
     fn update_workflow_can_move_environment() {
         let dir = tmpdir();
         let svc = service(&dir);
-        let wf = svc.create_workflow(draft("wf", "instance"), false).unwrap();
+        let wf = svc.create_workflow(draft("wf", "sandbox"), false).unwrap();
         let d = draft("wf", "staging");
         let updated = svc.update_workflow(&wf.id, true, d, false).unwrap();
         assert_eq!(updated.environment, "staging");
@@ -1377,7 +1377,7 @@ mod tests {
     fn validation_rejects_bad_queue_config_json() {
         let dir = tmpdir();
         let svc = service(&dir);
-        let mut d = draft("wf", "instance");
+        let mut d = draft("wf", "sandbox");
         d.queue_config = Some("{not json".to_string());
         let err = svc.create_workflow(d, false).unwrap_err();
         assert!(matches!(err, ServiceError::Validation(_)));
@@ -1390,7 +1390,7 @@ mod tests {
 
         let dir = tmpdir();
         let svc = service(&dir);
-        let wf = svc.create_workflow(draft("wf", "instance"), false).unwrap();
+        let wf = svc.create_workflow(draft("wf", "sandbox"), false).unwrap();
         let mut spec = spec();
         spec.on_success = vec![ActionSpec::Webhook {
             url: "https://example.com/h".into(),

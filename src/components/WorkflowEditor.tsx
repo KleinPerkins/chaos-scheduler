@@ -59,7 +59,7 @@ function parseSpec(workflow?: Workflow): Partial<WorkflowSpec> {
 export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
   const isEdit = !!workflow;
   // Governance is keyed off `managed_externally`, decoupled from the legacy
-  // corpus string: externally-registered definitions are read-only in the app.
+  // managed_externally: externally-registered definitions are read-only in the app.
   const isManaged = isEdit && (workflow?.managed_externally ?? false);
   const existingSpec = parseSpec(workflow);
 
@@ -69,7 +69,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
   const [description, setDescription] = useState(workflow?.description ?? "");
   const [scriptPath, setScriptPath] = useState(workflow?.script_path ?? "");
   const [environment, setEnvironment] = useState(
-    workflow ? environmentOf(workflow) : "instance",
+    workflow ? environmentOf(workflow) : "production",
   );
   const [cronSchedule, setCronSchedule] = useState(
     workflow?.cron_schedule ?? "0 0 9 * * Mon *",
@@ -255,9 +255,8 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           asyncMode,
           emailOnFailure,
           timezone: LOCAL_TZ,
-          // New UI workflows always land in the instance partition; a custom
-          // environment name is preserved in the spec below.
-          environment: "instance",
+          // New UI workflows default to production unless the spec sets another environment.
+          environment: "production",
           triggerConfig: triggerConfig || undefined,
           queueConfig: queueConfig || undefined,
         });
@@ -308,8 +307,8 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
     for (const env of environments) names.add(env.name);
     names.add(environment);
     if (names.size === 0) {
-      names.add("instance");
-      names.add("source");
+      names.add("production");
+      names.add("sandbox");
     }
     return Array.from(names).sort((a, b) => a.localeCompare(b));
   })();
@@ -611,7 +610,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
               id="wf-queue"
               value={queueConfig}
               onChange={(e) => setQueueConfig(e.target.value)}
-              placeholder='{"queue":"instance-default","priority":0,"depends_on":[],"waits_for":[],"tags":[]}'
+              placeholder='{"queue":"production-default","priority":0,"depends_on":[],"waits_for":[],"tags":[]}'
               rows={4}
               disabled={isManaged}
             />

@@ -81,13 +81,13 @@
   gap: 4px;
 }
 
-.popup-corpus-group + .popup-corpus-group {
+.popup-env-group + .popup-env-group {
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px solid var(--border);
 }
 
-.popup-corpus-title {
+.popup-env-title {
   display: flex;
   justify-content: space-between;
   margin-bottom: 4px;

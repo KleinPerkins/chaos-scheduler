@@ -77,7 +77,7 @@ pub fn create_workflow(
     trigger_config: Option<String>,
     queue_config: Option<String>,
 ) -> Result<Workflow, String> {
-    let environment = environment.unwrap_or_else(|| "instance".to_string());
+    let environment = environment.unwrap_or_else(|| "production".to_string());
     let draft = WorkflowDraft {
         name,
         description,
@@ -1524,7 +1524,7 @@ mod tests {
             enabled: true,
             async_mode: false,
             email_on_failure: true,
-            environment: "source".to_string(),
+            environment: "production".to_string(),
             managed_externally: true,
             kind: "generic".to_string(),
             spec_json: None,

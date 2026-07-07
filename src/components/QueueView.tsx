@@ -336,7 +336,9 @@ export default function QueueView({ onBack }: QueueViewProps) {
                   <div className="queue-card-header">
                     <div>
                       <div className="queue-name">{queue.name}</div>
-                      <div className="queue-corpus">{environmentOf(queue)}</div>
+                      <div className="queue-environment">
+                        {environmentOf(queue)}
+                      </div>
                     </div>
                     <div className="queue-counts">
                       <span>{queue.active_count} active</span>

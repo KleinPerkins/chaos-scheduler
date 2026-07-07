@@ -7,7 +7,7 @@ fn default_utc() -> String {
 }
 
 fn default_environment() -> String {
-    "source".to_string()
+    crate::branding::DEFAULT_ENVIRONMENT.to_string()
 }
 
 fn default_kind() -> String {
@@ -66,7 +66,7 @@ pub struct Workflow {
     pub async_mode: bool,
     pub email_on_failure: bool,
     /// First-class environment name (partition / queue-scope / filter). May be
-    /// any registered environment; seeded with `source` / `instance`.
+    /// any registered environment; seeded with `production` and `sandbox`.
     #[serde(default = "default_environment")]
     pub environment: String,
     /// Governance flag: whether this workflow's definition is owned by an
@@ -662,7 +662,7 @@ pub enum IdempotencyReservation {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 10;
+pub const CURRENT_SCHEMA_VERSION: i64 = 11;
 
 pub struct Database {
     path: String,
@@ -1103,8 +1103,8 @@ impl Database {
         // final `environment`-keyed queues shape (v5+), never the legacy corpus
         // shape. Idempotent.
         conn.execute_batch(
-            "INSERT OR IGNORE INTO queues (name, environment, capacity) VALUES ('source-default', 'source', 4);
-             INSERT OR IGNORE INTO queues (name, environment, capacity) VALUES ('instance-default', 'instance', 2);",
+            "INSERT OR IGNORE INTO queues (name, environment, capacity) VALUES ('production-default', 'production', 4);
+             INSERT OR IGNORE INTO queues (name, environment, capacity) VALUES ('sandbox-default', 'sandbox', 2);",
         )?;
         Ok(())
     }
@@ -1126,7 +1126,183 @@ impl Database {
             (8, Self::migrate_v8_execution_metadata),
             (9, Self::migrate_v9_drop_workflow_corpus),
             (10, Self::migrate_v10_rename_mission_filter_key),
+            (11, Self::migrate_v11_production_sandbox_environments),
         ]
+    }
+
+    /// v11: retire legacy `source`/`instance` environment names in favor of
+    /// `production` (default) + `sandbox` (integration/UAT isolation).
+    fn migrate_v11_production_sandbox_environments(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "UPDATE workflows
+                SET environment = 'sandbox'
+              WHERE environment = 'instance';
+             UPDATE workflows
+                SET environment = 'production'
+              WHERE environment IS NULL OR environment = ''
+                 OR environment IN ('source', 'prod');
+             UPDATE scheduler_config
+                SET value = 'sandbox'
+              WHERE key = 'mission_control.environment_filter'
+                AND value = 'instance';
+             UPDATE scheduler_config
+                SET value = 'production'
+              WHERE key = 'mission_control.environment_filter'
+                AND value IN ('source', 'prod');",
+        )?;
+        if Self::table_exists(conn, "queues") {
+            // Rebuild rather than in-place rename: any number of legacy rows
+            // (including a pre-existing `production-default`/`sandbox-default`
+            // row, or a duplicate under a custom queue name) can map onto the
+            // same target `(name, environment)`. GROUP BY makes the merge
+            // collision-proof by construction instead of relying on a
+            // temp-rename ordering that only covers the two default names.
+            conn.execute_batch(
+                "CREATE TABLE queues_v11 (
+                    name TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    capacity INTEGER NOT NULL DEFAULT 1,
+                    tag_cap INTEGER,
+                    max_queued INTEGER,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    updated_at TEXT DEFAULT (datetime('now')),
+                    PRIMARY KEY (name, environment)
+                );
+                INSERT INTO queues_v11 (name, environment, capacity, tag_cap, max_queued, created_at, updated_at)
+                    SELECT
+                        CASE name
+                            WHEN 'source-default' THEN 'production-default'
+                            WHEN 'instance-default' THEN 'sandbox-default'
+                            ELSE name
+                        END,
+                        CASE
+                            WHEN environment = 'instance' THEN 'sandbox'
+                            WHEN environment IS NULL OR environment = ''
+                                OR environment IN ('source', 'prod') THEN 'production'
+                            ELSE environment
+                        END,
+                        MAX(capacity),
+                        MAX(tag_cap),
+                        MAX(max_queued),
+                        MIN(created_at),
+                        MAX(updated_at)
+                    FROM queues
+                    GROUP BY 1, 2;
+                DROP TABLE queues;
+                ALTER TABLE queues_v11 RENAME TO queues;",
+            )?;
+        }
+        if Self::table_has_column(conn, "workflows", "queue_config") {
+            conn.execute_batch(
+                "UPDATE workflows
+                    SET queue_config = REPLACE(queue_config, 'source-default', 'production-default')
+                  WHERE queue_config LIKE '%source-default%';
+                 UPDATE workflows
+                    SET queue_config = REPLACE(queue_config, 'instance-default', 'sandbox-default')
+                  WHERE queue_config LIKE '%instance-default%';",
+            )?;
+        }
+        if Self::table_has_column(conn, "workflows", "spec_json") {
+            // `WorkflowSpec.environment` (workflow_spec.rs) is currently unused
+            // for any read-path decision (the authoritative column is
+            // `workflows.environment`), but rewrite it too so no legacy name
+            // survives anywhere in stored data, matching the compact
+            // (no-whitespace) shape `serde_json::to_string` emits.
+            conn.execute_batch(
+                r#"UPDATE workflows
+                    SET spec_json = REPLACE(spec_json, '"environment":"instance"', '"environment":"sandbox"')
+                  WHERE spec_json LIKE '%"environment":"instance"%';
+                 UPDATE workflows
+                    SET spec_json = REPLACE(REPLACE(spec_json, '"environment":"source"', '"environment":"production"'), '"environment":"prod"', '"environment":"production"')
+                  WHERE spec_json LIKE '%"environment":"source"%' OR spec_json LIKE '%"environment":"prod"%';"#,
+            )?;
+        }
+        if Self::table_exists(conn, "environments") {
+            conn.execute_batch(
+                "DELETE FROM environments WHERE name IN ('source', 'instance', 'prod');
+                 INSERT OR IGNORE INTO environments (id, name, managed_externally)
+                    VALUES ('production', 'production', 0);
+                 INSERT OR IGNORE INTO environments (id, name, managed_externally)
+                    VALUES ('sandbox', 'sandbox', 0);",
+            )?;
+        }
+        if Self::table_exists(conn, "queued_runs") {
+            conn.execute_batch(
+                "UPDATE queued_runs
+                    SET queue_name = 'production-default'
+                  WHERE queue_name = 'source-default';
+                 UPDATE queued_runs
+                    SET queue_name = 'sandbox-default'
+                  WHERE queue_name = 'instance-default';",
+            )?;
+        }
+        for (table, column) in [
+            ("queue_events", "environment"),
+            ("workflow_resource_samples", "environment"),
+        ] {
+            if Self::table_has_column(conn, table, column) {
+                conn.execute_batch(&format!(
+                    "UPDATE {table}
+                        SET {column} = 'sandbox'
+                      WHERE {column} = 'instance';
+                     UPDATE {table}
+                        SET {column} = 'production'
+                      WHERE {column} IS NULL OR {column} = ''
+                         OR {column} IN ('source', 'prod');
+                     UPDATE {table}
+                        SET queue_name = 'production-default'
+                      WHERE queue_name = 'source-default';
+                     UPDATE {table}
+                        SET queue_name = 'sandbox-default'
+                      WHERE queue_name = 'instance-default';"
+                ))?;
+            } else if Self::table_has_column(conn, table, "corpus") {
+                conn.execute_batch(&format!(
+                    "UPDATE {table}
+                        SET corpus = 'sandbox'
+                      WHERE corpus = 'instance';
+                     UPDATE {table}
+                        SET corpus = 'production'
+                      WHERE corpus IS NULL OR corpus = ''
+                         OR corpus IN ('source', 'prod');
+                     UPDATE {table}
+                        SET queue_name = 'production-default'
+                      WHERE queue_name = 'source-default';
+                     UPDATE {table}
+                        SET queue_name = 'sandbox-default'
+                      WHERE queue_name = 'instance-default';"
+                ))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn table_exists(conn: &Connection, table: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .unwrap_or(false)
+    }
+
+    fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
+        let sql = format!("PRAGMA table_info({table})");
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(stmt) => stmt,
+            Err(_) => return false,
+        };
+        let rows = match stmt.query_map([], |row| row.get::<_, String>(1)) {
+            Ok(rows) => rows,
+            Err(_) => return false,
+        };
+        for name in rows.filter_map(Result::ok) {
+            if name == column {
+                return true;
+            }
+        }
+        false
     }
 
     /// v8: persist worker/process ownership metadata for timeout, shutdown, and
@@ -1582,7 +1758,7 @@ impl Database {
     pub fn list_workflows(&self) -> rusqlite::Result<Vec<Workflow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), 'source'), COALESCE(managed_externally, 0), COALESCE(kind, 'generic'), spec_json, email_profile_id FROM workflows ORDER BY environment, name"
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), 'production'), COALESCE(managed_externally, 0), COALESCE(kind, 'generic'), spec_json, email_profile_id FROM workflows ORDER BY environment, name"
         )?;
         let rows = stmt.query_map([], Self::row_to_workflow)?;
         rows.collect()
@@ -1608,7 +1784,7 @@ impl Database {
                 .unwrap_or_else(|_| "UTC".to_string()),
             environment: row
                 .get::<_, String>(15)
-                .unwrap_or_else(|_| "source".to_string()),
+                .unwrap_or_else(|_| "production".to_string()),
             managed_externally: row.get::<_, i32>(16).unwrap_or(0) != 0,
             kind: row
                 .get::<_, String>(17)
@@ -1624,7 +1800,7 @@ impl Database {
     pub fn get_workflow(&self, id: &str) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), 'source'), COALESCE(managed_externally, 0), COALESCE(kind, 'generic'), spec_json, email_profile_id FROM workflows WHERE id = ?1",
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), 'production'), COALESCE(managed_externally, 0), COALESCE(kind, 'generic'), spec_json, email_profile_id FROM workflows WHERE id = ?1",
             params![id],
             Self::row_to_workflow,
         )
@@ -1990,7 +2166,7 @@ impl Database {
     pub fn count_workflows_in_environment(&self, name: &str) -> rusqlite::Result<i64> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT COUNT(*) FROM workflows WHERE COALESCE(NULLIF(environment, ''), 'source') = ?1",
+            "SELECT COUNT(*) FROM workflows WHERE COALESCE(NULLIF(environment, ''), 'production') = ?1",
             params![name],
             |row| row.get(0),
         )
@@ -2095,7 +2271,7 @@ impl Database {
         let mut running: Vec<(String, String, Vec<String>)> = Vec::new();
         {
             let mut stmt = tx.prepare(
-                "SELECT COALESCE(NULLIF(w.environment, ''), 'source') AS env, w.queue_config
+                "SELECT COALESCE(NULLIF(w.environment, ''), 'production') AS env, w.queue_config
                  FROM runs r JOIN workflows w ON w.id = r.workflow_id
                  WHERE r.status IN ('admitted', 'running')",
             )?;
@@ -3072,7 +3248,7 @@ impl Database {
              LEFT JOIN workflows w ON r.workflow_id = w.id
              WHERE (?1 = 'all' OR r.status = ?1)
                AND (?2 = 'all' OR COALESCE(r.trigger_kind, 'cron') = ?2)
-               AND (?3 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?3)
+               AND (?3 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?3)
                AND (?4 = 'all'
                  OR (?4 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?4)
@@ -3169,13 +3345,13 @@ impl Database {
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), 'source'), COALESCE(managed_externally, 0), COALESCE(kind, 'generic'), spec_json, email_profile_id
+            "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), 'production'), COALESCE(managed_externally, 0), COALESCE(kind, 'generic'), spec_json, email_profile_id
              FROM workflows w
-             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)
-             ORDER BY COALESCE(NULLIF(w.environment, ''), 'source'), COALESCE(NULLIF(TRIM(w.domain), ''), 'Unowned'), w.name",
+             ORDER BY COALESCE(NULLIF(w.environment, ''), 'production'), COALESCE(NULLIF(TRIM(w.domain), ''), 'Unowned'), w.name",
         )?;
         let rows = stmt.query_map(
             params![environment_filter, domain_filter],
@@ -3193,7 +3369,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT COALESCE(NULLIF(TRIM(domain), ''), 'Unowned') AS owner, COUNT(*)
              FROM workflows
-             WHERE (?1 = 'all' OR COALESCE(NULLIF(environment, ''), 'source') = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(environment, ''), 'production') = ?1)
              GROUP BY owner
              ORDER BY CASE owner WHEN 'Unowned' THEN 1 ELSE 0 END, owner",
         )?;
@@ -3235,7 +3411,7 @@ impl Database {
                 (SELECT COUNT(*)
                    FROM queued_runs q JOIN workflows qw ON qw.id = q.workflow_id
                   WHERE q.status IN ('queued', 'admitted')
-                    AND (?1 = 'all' OR COALESCE(NULLIF(qw.environment, ''), 'source') = ?1)
+                    AND (?1 = 'all' OR COALESCE(NULLIF(qw.environment, ''), 'production') = ?1)
                     AND (?2 = 'all'
                       OR (?2 = '__unowned__' AND (qw.domain IS NULL OR TRIM(qw.domain) = ''))
                       OR TRIM(qw.domain) = ?2)) AS queued_count,
@@ -3244,7 +3420,7 @@ impl Database {
                          THEN 1 ELSE 0 END) AS recent_failures
              FROM workflows w
              LEFT JOIN runs r ON r.workflow_id = w.id
-             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
@@ -3276,7 +3452,7 @@ impl Database {
              JOIN workflows w ON w.id = r.workflow_id
              WHERE datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', '-1 day')
                AND r.status IN ('success', 'succeeded', 'failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
-               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
@@ -3290,7 +3466,7 @@ impl Database {
                  JOIN workflows w ON w.id = q.workflow_id
                  WHERE q.admitted_at IS NOT NULL
                    AND datetime(q.queued_at) >= datetime('now', '-1 day')
-                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
+                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                    AND (?2 = 'all'
                      OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                      OR TRIM(w.domain) = ?2)
@@ -3301,7 +3477,7 @@ impl Database {
                    JOIN workflows mw ON mw.id = mq.workflow_id
                    WHERE mq.admitted_at IS NOT NULL
                      AND datetime(mq.queued_at) >= datetime('now', '-1 day')
-                     AND (?1 = 'all' OR COALESCE(NULLIF(mw.environment, ''), 'source') = ?1)
+                     AND (?1 = 'all' OR COALESCE(NULLIF(mw.environment, ''), 'production') = ?1)
                      AND (?2 = 'all'
                        OR (?2 = '__unowned__' AND (mw.domain IS NULL OR TRIM(mw.domain) = ''))
                        OR TRIM(mw.domain) = ?2)
@@ -3314,7 +3490,7 @@ impl Database {
             "SELECT COUNT(*)
              FROM queued_runs q JOIN workflows w ON w.id = q.workflow_id
              WHERE q.status = 'queued'
-               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
@@ -3347,7 +3523,7 @@ impl Database {
             "SELECT r.id, r.workflow_id, r.started_at, r.finished_at, r.exit_code, r.stdout, r.stderr, r.result_url, r.status, w.name, r.error_analysis, r.trigger_kind, r.trigger_payload, r.upstream_run_id, r.input_json, r.rerun_of_run_id
              FROM runs r
              JOIN workflows w ON w.id = r.workflow_id
-             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)
@@ -3386,7 +3562,7 @@ impl Database {
              FROM latest_terminal r
              JOIN workflows w ON w.id = r.workflow_id
              WHERE r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
-               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)
@@ -3424,7 +3600,7 @@ impl Database {
              FROM latest_terminal r
              JOIN workflows w ON w.id = r.workflow_id
              WHERE r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
-               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
@@ -3443,10 +3619,10 @@ impl Database {
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT r.id, r.workflow_id, w.name, COALESCE(NULLIF(w.environment, ''), 'source'), w.domain, r.status, r.started_at, r.finished_at
+            "SELECT r.id, r.workflow_id, w.name, COALESCE(NULLIF(w.environment, ''), 'production'), w.domain, r.status, r.started_at, r.finished_at
              FROM runs r
              JOIN workflows w ON w.id = r.workflow_id
-             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
+             WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)
@@ -3483,14 +3659,14 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT a.asset_id, a.asset_kind, a.asset_namespace, a.asset_partition, a.last_action,
-                    a.last_written_at, r.workflow_id, w.name, COALESCE(NULLIF(w.environment, ''), 'source'), w.domain
+                    a.last_written_at, r.workflow_id, w.name, COALESCE(NULLIF(w.environment, ''), 'production'), w.domain
              FROM scheduler_assets a
              LEFT JOIN runs r ON r.id = a.last_writer_run_id
              LEFT JOIN workflows w ON w.id = r.workflow_id
              WHERE (a.last_written_at IS NULL OR datetime(a.last_written_at) <= datetime('now', ?3))
                AND (
                  (w.id IS NOT NULL
-                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
+                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                    AND (?2 = 'all'
                      OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                      OR TRIM(w.domain) = ?2))
@@ -3537,14 +3713,14 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "WITH visible_workflows AS (
-                SELECT w.id, w.name, COALESCE(NULLIF(w.environment, ''), 'source') AS environment, w.domain
+                SELECT w.id, w.name, COALESCE(NULLIF(w.environment, ''), 'production') AS environment, w.domain
                 FROM workflows w
                 WHERE w.enabled = 1
-                  AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'source') = ?1)
+                  AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                   AND (?2 = 'all'
                     OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                     OR TRIM(w.domain) = ?2)
-                ORDER BY COALESCE(NULLIF(w.environment, ''), 'source'), COALESCE(NULLIF(TRIM(w.domain), ''), 'Unowned'), w.name
+                ORDER BY COALESCE(NULLIF(w.environment, ''), 'production'), COALESCE(NULLIF(TRIM(w.domain), ''), 'Unowned'), w.name
                 LIMIT ?4
              ),
              resource_rollup AS (
@@ -4293,7 +4469,7 @@ impl Database {
     pub fn list_queued_runs(&self, limit: i64) -> rusqlite::Result<Vec<QueuedRun>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, COALESCE(NULLIF(w.environment, ''), 'source'), q.priority, q.status, q.queued_at, q.admitted_at, q.finished_at,
+            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, COALESCE(NULLIF(w.environment, ''), 'production'), q.priority, q.status, q.queued_at, q.admitted_at, q.finished_at,
                     q.trigger_kind, q.trigger_payload, q.upstream_run_id, q.input_json, q.rerun_of_run_id
              FROM queued_runs q
              LEFT JOIN workflows w ON q.workflow_id = w.id
@@ -4312,7 +4488,7 @@ impl Database {
                 queue_name: row.get(4)?,
                 environment: row
                     .get::<_, Option<String>>(5)?
-                    .unwrap_or_else(|| "source".to_string()),
+                    .unwrap_or_else(|| "production".to_string()),
                 priority: row.get(6)?,
                 status: row.get(7)?,
                 queued_at: row.get(8)?,
@@ -4372,7 +4548,7 @@ impl Database {
     ) -> rusqlite::Result<Option<QueuedRun>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, COALESCE(NULLIF(w.environment, ''), 'source'), q.priority,
+            "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, COALESCE(NULLIF(w.environment, ''), 'production'), q.priority,
                     q.status, q.queued_at, q.admitted_at, q.finished_at, q.trigger_kind,
                     q.trigger_payload, q.upstream_run_id, q.input_json, q.rerun_of_run_id
              FROM queued_runs q
@@ -4402,7 +4578,7 @@ impl Database {
                     queue_name: row.get(4)?,
                     environment: row
                         .get::<_, Option<String>>(5)?
-                        .unwrap_or_else(|| "source".to_string()),
+                        .unwrap_or_else(|| "production".to_string()),
                     priority: row.get(6)?,
                     status: row.get(7)?,
                     queued_at: row.get(8)?,
@@ -4607,7 +4783,7 @@ impl Database {
             "SELECT COUNT(*)
              FROM queued_runs q
              LEFT JOIN workflows w ON q.workflow_id = w.id
-             WHERE q.queue_name = ?1 AND COALESCE(NULLIF(w.environment, ''), 'source') = ?2 AND q.status = 'queued'",
+             WHERE q.queue_name = ?1 AND COALESCE(NULLIF(w.environment, ''), 'production') = ?2 AND q.status = 'queued'",
             params![queue_name, environment],
             |row| row.get(0),
         )
@@ -5215,7 +5391,7 @@ mod tests {
         // Tripwire: refresh this fixture (seed schema + asserted columns) the
         // next time a migration lands so the newest N-1 -> N paths stay covered.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 10,
+            CURRENT_SCHEMA_VERSION, 11,
             "add a v(N-1)->v(N) fixture when a new migration ships"
         );
 
@@ -5297,7 +5473,7 @@ mod tests {
             assert_eq!(v, 7);
         }
 
-        // Apply the pending v8 + v9 + v10 migrations.
+        // Apply the pending v8–v11 migrations.
         let conn = db.conn().unwrap();
         db.run_migrations(&conn, 7).unwrap();
 
@@ -5356,7 +5532,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(legacy_env, "prod");
+        assert_eq!(legacy_env, "production");
 
         // v10 renames the persisted mission-control filter key, carrying the
         // saved partition preference across the corpus->environment rename.
@@ -5483,22 +5659,175 @@ mod tests {
             .unwrap();
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
 
-        // environment backfilled from corpus; managed_externally derived.
+        // environment backfilled from corpus; v11 consolidates legacy names to production.
         let src = db.get_workflow("wf-src").unwrap();
-        assert_eq!(src.environment, "source");
+        assert_eq!(src.environment, "production");
         assert!(src.managed_externally);
         let inst = db.get_workflow("wf-inst").unwrap();
-        assert_eq!(inst.environment, "instance");
+        assert_eq!(inst.environment, "sandbox");
         assert!(!inst.managed_externally);
 
-        // environments table seeded with continuity environments.
+        // environments table seeded with production + sandbox.
         let envs = db.list_environments().unwrap();
         let names: std::collections::HashSet<String> =
             envs.iter().map(|e| e.name.clone()).collect();
-        assert!(names.contains("source"));
-        assert!(names.contains("instance"));
-        let source_env = envs.iter().find(|e| e.name == "source").unwrap();
-        assert!(source_env.managed_externally);
+        assert!(names.contains("production"));
+        assert!(names.contains("sandbox"));
+        let production_env = envs.iter().find(|e| e.name == "production").unwrap();
+        assert!(!production_env.managed_externally);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migration_v11_renames_both_legacy_default_queues_and_queued_runs() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE workflows (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
+                    script_path TEXT NOT NULL, cron_schedule TEXT NOT NULL,
+                    enabled INTEGER DEFAULT 1, async_mode INTEGER DEFAULT 0,
+                    email_on_failure INTEGER DEFAULT 1, timezone TEXT DEFAULT 'UTC',
+                    environment TEXT NOT NULL DEFAULT 'production',
+                    managed_externally INTEGER DEFAULT 0, kind TEXT DEFAULT 'generic',
+                    spec_json TEXT, domain TEXT, trigger_config TEXT, queue_config TEXT,
+                    email_profile_id TEXT, last_run_at TEXT,
+                    created_at TEXT, updated_at TEXT
+                );
+                CREATE TABLE queues (
+                    name TEXT NOT NULL, environment TEXT NOT NULL,
+                    capacity INTEGER NOT NULL DEFAULT 1,
+                    tag_cap INTEGER, max_queued INTEGER,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    updated_at TEXT DEFAULT (datetime('now')),
+                    PRIMARY KEY (name, environment)
+                );
+                CREATE TABLE queued_runs (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT,
+                    workflow_id TEXT NOT NULL,
+                    queue_name TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    queued_at TEXT NOT NULL,
+                    admitted_at TEXT,
+                    finished_at TEXT
+                );
+                CREATE TABLE environments (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+                    description TEXT, working_dir TEXT,
+                    managed_externally INTEGER DEFAULT 0,
+                    created_at TEXT, updated_at TEXT
+                );
+                INSERT INTO workflows (id, name, script_path, cron_schedule, environment, queue_config, created_at, updated_at)
+                    VALUES ('wf-src', 'Src', 's.py', '0 0 * * *', 'source', '{\"queue\":\"source-default\"}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO workflows (id, name, script_path, cron_schedule, environment, queue_config, created_at, updated_at)
+                    VALUES ('wf-inst', 'Inst', 'i.py', '0 0 * * *', 'instance', '{\"queue\":\"instance-default\"}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO queues (name, environment, capacity, tag_cap, max_queued)
+                    VALUES ('source-default', 'source', 4, 2, 10),
+                           ('instance-default', 'instance', 2, 1, 5),
+                           ('production-default', 'production', 1, NULL, NULL),
+                           ('sandbox-default', 'sandbox', 1, NULL, NULL),
+                           ('batch', 'source', 3, 9, 40),
+                           ('batch', 'prod', 6, 1, 2);
+                INSERT INTO environments (id, name, managed_externally)
+                    VALUES ('source', 'source', 1), ('instance', 'instance', 0);
+                INSERT INTO queued_runs (id, workflow_id, queue_name, status, queued_at)
+                    VALUES ('qr-src', 'wf-src', 'source-default', 'queued', '2026-01-01T00:00:00Z'),
+                           ('qr-inst', 'wf-inst', 'instance-default', 'queued', '2026-01-01T00:00:00Z');
+                PRAGMA user_version = 10;",
+            )
+            .unwrap();
+        }
+
+        let db = Database::new(&dir);
+        let conn = db.conn().unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+
+        assert_eq!(db.get_workflow("wf-src").unwrap().environment, "production");
+        assert_eq!(db.get_workflow("wf-inst").unwrap().environment, "sandbox");
+        assert!(db
+            .get_workflow("wf-src")
+            .unwrap()
+            .queue_config
+            .as_deref()
+            .unwrap()
+            .contains("production-default"));
+        assert!(db
+            .get_workflow("wf-inst")
+            .unwrap()
+            .queue_config
+            .as_deref()
+            .unwrap()
+            .contains("sandbox-default"));
+
+        // Pre-existing `production-default`/`sandbox-default` rows (the
+        // regression case: legacy row renaming onto a name that already
+        // exists) must merge into a single survivor per (name, environment)
+        // rather than violate the PK or silently duplicate.
+        let queue_names: Vec<String> = conn
+            .prepare("SELECT name || ':' || environment FROM queues ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(
+            queue_names,
+            vec![
+                "batch:production".to_string(),
+                "production-default:production".to_string(),
+                "sandbox-default:sandbox".to_string(),
+            ],
+            "legacy + pre-existing rows must merge to exactly one row per (name, environment)"
+        );
+
+        // Merge keeps the max capacity/tag_cap/max_queued across all merged rows.
+        let production_default: (i64, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT capacity, tag_cap, max_queued FROM queues WHERE name = 'production-default'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(production_default, (4, Some(2), Some(10)));
+        let sandbox_default: (i64, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT capacity, tag_cap, max_queued FROM queues WHERE name = 'sandbox-default'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(sandbox_default, (2, Some(1), Some(5)));
+        // Custom queue name ('batch') duplicated across two merged-away
+        // environment values ('source' and 'prod', both -> 'production').
+        let batch: (i64, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT capacity, tag_cap, max_queued FROM queues WHERE name = 'batch'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(batch, (6, Some(9), Some(40)));
+
+        let queued: Vec<String> = conn
+            .prepare("SELECT id || ':' || queue_name FROM queued_runs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(
+            queued,
+            vec!["qr-inst:sandbox-default", "qr-src:production-default"]
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5564,8 +5893,8 @@ mod tests {
         assert_eq!(pk_cols, vec!["name".to_string(), "environment".to_string()]);
 
         // Data copied corpus -> environment, and capacity reads by environment.
-        assert_eq!(db.queue_capacity("prod-q", "prod").unwrap(), 7);
-        assert_eq!(db.queue_tag_cap("prod-q", "prod").unwrap(), Some(3));
+        assert_eq!(db.queue_capacity("prod-q", "production").unwrap(), 7);
+        assert_eq!(db.queue_tag_cap("prod-q", "production").unwrap(), Some(3));
 
         // queue_events + resource_samples rebuilt onto `environment`.
         for table in ["queue_events", "workflow_resource_samples"] {
@@ -5586,7 +5915,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(ev_env, "prod");
+        assert_eq!(ev_env, "production");
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5644,7 +5973,7 @@ mod tests {
                     ('run-delete', 'wf-retention', '2026-01-01T00:00:00Z', 'success'),
                     ('run-parent', 'wf-retention', '2026-01-01T00:00:00Z', 'success');
                 INSERT INTO queued_runs (id, run_id, workflow_id, queue_name, status, queued_at)
-                    VALUES ('queue-delete', 'run-delete', 'wf-retention', 'source-default', 'success', '2026-01-01T00:00:00Z');
+                    VALUES ('queue-delete', 'run-delete', 'wf-retention', 'production-default', 'success', '2026-01-01T00:00:00Z');
                 INSERT INTO workflow_mutex_locks (mutex_key, workflow_id, run_id, acquired_at)
                     VALUES ('mutex-delete', 'wf-retention', 'run-delete', '2026-01-01T00:00:00Z');
                 INSERT INTO run_relationships (id, parent_run_id, queued_run_id, child_workflow_id, relationship, wait, status, created_at, updated_at)
@@ -5748,7 +6077,7 @@ mod tests {
                 INSERT INTO runs (id, workflow_id, started_at, status)
                     VALUES ('run-idem', 'wf-idem', '2026-01-01T00:00:00Z', 'success');
                 INSERT INTO queued_runs (id, workflow_id, queue_name, status, queued_at)
-                    VALUES ('queue-idem', 'wf-idem', 'source-default', 'queued', '2026-01-01T00:00:00Z');
+                    VALUES ('queue-idem', 'wf-idem', 'production-default', 'queued', '2026-01-01T00:00:00Z');
                 INSERT INTO scheduler_idempotency_keys (key, run_id, created_at)
                     VALUES ('legacy-key', 'run-idem', '2026-01-01T00:00:00Z');
                 PRAGMA user_version = 6;",
@@ -5876,12 +6205,13 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let db = Database::new(&dir);
 
         assert_eq!(db.global_parallelism_cap().unwrap(), 4);
-        assert_eq!(db.queue_capacity("source-default", "source").unwrap(), 4);
         assert_eq!(
-            db.queue_capacity("instance-default", "instance").unwrap(),
-            2
+            db.queue_capacity("production-default", "production")
+                .unwrap(),
+            4
         );
-        assert_eq!(db.queue_capacity("missing", "source").unwrap(), 1);
+        assert_eq!(db.queue_capacity("sandbox-default", "sandbox").unwrap(), 2);
+        assert_eq!(db.queue_capacity("missing", "production").unwrap(), 1);
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5927,7 +6257,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 None,
                 None,
                 None,
@@ -5939,7 +6269,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let other_run = db
             .create_run_with_context(&workflow.id, Some("manual"), None, None, None, None)
             .unwrap();
-        let keys = vec!["tag:source:source-default:heavy_io".to_string()];
+        let keys = vec!["tag:source:production-default:heavy_io".to_string()];
 
         assert!(db
             .acquire_mutex_locks(&workflow.id, &run.id, &keys)
@@ -5969,17 +6299,17 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 None,
                 None,
-                Some(r#"{"queue":"source-default"}"#),
+                Some(r#"{"queue":"production-default"}"#),
             )
             .unwrap();
         let keys = vec!["exclude:admission".to_string()];
         let queued_id = db
             .upsert_queued_run_with_context(
                 &workflow.id,
-                "source-default",
+                "production-default",
                 0,
                 Some("manual"),
                 None,
@@ -5992,8 +6322,8 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let run = match db
             .admit_run_with_context(
                 &workflow.id,
-                "source-default",
-                "source",
+                "production-default",
+                "production",
                 &[],
                 Some("manual"),
                 None,
@@ -6030,7 +6360,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let blocked_queue = db
             .upsert_queued_run_with_context(
                 &workflow.id,
-                "source-default",
+                "production-default",
                 0,
                 Some("manual"),
                 Some("blocked"),
@@ -6042,8 +6372,8 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert!(matches!(
             db.admit_run_with_context(
                 &workflow.id,
-                "source-default",
-                "source",
+                "production-default",
+                "production",
                 &[],
                 Some("manual"),
                 Some("blocked"),
@@ -6078,7 +6408,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
             false,
             true,
             "UTC",
-            "source",
+            "sandbox",
             None,
             None,
             queue_config,
@@ -6094,9 +6424,10 @@ SUMMARY_JSON:{\"title\":\"current\"}
         // Capacity 1: only one run may occupy this queue at a time, so the
         // in-transaction capacity re-check must reject every racing admitter
         // but one.
-        db.upsert_queue("source-default", "source", 1, None, None)
+        db.upsert_queue("sandbox-default", "sandbox", 1, None, None)
             .unwrap();
-        let workflow = admission_capacity_test_workflow(&db, Some(r#"{"queue":"source-default"}"#));
+        let workflow =
+            admission_capacity_test_workflow(&db, Some(r#"{"queue":"sandbox-default"}"#));
 
         let threads = 8;
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(threads));
@@ -6110,8 +6441,8 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 match db
                     .admit_run_with_context(
                         &workflow_id,
-                        "source-default",
-                        "source",
+                        "sandbox-default",
+                        "sandbox",
                         &[],
                         Some("manual"),
                         None,
@@ -6152,13 +6483,14 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = Database::new(&dir);
-        let workflow = admission_capacity_test_workflow(&db, Some(r#"{"queue":"source-default"}"#));
+        let workflow =
+            admission_capacity_test_workflow(&db, Some(r#"{"queue":"production-default"}"#));
 
         let outcome = db
             .admit_run_with_context(
                 &workflow.id,
-                "source-default",
-                "source",
+                "production-default",
+                "production",
                 &[],
                 Some("file_arrival"),
                 Some(r#"{"trigger_id":"inbox","fingerprint":"abc"}"#),
@@ -6186,16 +6518,16 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let db = Database::new(&dir);
 
         assert!(db
-            .upsert_queue("too-large", "source", 9, Some(1), None)
+            .upsert_queue("too-large", "production", 9, Some(1), None)
             .is_err());
         assert!(db
-            .upsert_queue("bad-tag", "source", 2, Some(3), None)
+            .upsert_queue("bad-tag", "production", 2, Some(3), None)
             .is_err());
         assert!(db
-            .upsert_queue("source-heavy", "source", 2, Some(1), Some(10))
+            .upsert_queue("source-heavy", "production", 2, Some(1), Some(10))
             .is_ok());
 
-        let queue = db.get_queue("source-heavy", "source").unwrap();
+        let queue = db.get_queue("source-heavy", "production").unwrap();
         assert_eq!(queue.capacity, 2);
         assert_eq!(queue.tag_cap, Some(1));
         assert_eq!(queue.max_queued, Some(10));
@@ -6218,7 +6550,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 Some("scheduler"),
                 None,
                 None,
@@ -6237,7 +6569,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 Some("agent-ecosystem"),
                 None,
                 None,
@@ -6278,10 +6610,10 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(prefs.domain_filter, "all");
 
         let prefs = db
-            .set_mission_control_preferences("dashboard", "source", "Unowned")
+            .set_mission_control_preferences("dashboard", "sandbox", "Unowned")
             .unwrap();
         assert_eq!(prefs.default_landing, "dashboard");
-        assert_eq!(prefs.environment_filter, "source");
+        assert_eq!(prefs.environment_filter, "sandbox");
         assert_eq!(prefs.domain_filter, "__unowned__");
 
         let _ = std::fs::remove_dir_all(dir);
@@ -6301,7 +6633,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 Some("scheduler"),
                 None,
                 None,
@@ -6316,7 +6648,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 Some("scheduler"),
                 None,
                 None,
@@ -6324,14 +6656,14 @@ SUMMARY_JSON:{\"title\":\"current\"}
             .unwrap();
         let instance = db
             .create_workflow(
-                "Instance Workflow",
+                "Sandbox Workflow",
                 None,
                 "scripts/workflows/noop.py",
                 "0 2 * * *",
                 false,
                 true,
                 "UTC",
-                "instance",
+                "sandbox",
                 Some("card"),
                 None,
                 None,
@@ -6346,7 +6678,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 Some("   "),
                 None,
                 None,
@@ -6371,26 +6703,28 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let instance_run = db
             .create_terminal_run_with_context(&instance.id, "failed", None, None, None, None, None)
             .unwrap();
-        db.upsert_queued_run(&instance.id, "instance-default", 1)
+        db.upsert_queued_run(&instance.id, "sandbox-default", 1)
             .unwrap();
 
-        let source_header = db.mission_control_header("source", "scheduler").unwrap();
+        let source_header = db
+            .mission_control_header("production", "scheduler")
+            .unwrap();
         assert_eq!(source_header.active_workflows, 2);
         assert_eq!(source_header.queued_count, 0);
         assert_eq!(source_header.recent_failures, 0);
 
-        let instance_header = db.mission_control_header("instance", "all").unwrap();
+        let instance_header = db.mission_control_header("sandbox", "all").unwrap();
         assert_eq!(instance_header.queued_count, 1);
         assert_eq!(instance_header.recent_failures, 1);
 
         let source_runs = db
-            .mission_control_recent_runs("source", "scheduler", 1)
+            .mission_control_recent_runs("production", "scheduler", 1)
             .unwrap();
         assert_eq!(source_runs.len(), 1);
         assert_ne!(source_runs[0].workflow_id, instance.id);
 
         let sla = db
-            .mission_control_sla_summary("source", "scheduler", 0)
+            .mission_control_sla_summary("production", "scheduler", 0)
             .unwrap();
         assert_eq!(sla.success_rate_24h, Some(1.0));
 
@@ -6402,7 +6736,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
 
         let domains = db.mission_control_domains("all").unwrap();
         assert!(domains.iter().any(|domain| domain.value == "__unowned__"));
-        let source_domains = db.mission_control_domains("source").unwrap();
+        let source_domains = db.mission_control_domains("production").unwrap();
         assert!(source_domains
             .iter()
             .any(|domain| domain.value == "scheduler"));
@@ -6438,7 +6772,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         db.upsert_scheduler_asset("source", "manual", "unknown", Some("write"), None, None)
             .unwrap();
         let source_assets = db
-            .mission_control_freshness_ledger("source", "scheduler", 0, 10)
+            .mission_control_freshness_ledger("production", "scheduler", 0, 10)
             .unwrap();
         assert_eq!(source_assets.len(), 1);
         assert_eq!(source_assets[0].attribution, "last_writer_run");
@@ -6476,7 +6810,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 Some("scheduler"),
                 None,
                 None,
@@ -6498,7 +6832,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                     false,
                     true,
                     "UTC",
-                    "source",
+                    "production",
                     Some("scheduler"),
                     None,
                     None,
@@ -6534,17 +6868,19 @@ SUMMARY_JSON:{\"title\":\"current\"}
             .unwrap();
 
         let failed_count = db
-            .mission_control_failed_run_count("source", "scheduler")
+            .mission_control_failed_run_count("production", "scheduler")
             .unwrap();
         assert_eq!(failed_count, 6);
 
         let displayed = db
-            .mission_control_failed_runs("source", "scheduler", 4)
+            .mission_control_failed_runs("production", "scheduler", 4)
             .unwrap();
         assert_eq!(displayed.len(), 4);
         assert!(!displayed.iter().any(|run| run.workflow_id == recovered.id));
 
-        let header = db.mission_control_header("source", "scheduler").unwrap();
+        let header = db
+            .mission_control_header("production", "scheduler")
+            .unwrap();
         assert_eq!(header.recent_failures, 7);
 
         let _ = std::fs::remove_dir_all(dir);
@@ -6564,7 +6900,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 Some("scheduler"),
                 None,
                 None,
@@ -6572,15 +6908,15 @@ SUMMARY_JSON:{\"title\":\"current\"}
             .unwrap();
         let instance = db
             .create_workflow(
-                "Instance Telemetry",
+                "Sandbox Telemetry",
                 None,
                 "scripts/workflows/noop.py",
                 "0 0 * * *",
                 false,
                 true,
                 "UTC",
-                "instance",
-                Some("scheduler"),
+                "sandbox",
+                Some("card"),
                 None,
                 None,
             )
@@ -6594,7 +6930,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "sandbox",
                 Some("scheduler"),
                 None,
                 None,
@@ -6605,8 +6941,8 @@ SUMMARY_JSON:{\"title\":\"current\"}
             id: String::new(),
             run_id: None,
             workflow_id: source.id.clone(),
-            queue_name: Some("source-default".to_string()),
-            environment: "source".to_string(),
+            queue_name: Some("production-default".to_string()),
+            environment: "production".to_string(),
             pid: None,
             sampled_at: now.clone(),
             cpu_percent: Some(42.0),
@@ -6620,8 +6956,8 @@ SUMMARY_JSON:{\"title\":\"current\"}
             id: String::new(),
             run_id: None,
             workflow_id: instance.id.clone(),
-            queue_name: Some("instance-default".to_string()),
-            environment: "instance".to_string(),
+            queue_name: Some("production-default".to_string()),
+            environment: "sandbox".to_string(),
             pid: None,
             sampled_at: now.clone(),
             cpu_percent: Some(99.0),
@@ -6659,7 +6995,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         .unwrap();
 
         let rows = db
-            .mission_control_workflow_telemetry("source", "scheduler", "-24 hours", 1)
+            .mission_control_workflow_telemetry("production", "scheduler", "-24 hours", 1)
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].workflow_id, source.id);
@@ -6684,15 +7020,15 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 None,
                 None,
-                Some(r#"{"queue":"source-default","priority":5}"#),
+                Some(r#"{"queue":"production-default","priority":5}"#),
             )
             .unwrap();
 
         let queued_id = db
-            .upsert_queued_run(&workflow.id, "source-default", 5)
+            .upsert_queued_run(&workflow.id, "production-default", 5)
             .unwrap();
         assert_eq!(db.list_queued_runs(10).unwrap().len(), 1);
 
@@ -6708,7 +7044,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(rows[0].run_id.as_deref(), Some(run.id.as_str()));
 
         let queued_id_2 = db
-            .upsert_queued_run(&workflow.id, "source-default", 4)
+            .upsert_queued_run(&workflow.id, "production-default", 4)
             .unwrap();
         assert_ne!(queued_id, queued_id_2);
         assert_eq!(db.cancel_queued_run(&queued_id_2).unwrap(), 1);
@@ -6732,17 +7068,17 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 None,
                 None,
-                Some(r#"{"queue":"source-default","priority":5}"#),
+                Some(r#"{"queue":"production-default","priority":5}"#),
             )
             .unwrap();
 
         let queued_id = db
             .upsert_queued_run_with_context(
                 &workflow.id,
-                "source-default",
+                "production-default",
                 5,
                 Some("file_arrival"),
                 Some(r#"{"trigger_id":"inbox","fingerprint":"abc"}"#),
@@ -6799,10 +7135,10 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 None,
                 None,
-                Some(r#"{"queue":"source-default","priority":5}"#),
+                Some(r#"{"queue":"production-default","priority":5}"#),
             )
             .unwrap();
         let payload = r#"{"logical_date":"2026-05-01T00:00:00Z","chain_suppressed":true}"#;
@@ -6845,7 +7181,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let queued_id = db
             .upsert_queued_run_with_context(
                 &workflow.id,
-                "source-default",
+                "production-default",
                 5,
                 Some("backfill"),
                 Some(r#"{"logical_date":"2026-05-02T00:00:00Z","chain_suppressed":true}"#),
@@ -6885,7 +7221,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 false,
                 "UTC",
-                "source",
+                "production",
                 None,
                 None,
                 None,
@@ -6956,10 +7292,10 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 false,
                 "UTC",
-                "source",
+                "production",
                 Some("scheduler"),
                 None,
-                Some(r#"{"queue":"source-default"}"#),
+                Some(r#"{"queue":"production-default"}"#),
             )
             .unwrap();
         let deletable = db
@@ -6987,7 +7323,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let deletable_queue_id = db
             .upsert_queued_run_with_context(
                 &workflow.id,
-                "source-default",
+                "production-default",
                 0,
                 Some("retention-test"),
                 Some("delete"),
@@ -7001,7 +7337,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let preserved_queue_id = db
             .upsert_queued_run_with_context(
                 &workflow.id,
-                "source-default",
+                "production-default",
                 0,
                 Some("retention-test"),
                 Some("preserve"),
@@ -7074,7 +7410,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
             .get_global_run_history(
                 Some("dead_lettered"),
                 Some("backfill"),
-                Some("source"),
+                Some("production"),
                 Some("scheduler"),
                 10,
             )
@@ -7321,10 +7657,10 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 None,
                 None,
-                Some(r#"{"queue":"source-default"}"#),
+                Some(r#"{"queue":"production-default"}"#),
             )
             .unwrap();
         let run = db
@@ -7500,7 +7836,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
             .unwrap();
         assert_eq!(dead_letter_id, dead_letter_id_2);
         db.insert_queue_event(
-            "source-default",
+            "production-default",
             "source",
             Some(&workflow.id),
             Some(&run.id),
@@ -7513,8 +7849,8 @@ SUMMARY_JSON:{\"title\":\"current\"}
             id: String::new(),
             run_id: Some(run.id.clone()),
             workflow_id: workflow.id.clone(),
-            queue_name: Some("source-default".to_string()),
-            environment: "source".to_string(),
+            queue_name: Some("production-default".to_string()),
+            environment: "production".to_string(),
             pid: Some(123),
             sampled_at: chrono::Utc::now().to_rfc3339(),
             cpu_percent: Some(1.25),
@@ -7605,10 +7941,10 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 Some("scheduler"),
                 None,
-                Some(r#"{"queue":"source-default"}"#),
+                Some(r#"{"queue":"production-default"}"#),
             )
             .unwrap();
         let other = db
@@ -7620,10 +7956,10 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 Some("scheduler"),
                 None,
-                Some(r#"{"queue":"source-default"}"#),
+                Some(r#"{"queue":"production-default"}"#),
             )
             .unwrap();
         let run = db
@@ -7638,8 +7974,8 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 id: String::new(),
                 run_id: Some(run.id.clone()),
                 workflow_id: workflow_id.clone(),
-                queue_name: Some("source-default".to_string()),
-                environment: "source".to_string(),
+                queue_name: Some("production-default".to_string()),
+                environment: "production".to_string(),
                 pid: Some(123),
                 sampled_at,
                 cpu_percent: Some(1.0),
@@ -7675,10 +8011,10 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 Some("scheduler"),
                 None,
-                Some(r#"{"queue":"source-default"}"#),
+                Some(r#"{"queue":"production-default"}"#),
             )
             .unwrap();
         let run = db
@@ -7704,7 +8040,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                     // the `environment` dimension still groups pre-rename telemetry.
                     "corpus": "source",
                     "domain": "scheduler",
-                    "queue_name": "source-default",
+                    "queue_name": "production-default",
                     "call_id": call_id,
                 })),
             })
@@ -7733,7 +8069,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         );
         assert_eq!(rollups[0].environment.as_deref(), Some("source"));
         assert_eq!(rollups[0].domain.as_deref(), Some("scheduler"));
-        assert_eq!(rollups[0].queue_name.as_deref(), Some("source-default"));
+        assert_eq!(rollups[0].queue_name.as_deref(), Some("production-default"));
         assert_eq!(rollups[0].total_tokens, 18);
         assert_eq!(rollups[0].call_count, 2);
         let _ = std::fs::remove_dir_all(dir);
@@ -7753,19 +8089,19 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 false,
                 true,
                 "UTC",
-                "source",
+                "production",
                 None,
                 None,
-                Some(r#"{"queue":"source-default"}"#),
+                Some(r#"{"queue":"production-default"}"#),
             )
             .unwrap();
         let run = db
             .create_run_with_context(&workflow.id, Some("manual"), None, None, None, None)
             .unwrap();
-        db.upsert_queued_run(&workflow.id, "source-default", 0)
+        db.upsert_queued_run(&workflow.id, "production-default", 0)
             .unwrap();
         db.mark_queued_run_admitted(&workflow.id, &run.id).unwrap();
-        let mutex_keys = vec!["tag:source:source-default:cleanup".to_string()];
+        let mutex_keys = vec!["tag:source:production-default:cleanup".to_string()];
         assert!(db
             .acquire_mutex_locks(&workflow.id, &run.id, &mutex_keys)
             .unwrap());
@@ -7828,7 +8164,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         )
         .unwrap();
         db.insert_queue_event(
-            "source-default",
+            "production-default",
             "source",
             Some(&workflow.id),
             Some(&run.id),
@@ -7841,8 +8177,8 @@ SUMMARY_JSON:{\"title\":\"current\"}
             id: String::new(),
             run_id: Some(run.id.clone()),
             workflow_id: workflow.id.clone(),
-            queue_name: Some("source-default".to_string()),
-            environment: "source".to_string(),
+            queue_name: Some("production-default".to_string()),
+            environment: "production".to_string(),
             pid: Some(123),
             sampled_at: chrono::Utc::now().to_rfc3339(),
             cpu_percent: Some(1.0),

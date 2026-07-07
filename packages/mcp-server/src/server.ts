@@ -248,7 +248,7 @@ export function buildServer(deps: ServerDeps): McpServer {
         environment: z
           .string()
           .optional()
-          .describe("Target environment (default: instance)"),
+          .describe("Target environment (default: sandbox)"),
         async_mode: z.boolean().optional(),
         email_on_failure: z.boolean().optional(),
         timezone: z.string().optional(),
@@ -262,11 +262,13 @@ export function buildServer(deps: ServerDeps): McpServer {
       },
     },
     async (args) => {
-      assertEnvironmentWritable(args.environment ?? "instance", config);
+      const environment = args.environment ?? config.defaultEnvironment;
+      assertEnvironmentWritable(environment, config);
       return jsonResult(
-        await client.registerWorkflow(
-          args as Parameters<typeof client.registerWorkflow>[0],
-        ),
+        await client.registerWorkflow({
+          ...(args as Parameters<typeof client.registerWorkflow>[0]),
+          environment,
+        }),
       );
     },
   );
@@ -791,7 +793,7 @@ export function buildServer(deps: ServerDeps): McpServer {
         environment: z
           .string()
           .optional()
-          .describe("Target environment (default: instance)"),
+          .describe("Target environment (default: sandbox)"),
       },
     },
     ({ repo_path, environment }) => ({
