@@ -24,11 +24,21 @@ class HttpRequestError extends Error {
   }
 }
 
+const BEARER_SCHEME = "bearer";
+
 function bearer(header: string | undefined): string | undefined {
   if (!header) return undefined;
-  const m = /^Bearer\s+(.+)$/i.exec(header.trim());
-  const token = m ? m[1]!.trim() : undefined;
-  return token && token.length > 0 ? token : undefined;
+  const trimmed = header.trim();
+  if (trimmed.slice(0, BEARER_SCHEME.length).toLowerCase() !== BEARER_SCHEME) {
+    return undefined;
+  }
+  let i = BEARER_SCHEME.length;
+  while (i < trimmed.length && (trimmed[i] === " " || trimmed[i] === "\t")) {
+    i++;
+  }
+  if (i === BEARER_SCHEME.length) return undefined; // no separator between scheme and token
+  const token = trimmed.slice(i).trim();
+  return token.length > 0 ? token : undefined;
 }
 
 function normalizeHost(host: string | undefined): string | undefined {
