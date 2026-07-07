@@ -367,9 +367,14 @@ pub fn provision_mcp_integration(
         &config_path,
         force.unwrap_or(false),
     );
-    if let Ok(status) = &result {
-        crate::mcp::emit_status_changed(&app, status);
-    }
+    // Emit regardless of outcome, mirroring `spawn_reprovision_on_startup`:
+    // `provision` now always persists a failure to the manifest before
+    // returning `Err` (see `fail_provision`), so re-deriving a fresh status
+    // here — rather than only on `Ok` — keeps every other window and the
+    // tray honest about a failed attempt too, not just the caller that
+    // triggered it.
+    let status = crate::mcp::status(&app_data_dir, &state.service, &config_path);
+    crate::mcp::emit_status_changed(&app, &status);
     result
 }
 
