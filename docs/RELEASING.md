@@ -17,6 +17,11 @@ merge the Release PR  →  git tag(s) + GitHub Release(s) created
         ↓
 release-please.yml calls release.yml (same run) gated on release-please outputs
         ↓
+  0. guard-latest-before-desktop-release → for desktop releases, immediately
+                       re-pins "Latest" to the newest prior root desktop release
+                       that already has latest.json, so the updater endpoint
+                       keeps working while the new build waits for approval/assets
+        ↓
   1. publish-sdk    → npm publish @chaos-scheduler/sdk (provenance)
         ↓ (needs: success or skipped)
   2. publish-mcp    → npm publish @chaos-scheduler/mcp-server (rewrites the
@@ -166,14 +171,35 @@ component packages, which only excludes them from "Latest" while versions are
 404s despite a green build, verify with `gh release list --json tagName,isLatest`
 and re-run the one-liner above (idempotent).
 
+**Approval/build gap guard (automated):** release-please creates the GitHub
+Release objects before any `release` Environment approval happens and before
+`tauri-action` uploads updater assets. During that window, GitHub can mark the
+new desktop release (or a linked component release) as "Latest" even though it
+does not yet have `latest.json`, causing the live updater endpoint to 404 while
+CI is simply waiting for approval or building. The
+`guard-latest-before-desktop-release` job runs without the `release` Environment
+whenever `desktop_tag` is present. It uses
+[`scripts/guard-latest-release.mjs`](../scripts/guard-latest-release.mjs) to:
+
+- no-op if current "Latest" already serves `latest.json`;
+- otherwise find the newest root desktop release matching `chaos-scheduler-v*`
+  that already has a `latest.json` asset, excluding the in-flight desktop tag
+  until its assets exist;
+- re-pin "Latest" to that asset-bearing desktop release, or no-op cleanly if no
+  such release exists yet.
+
+`build-macos` still performs the final post-upload pin to the new desktop
+release, then smoke-checks the live updater endpoint for the new version.
+
 **Residual edge case (now automated):** a release that bumps **only**
 `sdk-ts` / `mcp-server` (no desktop bump) doesn't run `build-macos`, so a
 component release could transiently hold "Latest" until the next desktop
 release. The `guard-latest-for-package-only-release` job in
 [`release.yml`](../.github/workflows/release.yml) runs for exactly this case
 (`desktop_tag == '' && (sdk_tag != '' || mcp_tag != '')`) and re-pins "Latest" back
-to the most recent `chaos-scheduler-v*` release if it drifted. It is a no-op
-(and needs no secrets) when "Latest" already points at the desktop release.
+to the most recent asset-bearing `chaos-scheduler-v*` release if it drifted. It
+is a no-op (and needs no `release` Environment secrets) when "Latest" already
+serves `latest.json`.
 
 ### `latest.json` release smoke check
 
