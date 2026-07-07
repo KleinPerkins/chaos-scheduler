@@ -939,6 +939,21 @@ pub fn status(
 // Provision / remove
 // ---------------------------------------------------------------------------
 
+/// Record `err` as this attempt's failure before propagating it. Every
+/// fallible step in [`provision_with_runtime`] after the idempotency check
+/// must route its error through this instead of a bare `?`, so a
+/// provisioning failure is never silently dropped: `status()` — what the
+/// Integrations card, the tray, and the startup re-provision hook's "was
+/// there a previous failure" check all read — always reflects the most
+/// recent attempt's real outcome, even when the immediate caller only
+/// inspects the returned `Result` for its own window.
+fn fail_provision(manifest: &mut ManagedManifest, app_data_dir: &Path, err: String) -> String {
+    manifest.last_error = Some(err.clone());
+    manifest.enabled = true;
+    let _ = manifest.save(app_data_dir);
+    err
+}
+
 /// Core, dependency-injected provisioning logic — takes an already-detected
 /// [`RuntimePaths`] so it's unit-testable with fake `node`/`npm` fixtures
 /// instead of real Homebrew paths or the real npm registry. [`provision`] is
@@ -994,14 +1009,14 @@ fn provision_with_runtime(
                 if let Some(old_id) = &manifest.managed_key_id {
                     let _ = service.revoke_api_key(old_id);
                 }
-                mint_key(service)?
+                mint_key(service).map_err(|e| fail_provision(&mut manifest, app_data_dir, e))?
             }
         }
     } else {
         if let Some(old_id) = &manifest.managed_key_id {
             let _ = service.revoke_api_key(old_id);
         }
-        mint_key(service)?
+        mint_key(service).map_err(|e| fail_provision(&mut manifest, app_data_dir, e))?
     };
 
     let staging = mcp_root(app_data_dir).join(format!("staging-{pinned}-{}", uuid::Uuid::new_v4()));
@@ -1031,8 +1046,10 @@ fn provision_with_runtime(
         return Err(err);
     }
 
-    let promoted_dir = promote_staging(app_data_dir, &staging, &pinned)?;
-    let cli_path = resolve_cli_path(&installed_package_dir(&promoted_dir))?;
+    let promoted_dir = promote_staging(app_data_dir, &staging, &pinned)
+        .map_err(|e| fail_provision(&mut manifest, app_data_dir, e))?;
+    let cli_path = resolve_cli_path(&installed_package_dir(&promoted_dir))
+        .map_err(|e| fail_provision(&mut manifest, app_data_dir, e))?;
 
     let merge_outcome = merge_mcp_config(
         config_path,
@@ -1042,7 +1059,8 @@ fn provision_with_runtime(
         &default_api_url(),
         &token,
         force,
-    )?;
+    )
+    .map_err(|e| fail_provision(&mut manifest, app_data_dir, e))?;
 
     if merge_outcome == MergeOutcome::ConflictUnmanaged {
         manifest.last_error = Some(
@@ -2228,6 +2246,47 @@ exit 0
         );
         assert!(status_after.last_error.is_some());
         assert_eq!(status_after.provisioned_version.as_deref(), Some("0.4.0"));
+    }
+
+    /// Regression test for the "post-staging provision failures don't
+    /// persist last_error" finding: once npm_install and the pre-promotion
+    /// smoke check have already succeeded, a *later* failure — forced here
+    /// by pointing `config_path` at a location whose parent can never be
+    /// created, so `merge_mcp_config` fails deterministically — must still
+    /// be recorded on the manifest instead of being silently dropped by a
+    /// bare `?`. `status()` (what the Integrations card, the tray, and the
+    /// startup re-provision hook all read) has no other way to learn a
+    /// provisioning attempt failed once the triggering call's own `Result`
+    /// has been handled by its immediate caller.
+    #[test]
+    fn provision_persists_last_error_when_a_post_staging_step_fails() {
+        let app_data_dir = tmpdir();
+        let service_dir = tmpdir();
+        let service = test_service(&service_dir);
+        let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+
+        // `config_path`'s parent already exists as a plain file, so
+        // `merge_mcp_config`'s `create_dir_all(parent)` fails deterministically
+        // — but only after staging, the smoke check, and promotion have all
+        // already succeeded.
+        let blocking_file = tmpdir().join("not-a-directory");
+        std::fs::write(&blocking_file, "blocking").unwrap();
+        let config_path = blocking_file.join("mcp.json");
+
+        let result = provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false);
+        let err = result.expect_err("the forced merge_mcp_config failure must propagate");
+
+        let manifest = ManagedManifest::load(&app_data_dir);
+        assert_eq!(
+            manifest.last_error.as_deref(),
+            Some(err.as_str()),
+            "a post-staging provisioning failure must be persisted to the manifest's \
+             last_error, not silently dropped"
+        );
+        assert!(
+            manifest.enabled,
+            "the integration is still considered opted-in after a failed re-provision attempt"
+        );
     }
 
     /// Regression test for the "managed-token/key-id desync" finding: a
