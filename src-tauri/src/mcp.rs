@@ -38,9 +38,11 @@
 
 use crate::service::SchedulerService;
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// The npm package this module provisions. The SDK is a transitive dependency
 /// of this package and is never installed separately (see module docs).
@@ -640,6 +642,67 @@ pub fn resolve_cli_path(package_dir: &Path) -> Result<PathBuf, String> {
     Ok(canonical_candidate)
 }
 
+/// How long `npm install` may run before it's treated as hung and killed.
+/// An unresponsive registry, a captive-portal DNS flake, or a network
+/// blackhole otherwise leaves `Command::output()` blocking forever — which,
+/// since every call site holds `McpState::lock` for its duration, would wedge
+/// every future provision/remove call (and the startup re-provision hook)
+/// behind a call that will never return, with no recovery short of a force
+/// quit. Two minutes is generous for installing one small package + its
+/// handful of transitive deps even on a slow connection, while still
+/// bounding the worst case to "long wait", not "hang forever".
+const NPM_INSTALL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Run `cmd` to completion, killing it and returning an error if it hasn't
+/// exited within `timeout`. stdout/stderr are drained on background threads
+/// concurrently with the timeout poll — reading them only after the process
+/// exits would risk a deadlock if a chatty child (npm's own progress output)
+/// fills the OS pipe buffer while nothing is on the reading end.
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("spawning: {e}"))?;
+
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped above");
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped above");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // Drop the reader threads' results: on a timeout we report a
+                // dedicated error rather than a partial-output `Output`, so
+                // there's nothing useful to join them into.
+                return Err(format!(
+                    "timed out after {}s and was killed",
+                    timeout.as_secs()
+                ));
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 fn npm_install(
     npm_path: &str,
     node_path: &str,
@@ -648,25 +711,25 @@ fn npm_install(
 ) -> Result<(), String> {
     std::fs::create_dir_all(prefix).map_err(|e| e.to_string())?;
     let spec = format!("{MCP_PACKAGE_NAME}@{version}");
-    let output = npm_command(npm_path, node_path)
-        .args([
-            "install",
-            "--prefix",
-            &prefix.to_string_lossy(),
-            "--no-audit",
-            "--no-fund",
-            "--no-save",
-            // Defense against npm's classic supply-chain attack vector:
-            // mcp-server has no native/build-step dependency that needs a
-            // lifecycle script, and this install runs non-interactively
-            // (including silently from the startup re-provision thread), so
-            // there is no legitimate reason to execute arbitrary
-            // preinstall/postinstall code from any package in the tree.
-            "--ignore-scripts",
-            &spec,
-        ])
-        .output()
-        .map_err(|e| format!("spawning npm: {e}"))?;
+    let mut cmd = npm_command(npm_path, node_path);
+    cmd.args([
+        "install",
+        "--prefix",
+        &prefix.to_string_lossy(),
+        "--no-audit",
+        "--no-fund",
+        "--no-save",
+        // Defense against npm's classic supply-chain attack vector:
+        // mcp-server has no native/build-step dependency that needs a
+        // lifecycle script, and this install runs non-interactively
+        // (including silently from the startup re-provision thread), so
+        // there is no legitimate reason to execute arbitrary
+        // preinstall/postinstall code from any package in the tree.
+        "--ignore-scripts",
+        &spec,
+    ]);
+    let output = run_with_timeout(cmd, NPM_INSTALL_TIMEOUT)
+        .map_err(|e| format!("npm install {spec}: {e}"))?;
     if !output.status.success() {
         return Err(format!(
             "npm install {spec} failed (exit {:?}): {}",
@@ -1318,6 +1381,55 @@ exit 0
             recorded.lines().any(|arg| arg == "--ignore-scripts"),
             "npm_install must pass --ignore-scripts, got args: {recorded:?}"
         );
+    }
+
+    /// Regression test for the "npm_install has no timeout, can hang MCP
+    /// provisioning forever" finding: a child process that never exits
+    /// (simulating an npm install stuck on an unresponsive registry) must be
+    /// killed at the deadline, not awaited forever — every provision/remove
+    /// call site holds `McpState::lock` for the duration of this call, so a
+    /// real hang here would wedge every future provision/remove call (and
+    /// the startup re-provision hook) behind it indefinitely.
+    #[test]
+    fn run_with_timeout_kills_a_hanging_process_and_reports_a_timeout_error() {
+        let dir = tmpdir();
+        let hanging = dir.join("hangs-forever.sh");
+        write_executable(&hanging, "#!/bin/sh\nsleep 30\n");
+
+        let started = Instant::now();
+        let result = run_with_timeout(Command::new(&hanging), Duration::from_millis(150));
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("a hanging process must be reported as an error, not awaited");
+        assert!(
+            err.contains("timed out"),
+            "expected a timeout error, got: {err:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the hung process should have been killed near the 150ms deadline rather than \
+             waited out to its 30s sleep; actual elapsed: {elapsed:?}"
+        );
+    }
+
+    /// A command that exits well within the timeout must still surface its
+    /// real exit status and captured stdout/stderr, not be mistaken for a
+    /// timeout — guards against the deadline check firing on the wrong
+    /// condition or the reader threads dropping output.
+    #[test]
+    fn run_with_timeout_returns_output_for_a_command_that_finishes_in_time() {
+        let dir = tmpdir();
+        let script = dir.join("quick.sh");
+        write_executable(
+            &script,
+            "#!/bin/sh\necho out-line\necho err-line >&2\nexit 3\n",
+        );
+
+        let output = run_with_timeout(Command::new(&script), Duration::from_secs(5)).unwrap();
+
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "out-line");
+        assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "err-line");
     }
 
     fn fake_runtime(dir: &Path, node_version: &str, npm_kind: &str) -> RuntimePaths {
