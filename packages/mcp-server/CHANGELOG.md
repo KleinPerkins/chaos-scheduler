@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.0](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v0.5.0...mcp-server-v1.0.0) (2026-07-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **env:** rename source/instance environments to production/sandbox ([#132](https://github.com/KleinPerkins/chaos-scheduler/issues/132))
+
+### Features
+
+* **env:** rename source/instance environments to production/sandbox ([#132](https://github.com/KleinPerkins/chaos-scheduler/issues/132)) ([f5017e5](https://github.com/KleinPerkins/chaos-scheduler/commit/f5017e5254984989c5bce70ebd350960af8d1e52))
+
+
+### Bug Fixes
+
+* **mcp-server:** bundle transitive runtime deps for zero npm footprint ([#117](https://github.com/KleinPerkins/chaos-scheduler/issues/117)) ([9131daf](https://github.com/KleinPerkins/chaos-scheduler/commit/9131daf444bb7a368cb7271523481e604228f8d3))
+
 ## [0.5.0](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v0.4.0...mcp-server-v0.5.0) (2026-07-06)
 
 
