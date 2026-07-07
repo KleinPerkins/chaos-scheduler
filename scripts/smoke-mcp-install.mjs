@@ -12,7 +12,13 @@
 //
 // Usage: node scripts/smoke-mcp-install.mjs <mcp-server-version>
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -90,20 +96,45 @@ console.log(
   `OK  @chaos-scheduler/sdk@${sdkEntry.version} resolved from the npm registry.`,
 );
 
-// 2. Prove the installed CLI actually runs on this Node (the caller pins the
-//    Node version under test; CI runs this at the package's documented floor).
-const cliPath = join(
+// 2. Prove the installed CLI actually *uses* the resolved SDK dependency
+//    rather than a copy of its source frozen into the bundle at mcp-server's
+//    own build time (see tsup.config.ts's `noExternal` — @chaos-scheduler/sdk
+//    is deliberately excluded from it). A lockfile-only check (above) can't
+//    catch this: npm would still dutifully install the real SDK version
+//    even if the shipped CLI never actually imports it, which would let an
+//    SDK-only hotfix pass this gate while silently never reaching a single
+//    installed user.
+const distDir = join(
   projectDir,
   "node_modules",
   "@chaos-scheduler",
   "mcp-server",
   "dist",
-  "cli.js",
 );
+const cliPath = join(distDir, "cli.js");
 if (!existsSync(cliPath)) {
   console.error(`::error::installed CLI entrypoint not found at ${cliPath}`);
   process.exit(1);
 }
+const bundledSource = readdirSync(distDir)
+  .filter((f) => f.endsWith(".js"))
+  .map((f) => readFileSync(join(distDir, f), "utf8"))
+  .join("\n");
+if (!/from\s+["']@chaos-scheduler\/sdk["']/.test(bundledSource)) {
+  console.error(
+    "::error::the installed mcp-server build has no live import of @chaos-scheduler/sdk — " +
+      "it looks like the SDK's source was bundled in at build time instead of being left for " +
+      "npm to resolve. Check tsup.config.ts's `noExternal` list does not include " +
+      '"@chaos-scheduler/sdk".',
+  );
+  process.exit(1);
+}
+console.log(
+  "OK  installed CLI keeps a live import of @chaos-scheduler/sdk (not bundled).",
+);
+
+// 3. Prove the installed CLI actually runs on this Node (the caller pins the
+//    Node version under test; CI runs this at the package's documented floor).
 const help = execFileSync(process.execPath, [cliPath, "--help"], {
   encoding: "utf8",
 });
