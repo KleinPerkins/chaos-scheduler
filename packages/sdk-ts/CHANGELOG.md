@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/KleinPerkins/chaos-scheduler/compare/sdk-ts-v1.0.0...sdk-ts-v1.0.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* **security:** remove polynomial-time regexes flagged by CodeQL ([#139](https://github.com/KleinPerkins/chaos-scheduler/issues/139)) ([edbb395](https://github.com/KleinPerkins/chaos-scheduler/commit/edbb3950793058f6087a5a454653826b4ee2aa89))
+
 ## [1.0.0](https://github.com/KleinPerkins/chaos-scheduler/compare/sdk-ts-v0.4.0...sdk-ts-v1.0.0) (2026-07-07)
 
 
