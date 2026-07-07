@@ -88,8 +88,25 @@ when that component did not release this run, the tag when it did:
 > `toJSON(steps.release.outputs)` in a "Debug release-please outputs" step, so any
 > future skip regression is root-causable straight from the release-please job log.
 
-The desktop build gates on the root `tag_name`; each npm publish gates on its
-`packages/*--tag_name`. If nothing was released, `release.yml` is not called.
+> **Why the tags are passed to `release.yml` as STRINGS, not booleans (2026-07-07
+> follow-up fix):** the first fix above got `release.yml` _called_, but it still
+> skipped every job for v1.0.2. `release-please.yml` was passing `type: boolean`
+> inputs derived from `<tag_name> != ''` (e.g. `build_desktop: ${{ … != '' }}`).
+> GitHub evaluates that expression, then **coerces the result to a string when it
+> crosses the `workflow_call` boundary into a `type: boolean` input** — and a
+> non-`"true"` string reads as `false`, so `build_desktop`/`publish_*` all arrived
+> `false` and the jobs skipped. Proof: the identical `<tag_name> != ''` expression
+> was simultaneously `true` in the `release` job's own `if:` (the child jobs were
+> dispatched, not absent) yet `false` at the boolean input. The durable fix removes
+> those boolean inputs entirely: `release.yml` now takes only the three tag
+> **strings** (`desktop_tag` / `sdk_tag` / `mcp_tag`, which propagate verbatim) and
+> gates each job on `inputs.<component>_tag != ''`. Strings can't be coerced, so the
+> gate is reliable for both the `workflow_call` (release-please) and
+> `workflow_dispatch` (manual re-attach) paths.
+
+The desktop build gates on `inputs.desktop_tag` (the root `tag_name`); each npm
+publish gates on its component tag (`sdk_tag` / `mcp_tag`). If nothing was
+released, all tags are empty and every job no-ops.
 
 ## Desktop build, signing & notarization
 
@@ -154,7 +171,7 @@ and re-run the one-liner above (idempotent).
 component release could transiently hold "Latest" until the next desktop
 release. The `guard-latest-for-package-only-release` job in
 [`release.yml`](../.github/workflows/release.yml) runs for exactly this case
-(`!build_desktop && (publish_sdk || publish_mcp)`) and re-pins "Latest" back
+(`desktop_tag == '' && (sdk_tag != '' || mcp_tag != '')`) and re-pins "Latest" back
 to the most recent `chaos-scheduler-v*` release if it drifted. It is a no-op
 (and needs no secrets) when "Latest" already points at the desktop release.
 

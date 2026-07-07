@@ -75,10 +75,13 @@ jobs:
       id-token: write
     uses: ./.github/workflows/release.yml
     secrets: inherit
+    # Pass ONLY the per-component tag strings. release.yml gates each job on
+    # `inputs.<component>_tag != ''`, so a non-empty tag ⇒ act on that component.
+    # We intentionally do NOT derive `type: boolean` inputs from `<tag> != ''`
+    # here: GitHub coerces such expression results to a string that a boolean
+    # reusable-workflow input reads as false, which silently skipped every
+    # build/publish job for v1.0.1/v1.0.2 even though the tags were created.
     with:
-      build_desktop: ${{ needs.release-please.outputs.desktop_tag_name != '' }}
       desktop_tag: ${{ needs.release-please.outputs.desktop_tag_name }}
-      publish_sdk: ${{ needs.release-please.outputs.sdk_tag_name != '' }}
       sdk_tag: ${{ needs.release-please.outputs.sdk_tag_name }}
-      publish_mcp: ${{ needs.release-please.outputs.mcp_tag_name != '' }}
       mcp_tag: ${{ needs.release-please.outputs.mcp_tag_name }}

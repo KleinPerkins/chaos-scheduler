@@ -2,67 +2,52 @@ name: release
 
 # Build + publish the artifacts for a release that release-please just created.
 #
-# This is a REUSABLE workflow (`workflow_call`) invoked from release-please.yml,
-# gated on the release-please path outputs (root `release_created` for the desktop
-# app; `packages/*--release_created` for the npm packages). It is NOT triggered by
-# GitHub `release`/`push` events, because a Release created by the workflow's
-# GITHUB_TOKEN cannot trigger further workflows. `workflow_dispatch` is also
-# provided for manual re-runs (e.g. re-attaching assets to an existing tag).
+# This is a REUSABLE workflow (`workflow_call`) invoked from release-please.yml.
+# It is NOT triggered by GitHub `release`/`push` events, because a Release created
+# by the workflow's GITHUB_TOKEN cannot trigger further workflows. `workflow_dispatch`
+# is also provided for manual re-runs (e.g. re-attaching assets to an existing tag).
 #
-# All jobs run in the `release` GitHub Environment so signing/publish secrets are
-# gated behind required reviewers. See docs/RELEASING.md for the secrets checklist.
+# GATING SIGNAL: the per-component release TAG STRINGS (`desktop_tag`, `sdk_tag`,
+# `mcp_tag`) are the *only* signal for what to do — a non-empty tag means "act on
+# this component". We deliberately do NOT take `type: boolean` inputs derived from
+# `<tag> != ''` expressions: GitHub coerces such expression results to the string
+# "false" when passed to a `type: boolean` reusable-workflow input, so every job
+# silently skipped even though release-please created the tags (the v1.0.1/v1.0.2
+# skip; see docs/RELEASING.md → "Release gating"). String inputs propagate across
+# `workflow_call` verbatim, so gating each job on `inputs.<component>_tag != ''` is
+# coercion-proof.
+#
+# All build/publish jobs run in the `release` GitHub Environment so signing/publish
+# secrets are gated behind required reviewers. See docs/RELEASING.md for the
+# secrets checklist.
 
 on:
   workflow_call:
     inputs:
-      build_desktop:
-        description: Build + sign + notarize the macOS desktop app.
-        type: boolean
-        default: false
       desktop_tag:
-        description: Release tag to attach desktop assets to (root component).
+        description: Release tag to build + attach desktop assets to (root component). Empty ⇒ no desktop build.
         type: string
         default: ""
-      publish_sdk:
-        description: Publish packages/sdk-ts to npm.
-        type: boolean
-        default: false
       sdk_tag:
-        description: Release tag for the sdk-ts component.
+        description: Release tag for the sdk-ts component. Empty ⇒ do not publish the SDK.
         type: string
         default: ""
-      publish_mcp:
-        description: Publish packages/mcp-server to npm.
-        type: boolean
-        default: false
       mcp_tag:
-        description: Release tag for the mcp-server component.
+        description: Release tag for the mcp-server component. Empty ⇒ do not publish the MCP server.
         type: string
         default: ""
   workflow_dispatch:
     inputs:
-      build_desktop:
-        description: Build + sign + notarize the macOS desktop app.
-        type: boolean
-        default: true
       desktop_tag:
-        description: Existing release tag to attach desktop assets to (e.g. chaos-scheduler-v0.2.0).
-        type: string
-        required: true
-      publish_sdk:
-        description: Publish packages/sdk-ts to npm.
-        type: boolean
-        default: false
-      sdk_tag:
-        description: Release tag for the sdk-ts component (for checkout).
+        description: Existing release tag to build + attach desktop assets to (e.g. chaos-scheduler-v1.0.2). Empty ⇒ no desktop build.
         type: string
         default: ""
-      publish_mcp:
-        description: Publish packages/mcp-server to npm.
-        type: boolean
-        default: false
+      sdk_tag:
+        description: Release tag for the sdk-ts component to publish (e.g. sdk-ts-v1.0.0). Empty ⇒ do not publish the SDK.
+        type: string
+        default: ""
       mcp_tag:
-        description: Release tag for the mcp-server component (for checkout).
+        description: Release tag for the mcp-server component to publish (e.g. mcp-server-v1.0.1). Empty ⇒ do not publish the MCP server.
         type: string
         default: ""
 
@@ -79,7 +64,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-sdk:
     name: npm publish @chaos-scheduler/sdk
-    if: ${{ inputs.publish_sdk }}
+    if: ${{ inputs.sdk_tag != '' }}
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -114,7 +99,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-mcp:
     name: npm publish @chaos-scheduler/mcp-server
-    if: ${{ inputs.publish_mcp && (needs.publish-sdk.result == 'success' || needs.publish-sdk.result == 'skipped') }}
+    if: ${{ inputs.mcp_tag != '' && (needs.publish-sdk.result == 'success' || needs.publish-sdk.result == 'skipped') }}
     needs: [publish-sdk]
     runs-on: ubuntu-latest
     environment: release
@@ -167,7 +152,7 @@ jobs:
   # ---------------------------------------------------------------------------
   mcp-consumer-smoke:
     name: Consumer-install smoke (@chaos-scheduler/mcp-server)
-    if: ${{ (inputs.build_desktop || inputs.publish_mcp) && (needs.publish-mcp.result == 'success' || needs.publish-mcp.result == 'skipped') }}
+    if: ${{ (inputs.desktop_tag != '' || inputs.mcp_tag != '') && (needs.publish-mcp.result == 'success' || needs.publish-mcp.result == 'skipped') }}
     needs: [publish-sdk, publish-mcp]
     runs-on: ubuntu-latest
     outputs:
@@ -203,7 +188,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-macos:
     name: macOS desktop (signed + notarized, universal)
-    if: ${{ inputs.build_desktop && needs.mcp-consumer-smoke.result == 'success' }}
+    if: ${{ inputs.desktop_tag != '' && needs.mcp-consumer-smoke.result == 'success' }}
     needs: [mcp-consumer-smoke]
     runs-on: macos-14
     environment: release
@@ -320,7 +305,7 @@ jobs:
   # ---------------------------------------------------------------------------
   guard-latest-for-package-only-release:
     name: Guard GitHub "Latest" (package-only release)
-    if: ${{ always() && !inputs.build_desktop && (inputs.publish_sdk || inputs.publish_mcp) }}
+    if: ${{ always() && inputs.desktop_tag == '' && (inputs.sdk_tag != '' || inputs.mcp_tag != '') }}
     needs: [publish-sdk, publish-mcp]
     runs-on: ubuntu-latest
     permissions:
