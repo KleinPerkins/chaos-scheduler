@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v1.0.0...mcp-server-v1.0.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* **mcp-server:** keep @chaos-scheduler/sdk external so SDK hotfixes reach users ([#136](https://github.com/KleinPerkins/chaos-scheduler/issues/136)) ([75342a9](https://github.com/KleinPerkins/chaos-scheduler/commit/75342a96a3b227f11e252ce8bfd40128409ff705))
+
 ## [1.0.0](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v0.5.0...mcp-server-v1.0.0) (2026-07-07)
 
 

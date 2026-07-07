@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.1](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.0.0...chaos-scheduler-v1.0.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* **mcp-server:** keep @chaos-scheduler/sdk external so SDK hotfixes reach users ([#136](https://github.com/KleinPerkins/chaos-scheduler/issues/136)) ([75342a9](https://github.com/KleinPerkins/chaos-scheduler/commit/75342a96a3b227f11e252ce8bfd40128409ff705))
+* **mcp:** persist and broadcast late-stage provisioning failures ([#133](https://github.com/KleinPerkins/chaos-scheduler/issues/133)) ([ccf1019](https://github.com/KleinPerkins/chaos-scheduler/commit/ccf10194ab2b2eeb9557e3f9453803fefa0a7fd7))
+* **test:** de-flake cursor_agent poll tests blocking CI ([#135](https://github.com/KleinPerkins/chaos-scheduler/issues/135)) ([0deb0cd](https://github.com/KleinPerkins/chaos-scheduler/commit/0deb0cd30f6047050918e8075e9c14bc1a38d96a))
+
 ## [1.0.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v0.6.1...chaos-scheduler-v1.0.0) (2026-07-07)
 
 
