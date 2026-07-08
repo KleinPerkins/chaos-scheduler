@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.4](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.0.3...chaos-scheduler-v1.0.4) (2026-07-07)
+
+
+### Bug Fixes
+
+* **release:** guard updater latest during desktop build gap ([#144](https://github.com/KleinPerkins/chaos-scheduler/issues/144)) ([014c146](https://github.com/KleinPerkins/chaos-scheduler/commit/014c146afa8bfef47b1b86a3bf53cb971ef5c820))
+
 ## [1.0.3](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.0.2...chaos-scheduler-v1.0.3) (2026-07-07)
 
 
