@@ -1,0 +1,63 @@
+{
+  "theme": {
+    "dark": {
+      "surface": {
+        "primary": { "value": "#0f1117" },
+        "secondary": { "value": "#1a1d27" },
+        "tertiary": { "value": "#242736" },
+        "hover": { "value": "#2a2e3d" },
+        "elevated": { "value": "#20232f" },
+        "overlay": {
+          "value": "#1a1d27",
+          "comment": "emitted as --surface-overlay-rgb triplet only"
+        }
+      },
+      "text": {
+        "primary": { "value": "#e8eaed" },
+        "secondary": { "value": "#b0b6bd" },
+        "muted": { "value": "#9099a6" },
+        "inverse": { "value": "#ffffff" }
+      },
+      "line": {
+        "border": { "value": "#2e3140" },
+        "strong": { "value": "#3a3e50" }
+      },
+      "accent": {
+        "default": { "value": "{palette.accent.dark}" },
+        "hover": { "value": "{palette.accent.dark-hover}" }
+      },
+      "status": {
+        "success": {
+          "solid": { "value": "#5fd68a" },
+          "tint": { "value": "{palette.success.dark-tint}" },
+          "text": { "value": "#c8f7d8" }
+        },
+        "error": {
+          "solid": { "value": "#f28b82" },
+          "tint": { "value": "{palette.error.dark-tint}" },
+          "text": { "value": "#ffd5d1" }
+        },
+        "warning": {
+          "solid": { "value": "#fbbc04" },
+          "tint": { "value": "{palette.warning.dark-tint}" },
+          "text": { "value": "#ffe8a3" }
+        },
+        "running": {
+          "solid": { "value": "{palette.running.dark}" },
+          "tint": { "value": "{palette.running.dark}" },
+          "text": { "value": "#c5dcff" }
+        }
+      },
+      "overlay": {
+        "elevate": {
+          "value": "{palette.white}",
+          "comment": "neutral overlay, flips polarity per theme"
+        },
+        "scrim": { "value": "{palette.black}" }
+      },
+      "shadow": {
+        "default": { "value": "0 2px 8px rgba(0, 0, 0, 0.3)" }
+      }
+    }
+  }
+}

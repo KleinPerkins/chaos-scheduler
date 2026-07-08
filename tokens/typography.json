@@ -1,0 +1,14 @@
+{
+  "font-size": {
+    "xs": { "value": "11px" },
+    "sm": { "value": "12px" },
+    "md": { "value": "13px" },
+    "lg": { "value": "15px" },
+    "xl": { "value": "18px" },
+    "2xl": { "value": "22px" }
+  },
+  "line-height": {
+    "tight": { "value": "1.25" },
+    "normal": { "value": "1.5" }
+  }
+}

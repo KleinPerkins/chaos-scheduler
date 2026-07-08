@@ -1,0 +1,18 @@
+/**
+ * Self-hosted Inter — SIL Open Font License (safe to commit to a public repo).
+ *
+ * Sourced from the `@fontsource/inter` package: each import below is an
+ * `@font-face` declaration whose woff2 is bundled into dist/ by Vite, so the
+ * offline Tauri build ships the fonts with no network dependency.
+ *
+ * Weights match what the UI actually uses: 400 (Regular), 500 (Medium),
+ * 600 (Semibold). `latin-*` keeps the bundle small (Latin subset only).
+ *
+ * Design note: the CODE ships Inter; the FIGMA design uses Calibre. These are a
+ * deliberate, licensed near-match pair — Inter is the open substitute for the
+ * commercial Calibre, not an accident. `--font-sans` (see tokens) leads with
+ * Inter and falls back to the original system stack.
+ */
+@import "@fontsource/inter/latin-400.css";
+@import "@fontsource/inter/latin-500.css";
+@import "@fontsource/inter/latin-600.css";
