@@ -34,3 +34,21 @@ mark (two arcs + two nucleus dots, brand gradients, subtle glow) — not a raste
 embed — so it stays crisp from 16px up. The MCP server icon
 (`packages/mcp-server/src/icon.ts`) is generated from that SVG via
 `node scripts/gen-mcp-icon.mjs`.
+
+## Menu-bar tray glyph
+
+`src-tauri/icons/tray.svg` + `src-tauri/icons/tray.png` are the macOS menu-bar
+**tray glyph**: a single-colour, shape-on-transparent redraw of the orbital-8
+with **no squircle background**. The tray is rendered as a _template_ image
+(`icon_as_template(true)` in `src-tauri/src/lib.rs`), so macOS uses only the
+alpha shape and tints it to match the light/dark menu bar — the app/Dock icon is
+unaffected. The glyph uses a bolder stroke and smaller nuclei than the full mark
+so the ring and its nucleus stay legible at ~16–22px. `tray.png` is 44×44 (a
+22pt menu-bar item at 2× Retina) and is embedded into the `TrayIconBuilder`.
+
+The glyph geometry is derived directly from `public/favicon.svg`. Regenerate the
+SVG + PNG from the mark with (requires Pillow, `pip install pillow`):
+
+```bash
+python3 scripts/gen-tray-icons.py
+```
