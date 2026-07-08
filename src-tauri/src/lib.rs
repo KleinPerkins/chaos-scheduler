@@ -336,8 +336,14 @@ pub fn run() {
             .skip_taskbar(true)
             .build()?;
 
+            // The menu-bar tray uses a dedicated monochrome *template* glyph
+            // (alpha-only; macOS tints it for light/dark bars). Passing the full
+            // app icon here renders as a solid filled silhouette, so load the
+            // shape-on-transparent orbital-8 mark instead. This does not affect the
+            // app/window/Dock icon. On Windows/Linux the template flag is a no-op
+            // and the glyph still shows.
             let tray = TrayIconBuilder::with_id(TRAY_ID)
-                .icon(app.default_window_icon().cloned().expect("No icon"))
+                .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?)
                 .icon_as_template(true)
                 .tooltip(branding::TRAY_TOOLTIP)
                 .on_tray_icon_event(|tray, event| {
