@@ -1,0 +1,6 @@
+{
+  "radius": {
+    "default": { "value": "8px" },
+    "lg": { "value": "12px" }
+  }
+}

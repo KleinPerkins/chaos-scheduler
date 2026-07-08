@@ -1,0 +1,44 @@
+---
+description: Design tokens, theming, fonts, and motion for the Chaos Scheduler desktop UI. Apply when editing styles/CSS, adding or changing colors/spacing/type/radius/shadow/motion, working with light/dark theme, touching src/index.css, src/styles/, tokens/, style-dictionary.config.mjs, fonts, or any UI component look-and-feel.
+alwaysApply: false
+---
+
+# Design system & tokens
+
+The full reference is **`DESIGN-SYSTEM.md`** at the repo root — read it first.
+
+## Golden rules
+
+- **Never hand-edit `src/styles/tokens.css` or `src/styles/tokens.ts`.** They are
+  GENERATED. Editing token VALUES = edit `tokens/*.json`. Editing the CSS var
+  contract (names/order/rgb companions) = edit `style-dictionary.config.mjs`.
+- After changing either, run **`npm run tokens`** to regenerate (it also runs at the
+  front of `npm run build` / `npm run dev`). Commit the regenerated files.
+- **Keep `src/index.css` globals-only** — resets, base elements, `.btn*`,
+  `.status-badge*`, `.status-dot*`, scrollbars, and the `prefers-reduced-motion`
+  reset. Do NOT re-add token `:root` blocks there.
+
+## Where things live
+
+- `tokens/` — token VALUES (SOT), tiered: `color.palette.json` (primitives),
+  `theme.dark.json` / `theme.light.json` (semantic + shadow, per mode),
+  `radius.json`, `spacing.json`, `typography.json`, `motion.json`, `font.json`.
+- `style-dictionary.config.mjs` — the emit plan + hex→rgb derivation + formats.
+- `src/styles/tokens.css` — generated `:root` (dark) + `:root[data-theme="light"]`.
+- `src/styles/tokens.ts` — generated typed maps + `ThemeMode`.
+- `src/styles/fonts.css` — self-hosted Inter (`@fontsource/inter`, weights 400/500/600).
+- `src/lib/theme.ts` — sets `data-theme` on `<html>` (default dark).
+
+## Conventions
+
+- **rgb triplets are always derived from a hex** at build time — never hand-write a
+  `*-rgb` value. Use `rgba(var(--x-rgb), α)` for soft tinted backgrounds.
+- **Preserve dark/light parity**: any color added to one theme file should have a
+  counterpart in the other unless it is genuinely mode-agnostic (then it belongs in
+  a constant tier, emitted once in `:root`).
+- **New scales (spacing/type/motion) are opt-in** — adopt on obvious, low-risk
+  literals; do not attempt a repo-wide px→scale refactor in one pass.
+- **Fonts**: code uses Inter (OFL); the Figma design uses Calibre — a deliberate
+  licensed near-match. `--font-sans` = Inter then the system fallback stack.
+- **Repo is the SOT; Figma mirrors it.** A Figma `cs.*` variable mirror and Code
+  Connect are deferred — do not assume they exist.

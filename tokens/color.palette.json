@@ -1,0 +1,47 @@
+{
+  "palette": {
+    "accent": {
+      "dark": { "value": "#6355e8", "comment": "brand accent — dark theme" },
+      "dark-hover": {
+        "value": "#5749d4",
+        "comment": "brand accent hover — dark theme"
+      },
+      "light": { "value": "#5646d6", "comment": "brand accent — light theme" },
+      "light-hover": {
+        "value": "#4436c0",
+        "comment": "brand accent hover — light theme"
+      }
+    },
+    "success": {
+      "dark-tint": {
+        "value": "#3ddc97",
+        "comment": "soft-background tint hue — dark"
+      },
+      "light": { "value": "#1f9d57", "comment": "solid + tint hue — light" }
+    },
+    "error": {
+      "dark-tint": {
+        "value": "#ea4335",
+        "comment": "soft-background tint hue — dark"
+      },
+      "light-tint": {
+        "value": "#d64545",
+        "comment": "soft-background tint hue — light"
+      },
+      "light": { "value": "#c62828", "comment": "solid hue — light" }
+    },
+    "warning": {
+      "dark-tint": {
+        "value": "#fbbc05",
+        "comment": "soft-background tint hue — dark"
+      },
+      "light": { "value": "#b7791f", "comment": "solid + tint hue — light" }
+    },
+    "running": {
+      "dark": { "value": "#6ea8fe", "comment": "solid + tint hue — dark" },
+      "light": { "value": "#2f6fed", "comment": "solid + tint hue — light" }
+    },
+    "white": { "value": "#ffffff" },
+    "black": { "value": "#000000" }
+  }
+}

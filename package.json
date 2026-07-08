@@ -4,8 +4,9 @@
   "version": "1.0.4",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "npm run tokens && vite",
+    "build": "npm run tokens && tsc -b && vite build",
+    "tokens": "style-dictionary build --config style-dictionary.config.mjs && prettier --write src/styles/tokens.css src/styles/tokens.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc -b --noEmit",
@@ -23,6 +24,7 @@
     "prepare": "lefthook install"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.2.8",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-positioner": "^2.3.2",
@@ -54,6 +56,7 @@
     "jsdom": "^26.1.0",
     "lefthook": "2.1.9",
     "prettier": "3.9.4",
+    "style-dictionary": "^5.5.0",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.62.1",
     "vite": "^8.1.3",
