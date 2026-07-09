@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import Button from "./Button";
+import Modal from "./Modal";
 import "./RerunModal.css";
 
 interface Props {
@@ -29,14 +30,6 @@ export default function RerunModal({
     textareaRef.current?.focus();
   }, []);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onCancel();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onCancel]);
-
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setParseError(null);
@@ -50,62 +43,55 @@ export default function RerunModal({
   };
 
   return (
-    <div className="rerun-modal-backdrop">
-      <button
-        type="button"
-        className="rerun-modal-scrim"
-        aria-label="Close dialog"
-        disabled={busy}
-        onClick={onCancel}
-      />
-      <div
-        className="rerun-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={descId}
-      >
-        <h2 id={titleId} className="rerun-modal-title">
-          Rerun {workflowName}
-        </h2>
-        <p id={descId} className="rerun-modal-desc">
-          Optional JSON input override for this rerun. Leave <code>{"{}"}</code>{" "}
-          to reuse the original run input.
-        </p>
-        <form onSubmit={handleSubmit}>
-          <label className="rerun-modal-label" htmlFor="rerun-input-json">
-            Input override (JSON)
-          </label>
-          <textarea
-            id="rerun-input-json"
-            ref={textareaRef}
-            className="rerun-modal-textarea"
-            value={value}
-            disabled={busy}
-            rows={8}
-            spellCheck={false}
-            onChange={(e) => setValue(e.target.value)}
-          />
-          {(parseError || error) && (
-            <div className="rerun-modal-error" role="alert">
-              {parseError ?? error}
-            </div>
-          )}
-          <div className="rerun-modal-actions">
-            <Button
-              type="button"
-              variant="ghost"
-              disabled={busy}
-              onClick={onCancel}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" variant="primary" disabled={busy}>
-              {busy ? "Rerunning…" : "Rerun"}
-            </Button>
+    <Modal
+      onClose={onCancel}
+      closeDisabled={busy}
+      labelledBy={titleId}
+      describedBy={descId}
+      backdropClassName="rerun-modal-backdrop"
+      scrimClassName="rerun-modal-scrim"
+      className="rerun-modal"
+    >
+      <h2 id={titleId} className="rerun-modal-title">
+        Rerun {workflowName}
+      </h2>
+      <p id={descId} className="rerun-modal-desc">
+        Optional JSON input override for this rerun. Leave <code>{"{}"}</code>{" "}
+        to reuse the original run input.
+      </p>
+      <form onSubmit={handleSubmit}>
+        <label className="rerun-modal-label" htmlFor="rerun-input-json">
+          Input override (JSON)
+        </label>
+        <textarea
+          id="rerun-input-json"
+          ref={textareaRef}
+          className="rerun-modal-textarea"
+          value={value}
+          disabled={busy}
+          rows={8}
+          spellCheck={false}
+          onChange={(e) => setValue(e.target.value)}
+        />
+        {(parseError || error) && (
+          <div className="rerun-modal-error" role="alert">
+            {parseError ?? error}
           </div>
-        </form>
-      </div>
-    </div>
+        )}
+        <div className="rerun-modal-actions">
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={busy}
+            onClick={onCancel}
+          >
+            Cancel
+          </Button>
+          <Button type="submit" variant="primary" disabled={busy}>
+            {busy ? "Rerunning…" : "Rerun"}
+          </Button>
+        </div>
+      </form>
+    </Modal>
   );
 }
