@@ -3,6 +3,7 @@ import { getGlobalRunHistory } from "../lib/commands";
 import type { Run } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
 import Button from "./Button";
+import PageHeader from "./PageHeader";
 import EnvSelect from "./EnvSelect";
 import Input from "./Input";
 import RunsTable from "./RunsTable";
@@ -50,14 +51,10 @@ export default function GlobalHistory({ onViewRun }: Props) {
 
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Global History</h1>
-          <p className="page-subtitle">
-            Filter indexed scheduler.db runs across workflows.
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title="Global History"
+        subtitle="Filter indexed scheduler.db runs across workflows."
+      />
 
       <div className="rh-heatmap" style={{ marginBottom: 16 }}>
         <div className="rh-heatmap-header">

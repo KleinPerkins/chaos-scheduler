@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import Button from "./Button";
+import PageHeader from "./PageHeader";
 import Field from "./Field";
 import Input from "./Input";
 import {
@@ -333,15 +334,15 @@ export default function Integrations() {
 
   return (
     <div className="integrations">
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Integrations</h1>
-          <p className="page-subtitle">
+      <PageHeader
+        title="Integrations"
+        subtitle={
+          <>
             API keys, webhooks, and the Cursor MCP connection for {PRODUCT_NAME}
             .
-          </p>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       {status && (
         <Notice variant={statusType} onDismiss={() => setStatus(null)}>

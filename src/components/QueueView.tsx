@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import Button from "./Button";
+import PageHeader from "./PageHeader";
 import Input from "./Input";
 import {
   acknowledgeDeadLetter,
@@ -295,24 +296,22 @@ export default function QueueView({ onBack }: QueueViewProps) {
 
   return (
     <div className="queue-view">
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Queues</h1>
-          <p className="page-subtitle">
-            Capacity, tag caps, and queued workflow administration
-          </p>
-        </div>
-        <div className="queue-actions">
-          {onBack && (
-            <Button variant="ghost" onClick={onBack}>
-              Back to Mission Control
+      <PageHeader
+        title="Queues"
+        subtitle="Capacity, tag caps, and queued workflow administration"
+        actions={
+          <div className="queue-actions">
+            {onBack && (
+              <Button variant="ghost" onClick={onBack}>
+                Back to Mission Control
+              </Button>
+            )}
+            <Button variant="ghost" onClick={load}>
+              Refresh
             </Button>
-          )}
-          <Button variant="ghost" onClick={load}>
-            Refresh
-          </Button>
-        </div>
-      </div>
+          </div>
+        }
+      />
 
       {error && (
         <Notice variant="error" assertive>

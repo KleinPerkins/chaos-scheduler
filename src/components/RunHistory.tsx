@@ -9,6 +9,7 @@ import RerunModal from "./RerunModal";
 import type { Run, Workflow, WorkflowHistoryBucket } from "../lib/commands";
 import { formatRunStatusLabel } from "../lib/runStatus";
 import Button from "./Button";
+import PageHeader from "./PageHeader";
 import StatusBadge from "./StatusBadge";
 import "./RunHistory.css";
 
@@ -87,15 +88,15 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
 
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">{workflow.name}</h1>
-          <p className="page-subtitle">Run History</p>
-        </div>
-        <Button variant="ghost" onClick={onBack}>
-          &larr; Back
-        </Button>
-      </div>
+      <PageHeader
+        title={workflow.name}
+        subtitle="Run History"
+        actions={
+          <Button variant="ghost" onClick={onBack}>
+            &larr; Back
+          </Button>
+        }
+      />
 
       {loading ? (
         <div className="rh-loading">Loading...</div>

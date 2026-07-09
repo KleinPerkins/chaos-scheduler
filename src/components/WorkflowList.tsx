@@ -14,6 +14,7 @@ import { cronToHuman } from "./ScheduleBuilder";
 import EnvironmentBadge from "./EnvironmentBadge";
 import NoticeBanner from "./NoticeBanner";
 import Button from "./Button";
+import PageHeader from "./PageHeader";
 import { buildEnqueueIdempotencyKey } from "../lib/workflowValidation";
 import "./WorkflowList.css";
 
@@ -297,15 +298,15 @@ export default function WorkflowList({
   if (error && workflows.length === 0) {
     return (
       <div>
-        <div className="page-header">
-          <div>
-            <h1 className="page-title">Workflows</h1>
-            <p className="page-subtitle">Could not load workflows</p>
-          </div>
-          <Button variant="primary" onClick={onNew}>
-            + Add Workflow
-          </Button>
-        </div>
+        <PageHeader
+          title="Workflows"
+          subtitle="Could not load workflows"
+          actions={
+            <Button variant="primary" onClick={onNew}>
+              + Add Workflow
+            </Button>
+          }
+        />
         <div className="wf-error">
           <span>{error}</span>
           <Button
@@ -471,18 +472,20 @@ export default function WorkflowList({
           onDismiss={() => void refresh()}
         />
       )}
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Workflows</h1>
-          <p className="page-subtitle">
+      <PageHeader
+        title="Workflows"
+        subtitle={
+          <>
             {workflows.length} workflow{workflows.length !== 1 ? "s" : ""}{" "}
             configured
-          </p>
-        </div>
-        <Button variant="primary" onClick={onNew}>
-          + Add Workflow
-        </Button>
-      </div>
+          </>
+        }
+        actions={
+          <Button variant="primary" onClick={onNew}>
+            + Add Workflow
+          </Button>
+        }
+      />
 
       {workflows.length === 0 ? (
         <div className="wf-empty">

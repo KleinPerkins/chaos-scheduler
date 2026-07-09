@@ -13,6 +13,7 @@ import {
   isCommandUnavailable,
 } from "../lib/commands";
 import Button from "./Button";
+import PageHeader from "./PageHeader";
 import Input from "./Input";
 import Select from "./Select";
 import Textarea from "./Textarea";
@@ -319,16 +320,14 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
 
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">
-            {isEdit ? "Edit Workflow" : "New Workflow"}
-          </h1>
-        </div>
-        <Button variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>
-      </div>
+      <PageHeader
+        title={isEdit ? "Edit Workflow" : "New Workflow"}
+        actions={
+          <Button variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+        }
+      />
 
       <form className="editor-form" onSubmit={handleSubmit}>
         {error && (
