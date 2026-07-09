@@ -14,6 +14,7 @@ export default defineConfig([
     "src-tauri/target",
     "playwright-report",
     "test-results",
+    "**/*.figma.tsx",
   ]),
   {
     files: ["e2e/**/*.{ts,tsx}", "playwright.config.ts", "vitest.config.ts"],
