@@ -20,6 +20,7 @@ import {
 } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
 import { formatRunStatusLabel, statusKey } from "../lib/runStatus";
+import Select from "./Select";
 import StatusBadge from "./StatusBadge";
 import StatusDot from "./StatusDot";
 import "./MissionControl.css";
@@ -627,7 +628,7 @@ export default function MissionControl({
                 </button>
               ))}
             </div>
-            <select
+            <Select
               value={domain}
               onChange={(event) => {
                 void loadSnapshot(environmentFilter, event.target.value, true);
@@ -639,7 +640,7 @@ export default function MissionControl({
                   {option.label} ({option.workflow_count})
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
         </div>
 

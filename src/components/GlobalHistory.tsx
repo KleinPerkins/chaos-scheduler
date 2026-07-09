@@ -5,6 +5,7 @@ import { useEnvironments } from "../hooks/useEnvironments";
 import { formatRunStatusLabel } from "../lib/runStatus";
 import Button from "./Button";
 import Input from "./Input";
+import Select from "./Select";
 import StatusBadge from "./StatusBadge";
 import "./RunHistory.css";
 import "./QueueView.css";
@@ -78,7 +79,7 @@ export default function GlobalHistory({ onViewRun }: Props) {
         <div className="queue-fields">
           <label>
             Status
-            <select
+            <Select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
             >
@@ -88,11 +89,11 @@ export default function GlobalHistory({ onViewRun }: Props) {
               <option value="failed">Failed</option>
               <option value="skipped">Skipped</option>
               <option value="poll_exhausted">Poll exhausted</option>
-            </select>
+            </Select>
           </label>
           <label>
             Trigger
-            <select
+            <Select
               value={triggerKind}
               onChange={(e) => setTriggerKind(e.target.value)}
             >
@@ -101,11 +102,11 @@ export default function GlobalHistory({ onViewRun }: Props) {
               <option value="manual">Manual</option>
               <option value="backfill">Backfill</option>
               <option value="child_workflow">Child workflow</option>
-            </select>
+            </Select>
           </label>
           <label>
             Environment
-            <select
+            <Select
               value={environmentFilter}
               onChange={(e) => setEnvironmentFilter(e.target.value)}
             >
@@ -115,7 +116,7 @@ export default function GlobalHistory({ onViewRun }: Props) {
                   {env.name.charAt(0).toUpperCase() + env.name.slice(1)}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
           <label>
             Domain

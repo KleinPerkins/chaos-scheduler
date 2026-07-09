@@ -1,6 +1,7 @@
 import type { ActionSpec, ActionKind, Workflow } from "../../lib/commands";
 import Button from "../Button";
 import Input from "../Input";
+import Select from "../Select";
 import { defaultAction } from "./specHelpers";
 
 interface Props {
@@ -75,7 +76,7 @@ export default function ActionsEditor({
               emailRequired && action.type === "email" && emailCount <= 1;
             return (
               <div className="action-row" key={index}>
-                <select
+                <Select
                   value={action.type}
                   disabled={disabled}
                   aria-label={`Action ${index + 1} type`}
@@ -88,7 +89,7 @@ export default function ActionsEditor({
                       {t.label}
                     </option>
                   ))}
-                </select>
+                </Select>
 
                 {action.type === "email" && (
                   <Input
@@ -147,7 +148,7 @@ export default function ActionsEditor({
                 )}
                 {action.type === "run_workflow" && (
                   <>
-                    <select
+                    <Select
                       value={action.workflow_id}
                       disabled={disabled}
                       aria-label="Workflow to run"
@@ -164,7 +165,7 @@ export default function ActionsEditor({
                           {w.name}
                         </option>
                       ))}
-                    </select>
+                    </Select>
                     <label className="action-inline-check">
                       <input
                         type="checkbox"

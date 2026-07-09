@@ -1,6 +1,7 @@
 import type { StepSpec } from "../../lib/commands";
 import Button from "../Button";
 import Input from "../Input";
+import Select from "../Select";
 import { emptyStep } from "./specHelpers";
 
 interface Props {
@@ -68,13 +69,13 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
               </label>
               <label className="step-field step-field-mode">
                 <span>Runs</span>
-                <select
+                <Select
                   value={mode}
                   onChange={(e) => setMode(index, e.target.value as Mode)}
                 >
                   <option value="command">Shell command</option>
                   <option value="script">Script path</option>
-                </select>
+                </Select>
               </label>
               {steps.length > 1 && (
                 <Button
