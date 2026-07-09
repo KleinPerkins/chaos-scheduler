@@ -73,6 +73,14 @@ jobs:
           args=(connect publish)
           if [ "${EVENT_NAME}" = "pull_request" ]; then
             args+=(--dry-run)
+          else
+            # The repo is the source of truth for Code Connect, so the real
+            # publish must overwrite any pre-existing UI/MCP-created mapping on
+            # the node — otherwise `figma connect publish` warns "already have
+            # UI-created mappings ... re-run with --force" and keeps the old
+            # generic-variant stopgap instead of our parser-based mapping (with
+            # the full `preference = figma.enum(...)` prop transform).
+            args+=(--force)
           fi
           args+=(--exit-on-unreadable-files)
           echo "Running: figma ${args[*]}"
