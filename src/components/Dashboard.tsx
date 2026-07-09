@@ -8,13 +8,11 @@ import {
   Boxes,
   Plug,
   Settings as SettingsIcon,
-  CalendarClock,
   type LucideIcon,
 } from "lucide-react";
 import UpdateBanner from "./UpdateBanner";
 import WorkflowList from "./WorkflowList";
-import NavItem from "./NavItem";
-import ThemeToggle from "./ThemeToggle";
+import Sidebar from "./Sidebar";
 import WorkflowEditor from "./WorkflowEditor";
 import WorkflowDetail from "./WorkflowDetail";
 import RunHistory from "./RunHistory";
@@ -30,7 +28,6 @@ import MissionControl, {
 } from "./MissionControl";
 import { getWorkflow } from "../lib/commands";
 import type { Workflow } from "../lib/commands";
-import { PRODUCT_SHORT_NAME, APP_VERSION } from "../lib/branding";
 import { useTheme } from "../hooks/useTheme";
 import "./Dashboard.css";
 
@@ -190,32 +187,13 @@ export default function Dashboard() {
 
   return (
     <div className="dashboard">
-      <aside className="dashboard-sidebar">
-        <div className="sidebar-brand">
-          <span className="brand-icon" aria-hidden="true">
-            <CalendarClock size={18} strokeWidth={2.25} />
-          </span>
-          <span className="brand-text">{PRODUCT_SHORT_NAME}</span>
-        </div>
-        <nav className="sidebar-nav" aria-label="Primary navigation">
-          {navItems.map((item) => (
-            <NavItem
-              key={item.view}
-              active={item.match.includes(nav.view)}
-              icon={<item.Icon size={16} strokeWidth={2} />}
-              label={item.label}
-              onClick={() => setNav({ view: item.view })}
-            />
-          ))}
-        </nav>
-        <div className="sidebar-footer">
-          <ThemeToggle
-            preference={theme.preference}
-            onChange={theme.setPreference}
-          />
-          <span className="sidebar-version">v{APP_VERSION}</span>
-        </div>
-      </aside>
+      <Sidebar
+        navItems={navItems}
+        currentView={nav.view}
+        onNavigate={(view) => setNav({ view })}
+        themePreference={theme.preference}
+        onThemeChange={theme.setPreference}
+      />
 
       <main className="dashboard-main">
         <UpdateBanner />
