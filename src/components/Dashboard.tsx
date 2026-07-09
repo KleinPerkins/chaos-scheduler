@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import UpdateBanner from "./UpdateBanner";
 import WorkflowList from "./WorkflowList";
+import NavItem from "./NavItem";
 import ThemeToggle from "./ThemeToggle";
 import WorkflowEditor from "./WorkflowEditor";
 import WorkflowDetail from "./WorkflowDetail";
@@ -197,22 +198,15 @@ export default function Dashboard() {
           <span className="brand-text">{PRODUCT_SHORT_NAME}</span>
         </div>
         <nav className="sidebar-nav" aria-label="Primary navigation">
-          {navItems.map((item) => {
-            const active = item.match.includes(nav.view);
-            return (
-              <button
-                key={item.view}
-                className={`sidebar-link ${active ? "active" : ""}`}
-                aria-current={active ? "page" : undefined}
-                onClick={() => setNav({ view: item.view })}
-              >
-                <span className="sidebar-icon" aria-hidden="true">
-                  <item.Icon size={16} strokeWidth={2} />
-                </span>
-                {item.label}
-              </button>
-            );
-          })}
+          {navItems.map((item) => (
+            <NavItem
+              key={item.view}
+              active={item.match.includes(nav.view)}
+              icon={<item.Icon size={16} strokeWidth={2} />}
+              label={item.label}
+              onClick={() => setNav({ view: item.view })}
+            />
+          ))}
         </nav>
         <div className="sidebar-footer">
           <ThemeToggle
