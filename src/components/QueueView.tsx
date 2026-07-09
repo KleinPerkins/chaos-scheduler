@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import Button from "./Button";
+import Input from "./Input";
 import {
   acknowledgeDeadLetter,
   cancelQueuedRun,
@@ -350,7 +351,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
                   <div className="queue-fields">
                     <label>
                       Capacity
-                      <input
+                      <Input
                         type="number"
                         inputMode="numeric"
                         pattern="\d+"
@@ -367,7 +368,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
                     </label>
                     <label>
                       Tag cap
-                      <input
+                      <Input
                         type="number"
                         inputMode="numeric"
                         pattern="\d+"
@@ -384,7 +385,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
                     </label>
                     <label>
                       Max queued
-                      <input
+                      <Input
                         type="number"
                         inputMode="numeric"
                         pattern="\d+"
@@ -437,7 +438,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
           <div className="queue-fields">
             <label>
               Workflow ID
-              <input
+              <Input
                 value={backfillWorkflowId}
                 placeholder="daily-digest"
                 onChange={(e) => setBackfillWorkflowId(e.target.value)}
@@ -445,7 +446,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
             </label>
             <label>
               Since
-              <input
+              <Input
                 value={backfillSince}
                 placeholder="2026-05-01T00:00:00Z"
                 onChange={(e) => setBackfillSince(e.target.value)}
@@ -453,7 +454,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
             </label>
             <label>
               Until
-              <input
+              <Input
                 value={backfillUntil}
                 placeholder="2026-05-03T00:00:00Z"
                 onChange={(e) => setBackfillUntil(e.target.value)}
@@ -461,7 +462,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
             </label>
             <label>
               Max runs
-              <input
+              <Input
                 value={backfillMaxRuns}
                 inputMode="numeric"
                 pattern="\d+"
@@ -527,7 +528,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
                 <span>{row.task_id ?? "-"}</span>
                 <span>{formatDate(row.last_failure_at)}</span>
                 <span>
-                  <input
+                  <Input
                     value={deadLetterReason[row.id] ?? ""}
                     placeholder="ack reason"
                     onChange={(e) =>
@@ -571,7 +572,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
           <div className="queue-fields">
             <label>
               Delete runs older than days
-              <input
+              <Input
                 value={retentionDays}
                 inputMode="numeric"
                 pattern="\d+"

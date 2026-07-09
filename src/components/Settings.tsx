@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import Button from "./Button";
+import Input from "./Input";
 import {
   getAppConfig,
   getLaunchAtLogin,
@@ -322,7 +323,7 @@ export default function Settings() {
             <label className="settings-label" htmlFor="settings-workspace-root">
               Workspace Root
             </label>
-            <input
+            <Input
               id="settings-workspace-root"
               type="text"
               value={workspaceRoot}
@@ -338,7 +339,7 @@ export default function Settings() {
             <label className="settings-label" htmlFor="settings-python-path">
               Python Path
             </label>
-            <input
+            <Input
               id="settings-python-path"
               type="text"
               value={pythonPath}
@@ -406,7 +407,7 @@ export default function Settings() {
                 >
                   Alert Email
                 </label>
-                <input
+                <Input
                   id="settings-alert-email"
                   type="email"
                   value={emailConfig.alert_email}
@@ -476,7 +477,7 @@ export default function Settings() {
                   >
                     SMTP Host
                   </label>
-                  <input
+                  <Input
                     id="settings-smtp-host"
                     type="text"
                     value={emailConfig.smtp_host}
@@ -493,7 +494,7 @@ export default function Settings() {
                   >
                     Port
                   </label>
-                  <input
+                  <Input
                     id="settings-smtp-port"
                     type="number"
                     value={emailConfig.smtp_port}
@@ -511,7 +512,7 @@ export default function Settings() {
                 <label className="settings-label" htmlFor="settings-smtp-user">
                   SMTP Username
                 </label>
-                <input
+                <Input
                   id="settings-smtp-user"
                   type="text"
                   value={emailConfig.smtp_user}
@@ -529,7 +530,7 @@ export default function Settings() {
                 >
                   SMTP Password
                 </label>
-                <input
+                <Input
                   id="settings-smtp-password"
                   type="password"
                   value={emailConfig.smtp_password}
@@ -561,7 +562,7 @@ export default function Settings() {
                 >
                   From Address
                 </label>
-                <input
+                <Input
                   id="settings-from-address"
                   type="text"
                   value={emailConfig.from_address}
@@ -580,7 +581,7 @@ export default function Settings() {
                 <label className="settings-label" htmlFor="settings-from-name">
                   From Name
                 </label>
-                <input
+                <Input
                   id="settings-from-name"
                   type="text"
                   value={emailConfig.from_name}
@@ -635,7 +636,7 @@ export default function Settings() {
             <label className="settings-label" htmlFor="settings-app-version">
               Current version
             </label>
-            <input
+            <Input
               id="settings-app-version"
               type="text"
               value={`v${APP_VERSION}`}

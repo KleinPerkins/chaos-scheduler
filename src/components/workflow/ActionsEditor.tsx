@@ -1,5 +1,6 @@
 import type { ActionSpec, ActionKind, Workflow } from "../../lib/commands";
 import Button from "../Button";
+import Input from "../Input";
 import { defaultAction } from "./specHelpers";
 
 interface Props {
@@ -90,7 +91,7 @@ export default function ActionsEditor({
                 </select>
 
                 {action.type === "email" && (
-                  <input
+                  <Input
                     type="email"
                     value={action.to ?? ""}
                     disabled={disabled}
@@ -103,7 +104,7 @@ export default function ActionsEditor({
                 )}
                 {action.type === "webhook" && (
                   <>
-                    <input
+                    <Input
                       type="url"
                       value={action.url}
                       disabled={disabled}
@@ -113,7 +114,7 @@ export default function ActionsEditor({
                         update(index, { ...action, url: e.target.value })
                       }
                     />
-                    <input
+                    <Input
                       type="text"
                       value={action.secret ?? ""}
                       disabled={disabled}
@@ -126,7 +127,7 @@ export default function ActionsEditor({
                         })
                       }
                     />
-                    <input
+                    <Input
                       type="number"
                       min={0}
                       value={action.max_retries ?? 0}
@@ -178,7 +179,7 @@ export default function ActionsEditor({
                   </>
                 )}
                 {action.type === "desktop_notification" && (
-                  <input
+                  <Input
                     type="text"
                     value={action.title ?? ""}
                     disabled={disabled}

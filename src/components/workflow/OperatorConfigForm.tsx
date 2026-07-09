@@ -1,5 +1,6 @@
 import type { TypedSpec } from "../../lib/commands";
 import { OPERATORS, defaultOperatorConfig } from "./specHelpers";
+import Input from "../Input";
 
 interface Props {
   spec: TypedSpec;
@@ -71,7 +72,7 @@ export default function OperatorConfigForm({
         <div className="operator-fields">
           <label className="editor-field">
             <span className="editor-label">Repository URL</span>
-            <input
+            <Input
               type="text"
               value={str(config, "repo_url")}
               disabled={disabled}
@@ -81,7 +82,7 @@ export default function OperatorConfigForm({
           </label>
           <label className="editor-field">
             <span className="editor-label">Local path</span>
-            <input
+            <Input
               type="text"
               value={str(config, "local_path")}
               disabled={disabled}
@@ -92,7 +93,7 @@ export default function OperatorConfigForm({
           <div className="editor-field-row">
             <label className="editor-field" style={{ flex: 1 }}>
               <span className="editor-label">Branch</span>
-              <input
+              <Input
                 type="text"
                 value={str(config, "branch")}
                 disabled={disabled}
@@ -102,7 +103,7 @@ export default function OperatorConfigForm({
             </label>
             <label className="editor-field">
               <span className="editor-label">Depth (optional)</span>
-              <input
+              <Input
                 type="number"
                 min={1}
                 value={str(config, "depth")}
@@ -122,7 +123,7 @@ export default function OperatorConfigForm({
             <span className="editor-label">
               Auth token / SSH key path (optional)
             </span>
-            <input
+            <Input
               type="text"
               value={str(config, "auth")}
               disabled={disabled}
@@ -157,7 +158,7 @@ export default function OperatorConfigForm({
           </label>
           <label className="editor-field">
             <span className="editor-label">Repository</span>
-            <input
+            <Input
               type="text"
               value={strWithLegacyFallback(config, "repository", "repo")}
               disabled={disabled}
@@ -177,7 +178,7 @@ export default function OperatorConfigForm({
           </label>
           <label className="editor-field">
             <span className="editor-label">Model (optional)</span>
-            <input
+            <Input
               type="text"
               value={str(config, "model")}
               disabled={disabled}

@@ -4,6 +4,7 @@ import type { Run } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
 import { formatRunStatusLabel } from "../lib/runStatus";
 import Button from "./Button";
+import Input from "./Input";
 import StatusBadge from "./StatusBadge";
 import "./RunHistory.css";
 import "./QueueView.css";
@@ -118,7 +119,7 @@ export default function GlobalHistory({ onViewRun }: Props) {
           </label>
           <label>
             Domain
-            <input
+            <Input
               value={domainFilter}
               onChange={(e) => setDomainFilter(e.target.value || "all")}
             />
