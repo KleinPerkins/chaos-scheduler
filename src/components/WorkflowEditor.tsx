@@ -15,6 +15,7 @@ import {
 import Button from "./Button";
 import Input from "./Input";
 import Select from "./Select";
+import Textarea from "./Textarea";
 import type {
   Workflow,
   AvailableScript,
@@ -399,7 +400,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
               </button>
             )}
           </div>
-          <textarea
+          <Textarea
             id="wf-desc"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
@@ -596,7 +597,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
             <label className="editor-label" htmlFor="wf-trigger">
               Trigger metadata JSON
             </label>
-            <textarea
+            <Textarea
               id="wf-trigger"
               value={triggerConfig}
               onChange={(e) => setTriggerConfig(e.target.value)}
@@ -609,7 +610,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
             <label className="editor-label" htmlFor="wf-queue">
               Queue, dependency, and SLA JSON
             </label>
-            <textarea
+            <Textarea
               id="wf-queue"
               value={queueConfig}
               onChange={(e) => setQueueConfig(e.target.value)}
