@@ -11,6 +11,7 @@ import {
   environmentOf,
 } from "../lib/commands";
 import Button from "./Button";
+import StatusBadge from "./StatusBadge";
 import type { NextRun } from "../lib/commands";
 import { PRODUCT_SHORT_NAME } from "../lib/branding";
 import { formatRunStatusLabel } from "../lib/runStatus";
@@ -219,9 +220,9 @@ export default function MenuBarPopup() {
                       {formatTime(run.started_at)}
                     </span>
                   </div>
-                  <span className={`status-badge ${run.status}`}>
+                  <StatusBadge status={run.status}>
                     {formatRunStatusLabel(run.status)}
-                  </span>
+                  </StatusBadge>
                 </button>
               ))}
             </div>

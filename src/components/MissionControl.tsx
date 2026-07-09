@@ -20,6 +20,7 @@ import {
 } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
 import { formatRunStatusLabel } from "../lib/runStatus";
+import StatusBadge from "./StatusBadge";
 import "./MissionControl.css";
 
 export type MissionTab =
@@ -280,9 +281,9 @@ function ActivityList({
                   {item.domain} / {environmentOf(item)}
                 </small>
               </span>
-              <span className={`status-badge ${statusClass(item.status)}`}>
+              <StatusBadge status={statusClass(item.status)}>
                 {formatRunStatusLabel(item.status)}
-              </span>
+              </StatusBadge>
               <time dateTime={item.started_at}>
                 {formatTime(item.started_at)}
               </time>
@@ -354,9 +355,9 @@ function RecentRuns({
                 <strong>{run.workflow_name ?? run.workflow_id}</strong>
                 <small>{run.workflow_id.slice(0, 8)}</small>
               </span>
-              <span className={`status-badge ${statusClass(run.status)}`}>
+              <StatusBadge status={statusClass(run.status)}>
                 {formatRunStatusLabel(run.status)}
-              </span>
+              </StatusBadge>
               <time dateTime={run.started_at}>
                 {formatTime(run.started_at)}
               </time>
