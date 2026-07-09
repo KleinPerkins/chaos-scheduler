@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "npm run tokens && vite",
     "build": "npm run tokens && tsc -b && vite build",
-    "tokens": "style-dictionary build --config style-dictionary.config.mjs && prettier --write src/styles/tokens.css src/styles/tokens.ts",
+    "tokens": "style-dictionary build --config style-dictionary.config.mjs && prettier --write src/styles/tokens.css src/styles/tokens.ts figma-tokens.json",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc -b --noEmit",
