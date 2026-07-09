@@ -1,5 +1,6 @@
 import type { TypedSpec } from "../../lib/commands";
 import { OPERATORS, defaultOperatorConfig } from "./specHelpers";
+import EditorField from "../EditorField";
 import Input from "../Input";
 import Select from "../Select";
 import Textarea from "../Textarea";
@@ -43,8 +44,13 @@ export default function OperatorConfigForm({
 
   return (
     <div className="operator-form">
-      <label className="editor-field">
-        <span className="editor-label">Operator</span>
+      <EditorField
+        label="Operator"
+        hint={
+          OPERATORS.find((op) => op.value === spec.operator_type)?.hint ??
+          "Custom operator; configure via raw JSON."
+        }
+      >
         <Select
           value={spec.operator_type}
           disabled={disabled}
@@ -64,16 +70,11 @@ export default function OperatorConfigForm({
             <option value={spec.operator_type}>{spec.operator_type}</option>
           )}
         </Select>
-        <span className="editor-hint">
-          {OPERATORS.find((op) => op.value === spec.operator_type)?.hint ??
-            "Custom operator; configure via raw JSON."}
-        </span>
-      </label>
+      </EditorField>
 
       {spec.operator_type === "git_pull" && (
         <div className="operator-fields">
-          <label className="editor-field">
-            <span className="editor-label">Repository URL</span>
+          <EditorField label="Repository URL">
             <Input
               type="text"
               value={str(config, "repo_url")}
@@ -81,9 +82,8 @@ export default function OperatorConfigForm({
               onChange={(e) => setConfig({ repo_url: e.target.value })}
               placeholder="git@github.com:org/repo.git"
             />
-          </label>
-          <label className="editor-field">
-            <span className="editor-label">Local path</span>
+          </EditorField>
+          <EditorField label="Local path">
             <Input
               type="text"
               value={str(config, "local_path")}
@@ -91,10 +91,9 @@ export default function OperatorConfigForm({
               onChange={(e) => setConfig({ local_path: e.target.value })}
               placeholder="checkouts/repo"
             />
-          </label>
+          </EditorField>
           <div className="editor-field-row">
-            <label className="editor-field" style={{ flex: 1 }}>
-              <span className="editor-label">Branch</span>
+            <EditorField label="Branch" style={{ flex: 1 }}>
               <Input
                 type="text"
                 value={str(config, "branch")}
@@ -102,9 +101,8 @@ export default function OperatorConfigForm({
                 onChange={(e) => setConfig({ branch: e.target.value })}
                 placeholder="main"
               />
-            </label>
-            <label className="editor-field">
-              <span className="editor-label">Depth (optional)</span>
+            </EditorField>
+            <EditorField label="Depth (optional)">
               <Input
                 type="number"
                 min={1}
@@ -119,12 +117,9 @@ export default function OperatorConfigForm({
                 }
                 placeholder="full"
               />
-            </label>
+            </EditorField>
           </div>
-          <label className="editor-field">
-            <span className="editor-label">
-              Auth token / SSH key path (optional)
-            </span>
+          <EditorField label="Auth token / SSH key path (optional)">
             <Input
               type="text"
               value={str(config, "auth")}
@@ -132,7 +127,7 @@ export default function OperatorConfigForm({
               onChange={(e) => setConfig({ auth: e.target.value || undefined })}
               placeholder="~/.ssh/id_ed25519 or a PAT"
             />
-          </label>
+          </EditorField>
           <label className="editor-check">
             <input
               type="checkbox"
@@ -147,8 +142,7 @@ export default function OperatorConfigForm({
 
       {spec.operator_type === "cursor_agent" && (
         <div className="operator-fields">
-          <label className="editor-field">
-            <span className="editor-label">Mode</span>
+          <EditorField label="Mode">
             <Select
               value={str(config, "mode") || "cloud"}
               disabled={disabled}
@@ -157,9 +151,8 @@ export default function OperatorConfigForm({
               <option value="cloud">Cloud (Cursor Cloud Agents API)</option>
               <option value="cli">CLI (cursor-agent)</option>
             </Select>
-          </label>
-          <label className="editor-field">
-            <span className="editor-label">Repository</span>
+          </EditorField>
+          <EditorField label="Repository">
             <Input
               type="text"
               value={strWithLegacyFallback(config, "repository", "repo")}
@@ -167,9 +160,8 @@ export default function OperatorConfigForm({
               onChange={(e) => setConfig({ repository: e.target.value })}
               placeholder="org/repo"
             />
-          </label>
-          <label className="editor-field">
-            <span className="editor-label">Prompt</span>
+          </EditorField>
+          <EditorField label="Prompt">
             <Textarea
               value={str(config, "prompt")}
               rows={3}
@@ -177,9 +169,8 @@ export default function OperatorConfigForm({
               onChange={(e) => setConfig({ prompt: e.target.value })}
               placeholder="What should the agent do?"
             />
-          </label>
-          <label className="editor-field">
-            <span className="editor-label">Model (optional)</span>
+          </EditorField>
+          <EditorField label="Model (optional)">
             <Input
               type="text"
               value={str(config, "model")}
@@ -189,7 +180,7 @@ export default function OperatorConfigForm({
               }
               placeholder="default"
             />
-          </label>
+          </EditorField>
         </div>
       )}
     </div>
