@@ -9,6 +9,7 @@ import {
 import type { EnvironmentPayload } from "../lib/commands";
 import EnvironmentBadge from "./EnvironmentBadge";
 import Button from "./Button";
+import Field from "./Field";
 import Input from "./Input";
 import "./Environments.css";
 
@@ -168,8 +169,7 @@ export default function Environments() {
         <h2 className="env-section-title">Create environment</h2>
         <form className="env-create-form" onSubmit={handleCreate}>
           <div className="env-form-row">
-            <label className="env-field">
-              <span>Name</span>
+            <Field className="env-field" label="Name">
               <Input
                 type="text"
                 value={form.name}
@@ -177,29 +177,26 @@ export default function Environments() {
                 placeholder="staging"
                 required
               />
-            </label>
-            <label className="env-field env-field-grow">
-              <span>Description</span>
+            </Field>
+            <Field className="env-field env-field-grow" label="Description">
               <Input
                 type="text"
                 value={form.description}
                 onChange={(e) => set("description", e.target.value)}
                 placeholder="Pre-production runs"
               />
-            </label>
+            </Field>
           </div>
-          <label className="env-field">
-            <span>Working directory (optional)</span>
+          <Field className="env-field" label="Working directory (optional)">
             <Input
               type="text"
               value={form.workingDir}
               onChange={(e) => set("workingDir", e.target.value)}
               placeholder="overrides the workspace root for this environment"
             />
-          </label>
+          </Field>
           <div className="env-form-row">
-            <label className="env-field">
-              <span>Default queue capacity</span>
+            <Field className="env-field" label="Default queue capacity">
               <Input
                 type="number"
                 min={1}
@@ -207,9 +204,8 @@ export default function Environments() {
                 onChange={(e) => set("defaultQueueCapacity", e.target.value)}
                 placeholder="inherit"
               />
-            </label>
-            <label className="env-field">
-              <span>Default tag cap</span>
+            </Field>
+            <Field className="env-field" label="Default tag cap">
               <Input
                 type="number"
                 min={1}
@@ -217,9 +213,8 @@ export default function Environments() {
                 onChange={(e) => set("defaultTagCap", e.target.value)}
                 placeholder="inherit"
               />
-            </label>
-            <label className="env-field">
-              <span>Default max queued</span>
+            </Field>
+            <Field className="env-field" label="Default max queued">
               <Input
                 type="number"
                 min={0}
@@ -227,7 +222,7 @@ export default function Environments() {
                 onChange={(e) => set("defaultMaxQueued", e.target.value)}
                 placeholder="unbounded"
               />
-            </label>
+            </Field>
           </div>
           <Button
             type="submit"
@@ -253,8 +248,7 @@ export default function Environments() {
               <div key={env.id} className="env-card">
                 {editingId === env.id ? (
                   <div className="env-card-edit">
-                    <label className="env-field">
-                      <span>Description</span>
+                    <Field className="env-field" label="Description">
                       <Input
                         type="text"
                         value={editForm.description}
@@ -265,9 +259,8 @@ export default function Environments() {
                           }))
                         }
                       />
-                    </label>
-                    <label className="env-field">
-                      <span>Working directory</span>
+                    </Field>
+                    <Field className="env-field" label="Working directory">
                       <Input
                         type="text"
                         value={editForm.workingDir}
@@ -278,7 +271,7 @@ export default function Environments() {
                           }))
                         }
                       />
-                    </label>
+                    </Field>
                     <div className="env-card-actions">
                       <Button
                         variant="primary"

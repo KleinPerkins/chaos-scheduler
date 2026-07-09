@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import Button from "./Button";
+import Field from "./Field";
 import Input from "./Input";
 import {
   createApiKey,
@@ -356,15 +357,14 @@ export default function Integrations() {
         </p>
 
         <form className="intg-key-form" onSubmit={handleCreate}>
-          <label className="intg-field">
-            <span>Key name (optional)</span>
+          <Field className="intg-field" label="Key name (optional)">
             <Input
               type="text"
               value={keyName}
               onChange={(e) => setKeyName(e.target.value)}
               placeholder="ci-runner"
             />
-          </label>
+          </Field>
           <fieldset className="intg-scopes">
             <legend>Scopes</legend>
             {ALL_SCOPES.map((scope) => (
