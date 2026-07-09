@@ -45,11 +45,14 @@ export default defineConfig([
       // src/components/Select.tsx, src/components/Textarea.tsx) are thin,
       // class-less wrappers that render a native `<input>` / `<select>` /
       // `<textarea>`, so a11y rules (e.g. label-has-associated-control) must
-      // treat them as those controls, not as new unknown elements.
+      // treat them as those controls, not as new unknown elements. `EnvSelect`
+      // (src/components/EnvSelect.tsx) composes `<Select>` and likewise renders
+      // a native `<select>`, so it maps to `select` too.
       "jsx-a11y": {
         components: {
           Input: "input",
           Select: "select",
+          EnvSelect: "select",
           Textarea: "textarea",
         },
       },
