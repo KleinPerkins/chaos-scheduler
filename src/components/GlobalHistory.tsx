@@ -4,6 +4,7 @@ import type { Run } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
 import { formatRunStatusLabel } from "../lib/runStatus";
 import Button from "./Button";
+import EnvSelect from "./EnvSelect";
 import Input from "./Input";
 import Select from "./Select";
 import StatusBadge from "./StatusBadge";
@@ -106,17 +107,12 @@ export default function GlobalHistory({ onViewRun }: Props) {
           </label>
           <label>
             Environment
-            <Select
+            <EnvSelect
               value={environmentFilter}
               onChange={(e) => setEnvironmentFilter(e.target.value)}
-            >
-              <option value="all">All</option>
-              {environments.map((env) => (
-                <option key={env.id} value={env.name}>
-                  {env.name.charAt(0).toUpperCase() + env.name.slice(1)}
-                </option>
-              ))}
-            </Select>
+              environments={environments}
+              includeAllOption
+            />
           </label>
           <label>
             Domain
