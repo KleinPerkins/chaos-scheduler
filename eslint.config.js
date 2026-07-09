@@ -41,13 +41,15 @@ export default defineConfig([
     ...jsxA11yRecommended,
     settings: {
       ...jsxA11yRecommended.settings,
-      // The `Input` primitive (src/components/Input.tsx) is a thin, class-less
-      // wrapper that renders a native `<input>`, so a11y rules (e.g.
-      // label-has-associated-control) must treat it as that control, not as a
-      // new unknown element.
+      // The `Input` / `Select` primitives (src/components/Input.tsx,
+      // src/components/Select.tsx) are thin, class-less wrappers that render a
+      // native `<input>` / `<select>`, so a11y rules (e.g.
+      // label-has-associated-control) must treat them as those controls, not as
+      // new unknown elements.
       "jsx-a11y": {
         components: {
           Input: "input",
+          Select: "select",
         },
       },
     },

@@ -14,6 +14,7 @@ import {
 } from "../lib/commands";
 import Button from "./Button";
 import Input from "./Input";
+import Select from "./Select";
 import type {
   Workflow,
   AvailableScript,
@@ -412,7 +413,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           <label className="editor-label" htmlFor="wf-env">
             Environment
           </label>
-          <select
+          <Select
             id="wf-env"
             value={environment}
             onChange={(e) => setEnvironment(e.target.value)}
@@ -423,7 +424,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
                 {env.charAt(0).toUpperCase() + env.slice(1)}
               </option>
             ))}
-          </select>
+          </Select>
           <span className="editor-hint">
             The partition this workflow runs in. Manage environments from the
             Environments screen.
@@ -547,7 +548,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
               <label className="editor-label" htmlFor="wf-email-profile">
                 Delivery profile
               </label>
-              <select
+              <Select
                 id="wf-email-profile"
                 value={emailProfileId}
                 onChange={(e) => setEmailProfileId(e.target.value)}
@@ -560,7 +561,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
                     {p.enabled ? "" : " (disabled)"}
                   </option>
                 ))}
-              </select>
+              </Select>
               <span className="editor-hint">
                 Which named email profile receives failure alerts. Manage
                 profiles in Settings → Email Profiles.
@@ -627,7 +628,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
                 <div className="editor-hint">Scanning for scripts...</div>
               ) : (
                 <>
-                  <select
+                  <Select
                     value={isCustomScript ? "__custom__" : scriptPath}
                     onChange={(e) => handleScriptChange(e.target.value)}
                     aria-label="Discovered scripts"
@@ -638,7 +639,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
                       </option>
                     ))}
                     <option value="__custom__">Custom path...</option>
-                  </select>
+                  </Select>
                   {selectedScript?.description && (
                     <span className="editor-script-desc">
                       {selectedScript.description}

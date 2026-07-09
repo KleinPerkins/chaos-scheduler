@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import Select from "./Select";
 import "./ScheduleBuilder.css";
 
 /* eslint-disable react-refresh/only-export-components */
@@ -620,7 +621,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
             {state.frequency === "hourly" && (
               <div className="sched-row">
                 <span className="sched-label">Every</span>
-                <select
+                <Select
                   value={state.interval}
                   onChange={(e) =>
                     updateState({ interval: parseInt(e.target.value) })
@@ -631,7 +632,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                       {n}
                     </option>
                   ))}
-                </select>
+                </Select>
                 <span className="sched-label">
                   {state.interval === 1 ? "hour" : "hours"}
                 </span>
@@ -660,7 +661,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
             {state.frequency === "monthly" && (
               <div className="sched-row">
                 <span className="sched-label">On day</span>
-                <select
+                <Select
                   value={state.dayOfMonth}
                   onChange={(e) =>
                     updateState({ dayOfMonth: parseInt(e.target.value) })
@@ -671,7 +672,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                       {d}
                     </option>
                   ))}
-                </select>
+                </Select>
               </div>
             )}
 
@@ -680,7 +681,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                 {state.times.map((t, idx) => (
                   <div key={idx} className="sched-row sched-time-row">
                     <span className="sched-label">At</span>
-                    <select
+                    <Select
                       value={t.hour}
                       onChange={(e) =>
                         updateTimeAt(idx, { hour: parseInt(e.target.value) })
@@ -691,9 +692,9 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                           {h}
                         </option>
                       ))}
-                    </select>
+                    </Select>
                     <span className="sched-colon">:</span>
-                    <select
+                    <Select
                       value={t.minute}
                       onChange={(e) =>
                         updateTimeAt(idx, { minute: parseInt(e.target.value) })
@@ -704,7 +705,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                           {String(m).padStart(2, "0")}
                         </option>
                       ))}
-                    </select>
+                    </Select>
                     <div className="sched-ampm-toggle">
                       <button
                         type="button"

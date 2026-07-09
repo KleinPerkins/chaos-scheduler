@@ -1,6 +1,7 @@
 import type { TypedSpec } from "../../lib/commands";
 import { OPERATORS, defaultOperatorConfig } from "./specHelpers";
 import Input from "../Input";
+import Select from "../Select";
 
 interface Props {
   spec: TypedSpec;
@@ -43,7 +44,7 @@ export default function OperatorConfigForm({
     <div className="operator-form">
       <label className="editor-field">
         <span className="editor-label">Operator</span>
-        <select
+        <Select
           value={spec.operator_type}
           disabled={disabled}
           onChange={(e) =>
@@ -61,7 +62,7 @@ export default function OperatorConfigForm({
           {!OPERATORS.some((op) => op.value === spec.operator_type) && (
             <option value={spec.operator_type}>{spec.operator_type}</option>
           )}
-        </select>
+        </Select>
         <span className="editor-hint">
           {OPERATORS.find((op) => op.value === spec.operator_type)?.hint ??
             "Custom operator; configure via raw JSON."}
@@ -147,14 +148,14 @@ export default function OperatorConfigForm({
         <div className="operator-fields">
           <label className="editor-field">
             <span className="editor-label">Mode</span>
-            <select
+            <Select
               value={str(config, "mode") || "cloud"}
               disabled={disabled}
               onChange={(e) => setConfig({ mode: e.target.value })}
             >
               <option value="cloud">Cloud (Cursor Cloud Agents API)</option>
               <option value="cli">CLI (cursor-agent)</option>
-            </select>
+            </Select>
           </label>
           <label className="editor-field">
             <span className="editor-label">Repository</span>
