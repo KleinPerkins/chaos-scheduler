@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import Button from "./Button";
 import PageHeader from "./PageHeader";
 import Input from "./Input";
+import SettingsField from "./SettingsField";
 import {
   getAppConfig,
   getLaunchAtLogin,
@@ -315,37 +316,30 @@ export default function Settings() {
 
         <section className="settings-section">
           <h2 className="settings-section-title">Paths</h2>
-          <div className="settings-field">
-            <label className="settings-label" htmlFor="settings-workspace-root">
-              Workspace Root
-            </label>
+          <SettingsField
+            label="Workspace Root"
+            htmlFor="settings-workspace-root"
+            hint="Where relative script paths and per-environment working directories resolve. Auto-detected; set CHAOS_SCHEDULER_WORKSPACE_ROOT to override."
+          >
             <Input
               id="settings-workspace-root"
               type="text"
               value={workspaceRoot}
               readOnly
             />
-            <span className="settings-hint">
-              Where relative script paths and per-environment working
-              directories resolve. Auto-detected; set
-              CHAOS_SCHEDULER_WORKSPACE_ROOT to override.
-            </span>
-          </div>
-          <div className="settings-field">
-            <label className="settings-label" htmlFor="settings-python-path">
-              Python Path
-            </label>
+          </SettingsField>
+          <SettingsField
+            label="Python Path"
+            htmlFor="settings-python-path"
+            hint="Uses .venv/bin/python3 when available, falls back to system python3."
+          >
             <Input
               id="settings-python-path"
               type="text"
               value={pythonPath}
               readOnly
             />
-            <span className="settings-hint">
-              Uses .venv/bin/python3 when available, falls back to system
-              python3.
-            </span>
-          </div>
+          </SettingsField>
         </section>
 
         <section className="settings-section">
@@ -396,13 +390,11 @@ export default function Settings() {
 
           {emailConfig.enabled && (
             <div className="email-config-fields">
-              <div className="settings-field">
-                <label
-                  className="settings-label"
-                  htmlFor="settings-alert-email"
-                >
-                  Alert Email
-                </label>
+              <SettingsField
+                label="Alert Email"
+                htmlFor="settings-alert-email"
+                hint="Where failure alerts will be sent"
+              >
                 <Input
                   id="settings-alert-email"
                   type="email"
@@ -412,10 +404,7 @@ export default function Settings() {
                   }
                   placeholder="you@example.com"
                 />
-                <span className="settings-hint">
-                  Where failure alerts will be sent
-                </span>
-              </div>
+              </SettingsField>
 
               <div className="email-config-divider" />
 
@@ -466,13 +455,11 @@ export default function Settings() {
               </div>
 
               <div className="settings-field-row">
-                <div className="settings-field" style={{ flex: 1 }}>
-                  <label
-                    className="settings-label"
-                    htmlFor="settings-smtp-host"
-                  >
-                    SMTP Host
-                  </label>
+                <SettingsField
+                  label="SMTP Host"
+                  htmlFor="settings-smtp-host"
+                  style={{ flex: 1 }}
+                >
                   <Input
                     id="settings-smtp-host"
                     type="text"
@@ -482,14 +469,12 @@ export default function Settings() {
                     }
                     placeholder="smtp.gmail.com"
                   />
-                </div>
-                <div className="settings-field" style={{ width: 90 }}>
-                  <label
-                    className="settings-label"
-                    htmlFor="settings-smtp-port"
-                  >
-                    Port
-                  </label>
+                </SettingsField>
+                <SettingsField
+                  label="Port"
+                  htmlFor="settings-smtp-port"
+                  style={{ width: 90 }}
+                >
                   <Input
                     id="settings-smtp-port"
                     type="number"
@@ -501,13 +486,10 @@ export default function Settings() {
                       )
                     }
                   />
-                </div>
+                </SettingsField>
               </div>
 
-              <div className="settings-field">
-                <label className="settings-label" htmlFor="settings-smtp-user">
-                  SMTP Username
-                </label>
+              <SettingsField label="SMTP Username" htmlFor="settings-smtp-user">
                 <Input
                   id="settings-smtp-user"
                   type="text"
@@ -517,7 +499,7 @@ export default function Settings() {
                   }
                   placeholder="you@gmail.com"
                 />
-              </div>
+              </SettingsField>
 
               <div className="settings-field">
                 <label
@@ -551,13 +533,11 @@ export default function Settings() {
 
               <div className="email-config-divider" />
 
-              <div className="settings-field">
-                <label
-                  className="settings-label"
-                  htmlFor="settings-from-address"
-                >
-                  From Address
-                </label>
+              <SettingsField
+                label="From Address"
+                htmlFor="settings-from-address"
+                hint="The sender address shown on alert emails. Some SMTP providers require this to match the authenticated account."
+              >
                 <Input
                   id="settings-from-address"
                   type="text"
@@ -567,16 +547,9 @@ export default function Settings() {
                   }
                   placeholder="noreply@example.com"
                 />
-                <span className="settings-hint">
-                  The sender address shown on alert emails. Some SMTP providers
-                  require this to match the authenticated account.
-                </span>
-              </div>
+              </SettingsField>
 
-              <div className="settings-field">
-                <label className="settings-label" htmlFor="settings-from-name">
-                  From Name
-                </label>
+              <SettingsField label="From Name" htmlFor="settings-from-name">
                 <Input
                   id="settings-from-name"
                   type="text"
@@ -586,7 +559,7 @@ export default function Settings() {
                   }
                   placeholder={EMAIL_FROM_NAME}
                 />
-              </div>
+              </SettingsField>
 
               <div className="email-actions">
                 <button
@@ -628,17 +601,14 @@ export default function Settings() {
 
         <section className="settings-section">
           <h2 className="settings-section-title">Updates</h2>
-          <div className="settings-field">
-            <label className="settings-label" htmlFor="settings-app-version">
-              Current version
-            </label>
+          <SettingsField label="Current version" htmlFor="settings-app-version">
             <Input
               id="settings-app-version"
               type="text"
               value={`v${APP_VERSION}`}
               readOnly
             />
-          </div>
+          </SettingsField>
           <div className="settings-row">
             <label className="settings-check">
               <input
