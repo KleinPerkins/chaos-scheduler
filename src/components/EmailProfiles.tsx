@@ -11,6 +11,7 @@ import {
 import { EMAIL_FROM_NAME } from "../lib/branding";
 import Notice from "./ui/Notice";
 import Input from "./Input";
+import SettingsField from "./SettingsField";
 
 const MASK = "••••••••";
 
@@ -197,10 +198,7 @@ export default function EmailProfiles() {
 
       {editing && (
         <div className="email-profile-form">
-          <div className="settings-field">
-            <label className="settings-label" htmlFor="profile-name">
-              Profile Name
-            </label>
+          <SettingsField label="Profile Name" htmlFor="profile-name">
             <Input
               id="profile-name"
               type="text"
@@ -208,7 +206,7 @@ export default function EmailProfiles() {
               onChange={(e) => update("name", e.target.value)}
               placeholder="e.g. Production alerts"
             />
-          </div>
+          </SettingsField>
 
           <label className="settings-check">
             <input
@@ -219,10 +217,7 @@ export default function EmailProfiles() {
             Enabled
           </label>
 
-          <div className="settings-field">
-            <label className="settings-label" htmlFor="profile-recipient">
-              Recipient
-            </label>
+          <SettingsField label="Recipient" htmlFor="profile-recipient">
             <Input
               id="profile-recipient"
               type="email"
@@ -230,7 +225,7 @@ export default function EmailProfiles() {
               onChange={(e) => update("alert_email", e.target.value)}
               placeholder="alerts@example.com"
             />
-          </div>
+          </SettingsField>
 
           <div
             className="smtp-presets"
@@ -257,10 +252,7 @@ export default function EmailProfiles() {
           </div>
 
           <div className="settings-field-row">
-            <div className="settings-field">
-              <label className="settings-label" htmlFor="profile-host">
-                SMTP Host
-              </label>
+            <SettingsField label="SMTP Host" htmlFor="profile-host">
               <Input
                 id="profile-host"
                 type="text"
@@ -268,11 +260,8 @@ export default function EmailProfiles() {
                 onChange={(e) => update("smtp_host", e.target.value)}
                 placeholder="smtp.gmail.com"
               />
-            </div>
-            <div className="settings-field">
-              <label className="settings-label" htmlFor="profile-port">
-                Port
-              </label>
+            </SettingsField>
+            <SettingsField label="Port" htmlFor="profile-port">
               <Input
                 id="profile-port"
                 type="number"
@@ -281,13 +270,10 @@ export default function EmailProfiles() {
                   update("smtp_port", parseInt(e.target.value, 10) || 587)
                 }
               />
-            </div>
+            </SettingsField>
           </div>
 
-          <div className="settings-field">
-            <label className="settings-label" htmlFor="profile-user">
-              SMTP Username
-            </label>
+          <SettingsField label="SMTP Username" htmlFor="profile-user">
             <Input
               id="profile-user"
               type="text"
@@ -295,12 +281,9 @@ export default function EmailProfiles() {
               onChange={(e) => update("smtp_user", e.target.value)}
               placeholder="you@example.com"
             />
-          </div>
+          </SettingsField>
 
-          <div className="settings-field">
-            <label className="settings-label" htmlFor="profile-password">
-              SMTP Password
-            </label>
+          <SettingsField label="SMTP Password" htmlFor="profile-password">
             <Input
               id="profile-password"
               type="password"
@@ -308,13 +291,10 @@ export default function EmailProfiles() {
               onChange={(e) => update("smtp_password", e.target.value)}
               placeholder={editing.id ? MASK : "app password"}
             />
-          </div>
+          </SettingsField>
 
           <div className="settings-field-row">
-            <div className="settings-field">
-              <label className="settings-label" htmlFor="profile-from-address">
-                From Address
-              </label>
+            <SettingsField label="From Address" htmlFor="profile-from-address">
               <Input
                 id="profile-from-address"
                 type="text"
@@ -322,11 +302,8 @@ export default function EmailProfiles() {
                 onChange={(e) => update("from_address", e.target.value)}
                 placeholder="noreply@example.com"
               />
-            </div>
-            <div className="settings-field">
-              <label className="settings-label" htmlFor="profile-from-name">
-                From Name
-              </label>
+            </SettingsField>
+            <SettingsField label="From Name" htmlFor="profile-from-name">
               <Input
                 id="profile-from-name"
                 type="text"
@@ -334,7 +311,7 @@ export default function EmailProfiles() {
                 onChange={(e) => update("from_name", e.target.value)}
                 placeholder={EMAIL_FROM_NAME}
               />
-            </div>
+            </SettingsField>
           </div>
 
           <div className="email-actions">
