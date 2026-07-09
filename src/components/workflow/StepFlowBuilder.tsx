@@ -1,5 +1,6 @@
 import type { StepSpec } from "../../lib/commands";
 import Button from "../Button";
+import Input from "../Input";
 import { emptyStep } from "./specHelpers";
 
 interface Props {
@@ -58,7 +59,7 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
             <div className="step-row">
               <label className="step-field step-field-id">
                 <span>Step ID</span>
-                <input
+                <Input
                   type="text"
                   value={step.id}
                   onChange={(e) => update(index, { id: e.target.value })}
@@ -91,7 +92,7 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
 
             <label className="step-field">
               <span>{mode === "command" ? "Command" : "Script path"}</span>
-              <input
+              <Input
                 type="text"
                 value={(mode === "command" ? step.command : step.script) ?? ""}
                 onChange={(e) =>
@@ -113,7 +114,7 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
             <div className="step-row">
               <label className="step-field">
                 <span>Args (space-separated)</span>
-                <input
+                <Input
                   type="text"
                   value={step.args.join(" ")}
                   onChange={(e) =>
@@ -126,7 +127,7 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
               </label>
               <label className="step-field">
                 <span>Working dir (optional)</span>
-                <input
+                <Input
                   type="text"
                   value={step.working_dir ?? ""}
                   onChange={(e) =>
@@ -140,7 +141,7 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
             <div className="step-row">
               <label className="step-field">
                 <span>Retries</span>
-                <input
+                <Input
                   type="number"
                   min={0}
                   value={step.retry?.max_retries ?? 0}
@@ -160,7 +161,7 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
               </label>
               <label className="step-field">
                 <span>Backoff (s)</span>
-                <input
+                <Input
                   type="number"
                   min={0}
                   value={step.retry?.backoff_seconds ?? 0}
@@ -180,7 +181,7 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
               </label>
               <label className="step-field">
                 <span>Timeout (s)</span>
-                <input
+                <Input
                   type="number"
                   min={0}
                   value={step.timeout_seconds ?? ""}

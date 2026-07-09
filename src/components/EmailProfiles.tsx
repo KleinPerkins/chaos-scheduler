@@ -10,6 +10,7 @@ import {
 } from "../lib/commands";
 import { EMAIL_FROM_NAME } from "../lib/branding";
 import Notice from "./ui/Notice";
+import Input from "./Input";
 
 const MASK = "••••••••";
 
@@ -200,7 +201,7 @@ export default function EmailProfiles() {
             <label className="settings-label" htmlFor="profile-name">
               Profile Name
             </label>
-            <input
+            <Input
               id="profile-name"
               type="text"
               value={editing.name}
@@ -222,7 +223,7 @@ export default function EmailProfiles() {
             <label className="settings-label" htmlFor="profile-recipient">
               Recipient
             </label>
-            <input
+            <Input
               id="profile-recipient"
               type="email"
               value={editing.alert_email}
@@ -260,7 +261,7 @@ export default function EmailProfiles() {
               <label className="settings-label" htmlFor="profile-host">
                 SMTP Host
               </label>
-              <input
+              <Input
                 id="profile-host"
                 type="text"
                 value={editing.smtp_host}
@@ -272,7 +273,7 @@ export default function EmailProfiles() {
               <label className="settings-label" htmlFor="profile-port">
                 Port
               </label>
-              <input
+              <Input
                 id="profile-port"
                 type="number"
                 value={editing.smtp_port}
@@ -287,7 +288,7 @@ export default function EmailProfiles() {
             <label className="settings-label" htmlFor="profile-user">
               SMTP Username
             </label>
-            <input
+            <Input
               id="profile-user"
               type="text"
               value={editing.smtp_user}
@@ -300,7 +301,7 @@ export default function EmailProfiles() {
             <label className="settings-label" htmlFor="profile-password">
               SMTP Password
             </label>
-            <input
+            <Input
               id="profile-password"
               type="password"
               value={editing.smtp_password}
@@ -314,7 +315,7 @@ export default function EmailProfiles() {
               <label className="settings-label" htmlFor="profile-from-address">
                 From Address
               </label>
-              <input
+              <Input
                 id="profile-from-address"
                 type="text"
                 value={editing.from_address}
@@ -326,7 +327,7 @@ export default function EmailProfiles() {
               <label className="settings-label" htmlFor="profile-from-name">
                 From Name
               </label>
-              <input
+              <Input
                 id="profile-from-name"
                 type="text"
                 value={editing.from_name}

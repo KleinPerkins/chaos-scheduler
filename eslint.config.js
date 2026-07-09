@@ -39,6 +39,18 @@ export default defineConfig([
   {
     files: ["src/**/*.{ts,tsx}"],
     ...jsxA11yRecommended,
+    settings: {
+      ...jsxA11yRecommended.settings,
+      // The `Input` primitive (src/components/Input.tsx) is a thin, class-less
+      // wrapper that renders a native `<input>`, so a11y rules (e.g.
+      // label-has-associated-control) must treat it as that control, not as a
+      // new unknown element.
+      "jsx-a11y": {
+        components: {
+          Input: "input",
+        },
+      },
+    },
     rules: {
       ...jsxA11yRecommended.rules,
       "jsx-a11y/anchor-is-valid": "off",

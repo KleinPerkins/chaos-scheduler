@@ -13,6 +13,7 @@ import {
   isCommandUnavailable,
 } from "../lib/commands";
 import Button from "./Button";
+import Input from "./Input";
 import type {
   Workflow,
   AvailableScript,
@@ -360,7 +361,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           <label className="editor-label" htmlFor="wf-name">
             Name
           </label>
-          <input
+          <Input
             id="wf-name"
             type="text"
             value={name}
