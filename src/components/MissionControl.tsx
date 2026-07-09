@@ -19,8 +19,9 @@ import {
   type Run,
 } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
-import { formatRunStatusLabel } from "../lib/runStatus";
+import { formatRunStatusLabel, statusKey } from "../lib/runStatus";
 import StatusBadge from "./StatusBadge";
+import StatusDot from "./StatusDot";
 import "./MissionControl.css";
 
 export type MissionTab =
@@ -91,10 +92,6 @@ function formatBytes(value?: number | null): string {
   if (value == null) return "no samples";
   const mib = value / 1024 / 1024;
   return `${mib.toFixed(mib > 99 ? 0 : 1)} MiB`;
-}
-
-function statusClass(status: string) {
-  return status === "success" || status === "succeeded" ? "success" : status;
 }
 
 function EmptyPanel({ children }: { children: string }) {
@@ -274,14 +271,14 @@ function ActivityList({
               key={item.id}
               onClick={() => onOpenRun(item.run_id, item.workflow_id)}
             >
-              <span className={`mc-dot ${statusClass(item.status)}`} />
+              <StatusDot variant="mc-dot" status={statusKey(item.status)} />
               <span>
                 <strong>{item.workflow_name}</strong>
                 <small>
                   {item.domain} / {environmentOf(item)}
                 </small>
               </span>
-              <StatusBadge status={statusClass(item.status)}>
+              <StatusBadge status={statusKey(item.status)}>
                 {formatRunStatusLabel(item.status)}
               </StatusBadge>
               <time dateTime={item.started_at}>
@@ -350,12 +347,12 @@ function RecentRuns({
               key={run.id}
               onClick={() => onOpenRun(run.id, run.workflow_id)}
             >
-              <span className={`mc-dot ${statusClass(run.status)}`} />
+              <StatusDot variant="mc-dot" status={statusKey(run.status)} />
               <span>
                 <strong>{run.workflow_name ?? run.workflow_id}</strong>
                 <small>{run.workflow_id.slice(0, 8)}</small>
               </span>
-              <StatusBadge status={statusClass(run.status)}>
+              <StatusBadge status={statusKey(run.status)}>
                 {formatRunStatusLabel(run.status)}
               </StatusBadge>
               <time dateTime={run.started_at}>
