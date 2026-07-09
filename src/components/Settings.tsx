@@ -3,6 +3,7 @@ import Button from "./Button";
 import PageHeader from "./PageHeader";
 import Input from "./Input";
 import SettingsField from "./SettingsField";
+import SettingsCheck from "./SettingsCheck";
 import {
   getAppConfig,
   getLaunchAtLogin,
@@ -345,28 +346,22 @@ export default function Settings() {
         <section className="settings-section">
           <h2 className="settings-section-title">Notifications</h2>
           <div className="settings-row">
-            <label className="settings-check">
-              <input
-                type="checkbox"
-                checked={notifyOnFailure}
-                onChange={(e) =>
-                  handleNotifChange(e.target.checked, notifyOnSuccess)
-                }
-              />
-              Notify on workflow failure
-            </label>
+            <SettingsCheck
+              checked={notifyOnFailure}
+              onChange={(e) =>
+                handleNotifChange(e.target.checked, notifyOnSuccess)
+              }
+              label="Notify on workflow failure"
+            />
           </div>
           <div className="settings-row">
-            <label className="settings-check">
-              <input
-                type="checkbox"
-                checked={notifyOnSuccess}
-                onChange={(e) =>
-                  handleNotifChange(notifyOnFailure, e.target.checked)
-                }
-              />
-              Notify on workflow success
-            </label>
+            <SettingsCheck
+              checked={notifyOnSuccess}
+              onChange={(e) =>
+                handleNotifChange(notifyOnFailure, e.target.checked)
+              }
+              label="Notify on workflow success"
+            />
           </div>
         </section>
 
@@ -378,14 +373,11 @@ export default function Settings() {
           </span>
 
           <div className="settings-row">
-            <label className="settings-check">
-              <input
-                type="checkbox"
-                checked={emailConfig.enabled}
-                onChange={(e) => updateEmailField("enabled", e.target.checked)}
-              />
-              Enable email failure alerts
-            </label>
+            <SettingsCheck
+              checked={emailConfig.enabled}
+              onChange={(e) => updateEmailField("enabled", e.target.checked)}
+              label="Enable email failure alerts"
+            />
           </div>
 
           {emailConfig.enabled && (
@@ -610,15 +602,12 @@ export default function Settings() {
             />
           </SettingsField>
           <div className="settings-row">
-            <label className="settings-check">
-              <input
-                type="checkbox"
-                checked={updateSnapshot?.background_check_enabled ?? true}
-                disabled={prefsBusy}
-                onChange={(e) => handleBackgroundCheckToggle(e.target.checked)}
-              />
-              Check for updates automatically
-            </label>
+            <SettingsCheck
+              checked={updateSnapshot?.background_check_enabled ?? true}
+              disabled={prefsBusy}
+              onChange={(e) => handleBackgroundCheckToggle(e.target.checked)}
+              label="Check for updates automatically"
+            />
           </div>
           <div className="settings-row settings-update-row">
             <Button
@@ -693,14 +682,11 @@ export default function Settings() {
         <section className="settings-section">
           <h2 className="settings-section-title">System</h2>
           <div className="settings-row">
-            <label className="settings-check">
-              <input
-                type="checkbox"
-                checked={launchAtLogin}
-                onChange={(e) => handleLaunchToggle(e.target.checked)}
-              />
-              Launch at login
-            </label>
+            <SettingsCheck
+              checked={launchAtLogin}
+              onChange={(e) => handleLaunchToggle(e.target.checked)}
+              label="Launch at login"
+            />
             <span className="settings-hint">
               Creates a launchd plist to start the scheduler on macOS login
             </span>

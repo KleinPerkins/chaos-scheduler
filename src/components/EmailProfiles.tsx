@@ -12,6 +12,7 @@ import { EMAIL_FROM_NAME } from "../lib/branding";
 import Notice from "./ui/Notice";
 import Input from "./Input";
 import SettingsField from "./SettingsField";
+import SettingsCheck from "./SettingsCheck";
 
 const MASK = "••••••••";
 
@@ -208,14 +209,11 @@ export default function EmailProfiles() {
             />
           </SettingsField>
 
-          <label className="settings-check">
-            <input
-              type="checkbox"
-              checked={editing.enabled}
-              onChange={(e) => update("enabled", e.target.checked)}
-            />
-            Enabled
-          </label>
+          <SettingsCheck
+            checked={editing.enabled}
+            onChange={(e) => update("enabled", e.target.checked)}
+            label="Enabled"
+          />
 
           <SettingsField label="Recipient" htmlFor="profile-recipient">
             <Input
