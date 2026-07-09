@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.1.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.0.4...chaos-scheduler-v1.1.0) (2026-07-09)
+
+
+### Features
+
+* **brand:** add monochrome menu-bar tray glyph ([#148](https://github.com/KleinPerkins/chaos-scheduler/issues/148)) ([21e4b4e](https://github.com/KleinPerkins/chaos-scheduler/commit/21e4b4e66148d4b1db91f99eaa722c4f5a3cb840))
+* design-system token foundation + orbital-8 app icon ([#146](https://github.com/KleinPerkins/chaos-scheduler/issues/146)) ([b25ce59](https://github.com/KleinPerkins/chaos-scheduler/commit/b25ce594189594256ae120ce0c58e18ba4b9cce7))
+* **tokens:** emit figma-tokens.json mirror manifest ([#149](https://github.com/KleinPerkins/chaos-scheduler/issues/149)) ([7f6929c](https://github.com/KleinPerkins/chaos-scheduler/commit/7f6929c41570655afb36ea20f8ab05f969998676))
+* **ui:** extract Button primitive and add Code Connect mapping ([#155](https://github.com/KleinPerkins/chaos-scheduler/issues/155)) ([b19a3e5](https://github.com/KleinPerkins/chaos-scheduler/commit/b19a3e5d072635965118addef96c40d2bd236bd2))
+* **ui:** extract EditorField component and migrate call sites ([#172](https://github.com/KleinPerkins/chaos-scheduler/issues/172)) ([03031a8](https://github.com/KleinPerkins/chaos-scheduler/commit/03031a88eb09e7db8c49ad88658cd741437b22ff))
+* **ui:** extract EnvSelect primitive and add Code Connect mapping ([#167](https://github.com/KleinPerkins/chaos-scheduler/issues/167)) ([1e22691](https://github.com/KleinPerkins/chaos-scheduler/commit/1e22691b5c608069844e7f965229017639689c9b))
+* **ui:** extract Field primitive ([#161](https://github.com/KleinPerkins/chaos-scheduler/issues/161)) ([2b05bf4](https://github.com/KleinPerkins/chaos-scheduler/commit/2b05bf4534581f2e4170adc50d26d0906d1f31b1))
+* **ui:** extract Input primitive ([#159](https://github.com/KleinPerkins/chaos-scheduler/issues/159)) ([e4a7f90](https://github.com/KleinPerkins/chaos-scheduler/commit/e4a7f90e55df6d400be3f8df5698fb3254fc1c4b))
+* **ui:** extract Modal shell primitive ([#162](https://github.com/KleinPerkins/chaos-scheduler/issues/162)) ([1d2b388](https://github.com/KleinPerkins/chaos-scheduler/commit/1d2b3884221175c9fdda7108d657908765d0eca5))
+* **ui:** extract NavItem primitive and add Code Connect mapping ([#165](https://github.com/KleinPerkins/chaos-scheduler/issues/165)) ([a2b2c2f](https://github.com/KleinPerkins/chaos-scheduler/commit/a2b2c2fa513da0c7d23729f3598555e70449269b))
+* **ui:** extract PageHeader component and migrate call sites ([#169](https://github.com/KleinPerkins/chaos-scheduler/issues/169)) ([06a369f](https://github.com/KleinPerkins/chaos-scheduler/commit/06a369f7757d3725ab9d473d7dca1e2e463a74f0))
+* **ui:** extract RunsTable primitive and add Code Connect mapping ([#168](https://github.com/KleinPerkins/chaos-scheduler/issues/168)) ([249a0bf](https://github.com/KleinPerkins/chaos-scheduler/commit/249a0bf2a0a8f22537a1c63c930f6f9f5f14e25b))
+* **ui:** extract Select primitive ([#160](https://github.com/KleinPerkins/chaos-scheduler/issues/160)) ([de8d737](https://github.com/KleinPerkins/chaos-scheduler/commit/de8d7377c649cf2d6c38b6701dfbae4f73a501b6))
+* **ui:** extract SettingsCheck component and migrate call sites ([#171](https://github.com/KleinPerkins/chaos-scheduler/issues/171)) ([491c7d1](https://github.com/KleinPerkins/chaos-scheduler/commit/491c7d1fa93dc323f41f58fff494be11acbc86de))
+* **ui:** extract SettingsField component and migrate call sites ([#170](https://github.com/KleinPerkins/chaos-scheduler/issues/170)) ([e4473f4](https://github.com/KleinPerkins/chaos-scheduler/commit/e4473f461604f21f5d7b1f44755f2681a20e7898))
+* **ui:** extract Sidebar primitive and add Code Connect mapping ([#166](https://github.com/KleinPerkins/chaos-scheduler/issues/166)) ([a52a9a2](https://github.com/KleinPerkins/chaos-scheduler/commit/a52a9a2b55917eca23f4ddcaa6a6e6a93f63cf96))
+* **ui:** extract StatCard primitive and add Code Connect mapping ([#164](https://github.com/KleinPerkins/chaos-scheduler/issues/164)) ([5df6a45](https://github.com/KleinPerkins/chaos-scheduler/commit/5df6a45c51d64368183bf66ab02908da5851a33e))
+* **ui:** extract StatusBadge primitive and add Code Connect mapping ([#156](https://github.com/KleinPerkins/chaos-scheduler/issues/156)) ([a0fce59](https://github.com/KleinPerkins/chaos-scheduler/commit/a0fce593510d10f1d53fafcd28c76b2e04c65375))
+* **ui:** extract StatusDot primitive ([#158](https://github.com/KleinPerkins/chaos-scheduler/issues/158)) ([1ed3129](https://github.com/KleinPerkins/chaos-scheduler/commit/1ed31296cd832c78ed226242cbb79ce3c16d97fb))
+* **ui:** extract Textarea primitive ([#163](https://github.com/KleinPerkins/chaos-scheduler/issues/163)) ([061019f](https://github.com/KleinPerkins/chaos-scheduler/commit/061019f16a176e2226aad6c0f5ea98853c8a68b0))
+
 ## [1.0.4](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.0.3...chaos-scheduler-v1.0.4) (2026-07-07)
 
 

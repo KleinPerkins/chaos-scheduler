@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v1.0.2...mcp-server-v1.1.0) (2026-07-09)
+
+
+### Features
+
+* design-system token foundation + orbital-8 app icon ([#146](https://github.com/KleinPerkins/chaos-scheduler/issues/146)) ([b25ce59](https://github.com/KleinPerkins/chaos-scheduler/commit/b25ce594189594256ae120ce0c58e18ba4b9cce7))
+
 ## [1.0.2](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v1.0.1...mcp-server-v1.0.2) (2026-07-07)
 
 
