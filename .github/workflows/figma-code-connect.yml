@@ -1,0 +1,95 @@
+name: Figma Code Connect
+
+# Publishes the repo's Figma Code Connect mappings (src/**/*.figma.tsx) to the
+# Figma design file so the parser-based mappings — including full prop
+# transforms such as `preference = figma.enum("Selected", {...})` — stay in
+# sync with the code. This is the durable replacement for the one-off MCP
+# node->component stopgap (which only emits generic variant props).
+#
+#   pull_request      -> `figma connect publish --dry-run` (validate parsing
+#                        only; never publishes)
+#   push to main      -> `figma connect publish` (real publish)
+#   workflow_dispatch -> real publish (manual re-run, e.g. after fixing a PAT)
+#
+# Intentionally NOT part of the `ci-required` fan-in: a transient Figma API or
+# PAT-scope issue must never block a code merge. The job is secret-dependent so
+# it self-guards against fork PRs, where `FIGMA_ACCESS_TOKEN` is unavailable.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**/*.figma.tsx"
+      - "figma.config.json"
+      - ".github/workflows/figma-code-connect.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**/*.figma.tsx"
+      - "figma.config.json"
+      - ".github/workflows/figma-code-connect.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: figma-code-connect-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish Code Connect
+    runs-on: ubuntu-latest
+    # Run for push / manual dispatch always; for PRs only from same-repo
+    # branches, because fork PRs can't read `FIGMA_ACCESS_TOKEN` and would
+    # otherwise hard-fail on a missing token.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Guard — FIGMA_ACCESS_TOKEN present
+        env:
+          FIGMA_ACCESS_TOKEN: ${{ secrets.FIGMA_ACCESS_TOKEN }}
+        run: |
+          if [ -z "${FIGMA_ACCESS_TOKEN}" ]; then
+            echo "::error title=Missing FIGMA_ACCESS_TOKEN::The FIGMA_ACCESS_TOKEN repository secret is not set. Add a Figma personal access token with 'Code Connect: write' and 'File content: read' scopes (Settings -> Secrets and variables -> Actions)."
+            exit 1
+          fi
+      - name: Publish Code Connect mappings
+        env:
+          FIGMA_ACCESS_TOKEN: ${{ secrets.FIGMA_ACCESS_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          # PR = validate only (never publishes); push/dispatch = real publish.
+          args=(connect publish)
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            args+=(--dry-run)
+          fi
+          args+=(--exit-on-unreadable-files)
+          echo "Running: figma ${args[*]}"
+          set +e
+          npx --no-install figma "${args[@]}" 2>&1 | tee figma-connect.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "${rc}" -ne 0 ]; then
+            if grep -qiE '403|forbidden|unauthorized|not authorized|insufficient|permission|scope|access token' figma-connect.log; then
+              echo "::error title=Figma PAT scope::figma connect publish failed with an auth/scope error (exit ${rc}). The FIGMA_ACCESS_TOKEN PAT most likely lacks the 'Code Connect: write' scope (it also needs 'File content: read'). Update the PAT scopes and re-run this workflow. Docs: https://www.figma.com/developers/api#access-tokens"
+            else
+              echo "::error title=Code Connect publish failed::figma connect publish exited ${rc}. See the log above."
+            fi
+            exit "${rc}"
+          fi
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            echo "Dry-run OK — Code Connect files parse and would publish."
+          else
+            echo "Published Code Connect mappings to Figma."
+          fi
