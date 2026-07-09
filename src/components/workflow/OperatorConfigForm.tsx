@@ -2,6 +2,7 @@ import type { TypedSpec } from "../../lib/commands";
 import { OPERATORS, defaultOperatorConfig } from "./specHelpers";
 import Input from "../Input";
 import Select from "../Select";
+import Textarea from "../Textarea";
 
 interface Props {
   spec: TypedSpec;
@@ -169,7 +170,7 @@ export default function OperatorConfigForm({
           </label>
           <label className="editor-field">
             <span className="editor-label">Prompt</span>
-            <textarea
+            <Textarea
               value={str(config, "prompt")}
               rows={3}
               disabled={disabled}
