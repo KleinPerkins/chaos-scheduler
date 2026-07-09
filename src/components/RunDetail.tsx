@@ -9,6 +9,7 @@ import {
 } from "../lib/commands";
 import { openExternalSafe } from "../lib/openExternalSafe";
 import Button from "./Button";
+import StatCard from "./StatCard";
 import StatusBadge from "./StatusBadge";
 import StatusDot from "./StatusDot";
 import type {
@@ -144,10 +145,12 @@ function StatsGrid({ data }: { data: Record<string, number | string> }) {
   return (
     <div className="rd-stats-grid">
       {entries.map(([label, value]) => (
-        <div key={label} className="rd-stat-card">
-          <div className="rd-stat-value">{String(value)}</div>
-          <div className="rd-stat-label">{label}</div>
-        </div>
+        <StatCard
+          key={label}
+          variant="rd"
+          value={String(value)}
+          label={label}
+        />
       ))}
     </div>
   );

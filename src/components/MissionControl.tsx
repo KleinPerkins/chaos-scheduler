@@ -21,6 +21,7 @@ import {
 import { useEnvironments } from "../hooks/useEnvironments";
 import { formatRunStatusLabel, statusKey } from "../lib/runStatus";
 import Select from "./Select";
+import StatCard from "./StatCard";
 import StatusBadge from "./StatusBadge";
 import StatusDot from "./StatusDot";
 import "./MissionControl.css";
@@ -119,10 +120,7 @@ function HeaderStatus({ snapshot }: { snapshot: MissionControlSnapshot }) {
       </div>
       <div className="mc-stat-grid">
         {cards.map(([label, value]) => (
-          <div className="mc-stat-card" key={label}>
-            <span className="mc-stat-value">{value}</span>
-            <span className="mc-stat-label">{label}</span>
-          </div>
+          <StatCard key={label} value={value} label={label} />
         ))}
       </div>
     </section>
