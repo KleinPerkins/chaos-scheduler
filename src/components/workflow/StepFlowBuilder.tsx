@@ -1,5 +1,6 @@
 import type { StepSpec } from "../../lib/commands";
 import Button from "../Button";
+import Field from "../Field";
 import Input from "../Input";
 import Select from "../Select";
 import { emptyStep } from "./specHelpers";
@@ -58,17 +59,15 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
           <fieldset className="step-card" key={index} disabled={disabled}>
             <legend className="step-card-legend">Step {index + 1}</legend>
             <div className="step-row">
-              <label className="step-field step-field-id">
-                <span>Step ID</span>
+              <Field className="step-field step-field-id" label="Step ID">
                 <Input
                   type="text"
                   value={step.id}
                   onChange={(e) => update(index, { id: e.target.value })}
                   placeholder="build"
                 />
-              </label>
-              <label className="step-field step-field-mode">
-                <span>Runs</span>
+              </Field>
+              <Field className="step-field step-field-mode" label="Runs">
                 <Select
                   value={mode}
                   onChange={(e) => setMode(index, e.target.value as Mode)}
@@ -76,7 +75,7 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
                   <option value="command">Shell command</option>
                   <option value="script">Script path</option>
                 </Select>
-              </label>
+              </Field>
               {steps.length > 1 && (
                 <Button
                   type="button"
@@ -91,8 +90,10 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
               )}
             </div>
 
-            <label className="step-field">
-              <span>{mode === "command" ? "Command" : "Script path"}</span>
+            <Field
+              className="step-field"
+              label={mode === "command" ? "Command" : "Script path"}
+            >
               <Input
                 type="text"
                 value={(mode === "command" ? step.command : step.script) ?? ""}
@@ -110,11 +111,10 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
                     : "scripts/workflows/build.sh"
                 }
               />
-            </label>
+            </Field>
 
             <div className="step-row">
-              <label className="step-field">
-                <span>Args (space-separated)</span>
+              <Field className="step-field" label="Args (space-separated)">
                 <Input
                   type="text"
                   value={step.args.join(" ")}
@@ -125,9 +125,8 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
                   }
                   placeholder="--flag value"
                 />
-              </label>
-              <label className="step-field">
-                <span>Working dir (optional)</span>
+              </Field>
+              <Field className="step-field" label="Working dir (optional)">
                 <Input
                   type="text"
                   value={step.working_dir ?? ""}
@@ -136,12 +135,11 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
                   }
                   placeholder="relative to workspace root"
                 />
-              </label>
+              </Field>
             </div>
 
             <div className="step-row">
-              <label className="step-field">
-                <span>Retries</span>
+              <Field className="step-field" label="Retries">
                 <Input
                   type="number"
                   min={0}
@@ -159,9 +157,8 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
                     });
                   }}
                 />
-              </label>
-              <label className="step-field">
-                <span>Backoff (s)</span>
+              </Field>
+              <Field className="step-field" label="Backoff (s)">
                 <Input
                   type="number"
                   min={0}
@@ -179,9 +176,8 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
                     })
                   }
                 />
-              </label>
-              <label className="step-field">
-                <span>Timeout (s)</span>
+              </Field>
+              <Field className="step-field" label="Timeout (s)">
                 <Input
                   type="number"
                   min={0}
@@ -195,7 +191,7 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
                   }
                   placeholder="none"
                 />
-              </label>
+              </Field>
             </div>
 
             {dependencyChoices.length > 0 && (
