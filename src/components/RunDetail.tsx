@@ -9,6 +9,7 @@ import {
 } from "../lib/commands";
 import { openExternalSafe } from "../lib/openExternalSafe";
 import Button from "./Button";
+import PageHeader from "./PageHeader";
 import StatCard from "./StatCard";
 import StatusBadge from "./StatusBadge";
 import StatusDot from "./StatusDot";
@@ -465,15 +466,15 @@ export default function RunDetail({ runId, onBack }: Props) {
 
   return (
     <div className="rd-page">
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">{run.workflow_name ?? "Workflow Run"}</h1>
-          {summaryTitle && <p className="page-subtitle">{summaryTitle}</p>}
-        </div>
-        <Button variant="ghost" onClick={onBack}>
-          &larr; Back
-        </Button>
-      </div>
+      <PageHeader
+        title={run.workflow_name ?? "Workflow Run"}
+        subtitle={summaryTitle}
+        actions={
+          <Button variant="ghost" onClick={onBack}>
+            &larr; Back
+          </Button>
+        }
+      />
 
       {loadError && (
         <div className="rd-error" role="alert">

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import Button from "./Button";
+import PageHeader from "./PageHeader";
 import Input from "./Input";
 import {
   getAppConfig,
@@ -275,12 +276,7 @@ export default function Settings() {
 
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Settings</h1>
-          <p className="page-subtitle">Configure the scheduler</p>
-        </div>
-      </div>
+      <PageHeader title="Settings" subtitle="Configure the scheduler" />
 
       {loadError && (
         <Notice variant="error" assertive>

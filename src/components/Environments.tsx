@@ -9,6 +9,7 @@ import {
 import type { EnvironmentPayload } from "../lib/commands";
 import EnvironmentBadge from "./EnvironmentBadge";
 import Button from "./Button";
+import PageHeader from "./PageHeader";
 import Field from "./Field";
 import Input from "./Input";
 import "./Environments.css";
@@ -141,18 +142,15 @@ export default function Environments() {
 
   return (
     <div className="environments">
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Environments</h1>
-          <p className="page-subtitle">
-            Partitions that scope queues, working directories, and workflow
-            filters.
-          </p>
-        </div>
-        <Button variant="ghost" onClick={refresh} disabled={busy}>
-          Refresh
-        </Button>
-      </div>
+      <PageHeader
+        title="Environments"
+        subtitle="Partitions that scope queues, working directories, and workflow filters."
+        actions={
+          <Button variant="ghost" onClick={refresh} disabled={busy}>
+            Refresh
+          </Button>
+        }
+      />
 
       {status && (
         <div className={`env-status env-status--${statusType}`} role="status">
