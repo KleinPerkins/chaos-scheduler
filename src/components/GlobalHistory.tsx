@@ -3,6 +3,7 @@ import { getGlobalRunHistory } from "../lib/commands";
 import type { Run } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
 import { formatRunStatusLabel } from "../lib/runStatus";
+import Button from "./Button";
 import "./RunHistory.css";
 import "./QueueView.css";
 
@@ -121,26 +122,18 @@ export default function GlobalHistory({ onViewRun }: Props) {
               onChange={(e) => setDomainFilter(e.target.value || "all")}
             />
           </label>
-          <button
-            className="btn btn-primary btn-sm"
-            onClick={load}
-            disabled={loading}
-          >
+          <Button variant="primary" size="sm" onClick={load} disabled={loading}>
             {loading ? "Loading..." : "Apply"}
-          </button>
+          </Button>
         </div>
       </div>
 
       {error ? (
         <div className="rh-error">
           <span>Global history failed to load: {error}</span>
-          <button
-            className="btn btn-ghost btn-sm"
-            onClick={load}
-            disabled={loading}
-          >
+          <Button variant="ghost" size="sm" onClick={load} disabled={loading}>
             Retry
-          </button>
+          </Button>
         </div>
       ) : runs.length === 0 ? (
         <div className="rh-empty">No runs match these filters.</div>
@@ -169,12 +162,13 @@ export default function GlobalHistory({ onViewRun }: Props) {
                 <td>{run.trigger_kind ?? "cron"}</td>
                 <td>{run.exit_code ?? "—"}</td>
                 <td>
-                  <button
-                    className="btn btn-ghost btn-sm"
+                  <Button
+                    variant="ghost"
+                    size="sm"
                     onClick={() => onViewRun(run)}
                   >
                     Details
-                  </button>
+                  </Button>
                 </td>
               </tr>
             ))}

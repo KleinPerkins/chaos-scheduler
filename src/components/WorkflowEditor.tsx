@@ -12,6 +12,7 @@ import {
   environmentOf,
   isCommandUnavailable,
 } from "../lib/commands";
+import Button from "./Button";
 import type {
   Workflow,
   AvailableScript,
@@ -321,9 +322,9 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
             {isEdit ? "Edit Workflow" : "New Workflow"}
           </h1>
         </div>
-        <button className="btn btn-ghost" onClick={onCancel}>
+        <Button variant="ghost" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
 
       <form className="editor-form" onSubmit={handleSubmit}>
@@ -653,16 +654,16 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
         )}
 
         <div className="editor-actions">
-          <button
+          <Button
             type="submit"
-            className="btn btn-primary"
+            variant="primary"
             disabled={saving || (!isManaged && !name) || !cronSchedule}
           >
             {saving ? "Saving..." : isEdit ? "Save Changes" : "Create Workflow"}
-          </button>
-          <button type="button" className="btn btn-ghost" onClick={onCancel}>
+          </Button>
+          <Button type="button" variant="ghost" onClick={onCancel}>
             Cancel
-          </button>
+          </Button>
         </div>
       </form>
     </div>

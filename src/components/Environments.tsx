@@ -8,6 +8,7 @@ import {
 } from "../lib/commands";
 import type { EnvironmentPayload } from "../lib/commands";
 import EnvironmentBadge from "./EnvironmentBadge";
+import Button from "./Button";
 import "./Environments.css";
 
 interface DraftForm {
@@ -146,9 +147,9 @@ export default function Environments() {
             filters.
           </p>
         </div>
-        <button className="btn btn-ghost" onClick={refresh} disabled={busy}>
+        <Button variant="ghost" onClick={refresh} disabled={busy}>
           Refresh
-        </button>
+        </Button>
       </div>
 
       {status && (
@@ -227,13 +228,13 @@ export default function Environments() {
               />
             </label>
           </div>
-          <button
+          <Button
             type="submit"
-            className="btn btn-primary"
+            variant="primary"
             disabled={busy || !form.name.trim()}
           >
             {busy ? "Working..." : "Create environment"}
-          </button>
+          </Button>
         </form>
       </section>
 
@@ -278,19 +279,21 @@ export default function Environments() {
                       />
                     </label>
                     <div className="env-card-actions">
-                      <button
-                        className="btn btn-primary btn-sm"
+                      <Button
+                        variant="primary"
+                        size="sm"
                         onClick={() => saveEdit(env.id)}
                         disabled={busy}
                       >
                         Save
-                      </button>
-                      <button
-                        className="btn btn-ghost btn-sm"
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
                         onClick={() => setEditingId(null)}
                       >
                         Cancel
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 ) : (
@@ -324,14 +327,20 @@ export default function Environments() {
                       )}
                     </dl>
                     <div className="env-card-actions">
-                      <button
-                        className="btn btn-ghost btn-sm"
+                      <Button
+                        variant="ghost"
+                        size="sm"
                         onClick={() => startEdit(env.id)}
                       >
                         Edit
-                      </button>
-                      <button
-                        className={`btn btn-sm ${pendingDeleteId === env.id ? "btn-danger-confirm" : "btn-danger"}`}
+                      </Button>
+                      <Button
+                        size="sm"
+                        className={
+                          pendingDeleteId === env.id
+                            ? "btn-danger-confirm"
+                            : "btn-danger"
+                        }
                         onClick={() => handleDelete(env.id)}
                         disabled={busy || env.managed_externally}
                         title={
@@ -341,7 +350,7 @@ export default function Environments() {
                         }
                       >
                         {pendingDeleteId === env.id ? "Confirm?" : "Delete"}
-                      </button>
+                      </Button>
                     </div>
                   </>
                 )}

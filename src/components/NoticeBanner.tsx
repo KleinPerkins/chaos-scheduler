@@ -1,3 +1,4 @@
+import Button from "./Button";
 import "./NoticeBanner.css";
 
 export type NoticeTone = "info" | "success" | "error";
@@ -20,14 +21,16 @@ export default function NoticeBanner({
     >
       <span className="notice-banner__message">{message}</span>
       {onDismiss && (
-        <button
+        <Button
           type="button"
-          className="btn btn-ghost btn-sm notice-banner__dismiss"
+          variant="ghost"
+          size="sm"
+          className="notice-banner__dismiss"
           onClick={onDismiss}
           aria-label="Dismiss notice"
         >
           Dismiss
-        </button>
+        </Button>
       )}
     </div>
   );

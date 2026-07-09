@@ -3,6 +3,7 @@ import Notice from "./ui/Notice";
 import { useAppUpdate } from "../hooks/useAppUpdate";
 import { openExternalSafe } from "../lib/openExternalSafe";
 import { RELEASES_URL } from "../lib/branding";
+import Button from "./Button";
 import "./UpdateBanner.css";
 
 /**
@@ -116,30 +117,33 @@ export default function UpdateBanner() {
           )}
         </div>
         <div className="update-banner__actions">
-          <button
+          <Button
             type="button"
-            className="btn btn-primary btn-sm"
+            variant="primary"
+            size="sm"
             disabled={downloading || busy}
             onClick={handleInstall}
           >
             {downloading ? "Installing…" : "Install and Restart"}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="btn btn-ghost btn-sm"
+            variant="ghost"
+            size="sm"
             disabled={!latest_version}
             onClick={handleReleaseNotes}
           >
             Release notes
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="btn btn-ghost btn-sm"
+            variant="ghost"
+            size="sm"
             disabled={downloading}
             onClick={handleSkip}
           >
             Skip this version
-          </button>
+          </Button>
         </div>
       </div>
     </Notice>

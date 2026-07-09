@@ -10,6 +10,7 @@ import {
   openRunDetail,
   environmentOf,
 } from "../lib/commands";
+import Button from "./Button";
 import type { NextRun } from "../lib/commands";
 import { PRODUCT_SHORT_NAME } from "../lib/branding";
 import { formatRunStatusLabel } from "../lib/runStatus";
@@ -170,8 +171,9 @@ export default function MenuBarPopup() {
                             in {formatTimeUntil(nr.next_time)}
                           </span>
                         </div>
-                        <button
-                          className="btn btn-ghost btn-sm"
+                        <Button
+                          variant="ghost"
+                          size="sm"
                           onClick={() => handleRun(nr.workflow_id)}
                           disabled={runningWorkflowId === nr.workflow_id}
                           title="Run now"
@@ -186,7 +188,7 @@ export default function MenuBarPopup() {
                               aria-hidden="true"
                             />
                           )}
-                        </button>
+                        </Button>
                       </div>
                     ))}
                   </div>
@@ -237,26 +239,24 @@ export default function MenuBarPopup() {
               ? "Updating…"
               : `Update available: v${updateSnapshot?.latest_version ?? "?"}`}
           </span>
-          <button
-            className="btn btn-primary btn-sm"
+          <Button
+            variant="primary"
+            size="sm"
             disabled={updateDownloading || updating}
             onClick={handleUpdate}
           >
             {updateDownloading ? "Updating…" : "Update"}
-          </button>
+          </Button>
         </div>
       )}
 
       <div className="popup-footer">
-        <button
-          className="btn btn-primary btn-sm"
-          onClick={() => openDashboard()}
-        >
+        <Button variant="primary" size="sm" onClick={() => openDashboard()}>
           Open Mission Control
-        </button>
-        <button className="btn btn-ghost btn-sm" onClick={() => quitApp()}>
+        </Button>
+        <Button variant="ghost" size="sm" onClick={() => quitApp()}>
           Quit
-        </button>
+        </Button>
       </div>
     </div>
   );

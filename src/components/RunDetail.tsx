@@ -8,6 +8,7 @@ import {
   analyzeRunError,
 } from "../lib/commands";
 import { openExternalSafe } from "../lib/openExternalSafe";
+import Button from "./Button";
 import type {
   ErrorAnalysis,
   Run,
@@ -165,12 +166,13 @@ function ItemList({
           </div>
           {item.detail && <div className="rd-item-detail">{item.detail}</div>}
           {item.url && (
-            <button
-              className="btn btn-ghost btn-sm"
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => openExternalSafe(item.url!)}
             >
               Open
-            </button>
+            </Button>
           )}
         </div>
       ))}
@@ -399,9 +401,9 @@ export default function RunDetail({ runId, onBack }: Props) {
       <div className="rd-page">
         <div className="page-header">
           <h1 className="page-title">Run Details</h1>
-          <button className="btn btn-ghost" onClick={onBack}>
+          <Button variant="ghost" onClick={onBack}>
             &larr; Back
-          </button>
+          </Button>
         </div>
         <div className="rd-loading">Loading run...</div>
       </div>
@@ -413,19 +415,20 @@ export default function RunDetail({ runId, onBack }: Props) {
       <div className="rd-page">
         <div className="page-header">
           <h1 className="page-title">Run Details</h1>
-          <button className="btn btn-ghost" onClick={onBack}>
+          <Button variant="ghost" onClick={onBack}>
             &larr; Back
-          </button>
+          </Button>
         </div>
         <div className="rd-error">
           <span>Failed to load run: {loadError}</span>
-          <button
-            className="btn btn-ghost btn-sm"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => void loadRun()}
             disabled={loading}
           >
             Retry
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -462,21 +465,22 @@ export default function RunDetail({ runId, onBack }: Props) {
           <h1 className="page-title">{run.workflow_name ?? "Workflow Run"}</h1>
           {summaryTitle && <p className="page-subtitle">{summaryTitle}</p>}
         </div>
-        <button className="btn btn-ghost" onClick={onBack}>
+        <Button variant="ghost" onClick={onBack}>
           &larr; Back
-        </button>
+        </Button>
       </div>
 
       {loadError && (
         <div className="rd-error" role="alert">
           <span>Refresh failed: {loadError}</span>
-          <button
-            className="btn btn-ghost btn-sm"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => void loadRun()}
             disabled={loading}
           >
             Retry
-          </button>
+          </Button>
         </div>
       )}
 
@@ -502,12 +506,13 @@ export default function RunDetail({ runId, onBack }: Props) {
           </span>
         )}
         {run.result_url && (
-          <button
-            className="btn btn-ghost btn-sm"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => openExternalSafe(run.result_url!)}
           >
             Open Result
-          </button>
+          </Button>
         )}
       </div>
 
@@ -687,13 +692,14 @@ export default function RunDetail({ runId, onBack }: Props) {
 
       {isFailed && !analysis && (
         <div className="rd-analyze-prompt">
-          <button
-            className="btn btn-primary btn-sm"
+          <Button
+            variant="primary"
+            size="sm"
             onClick={handleAnalyze}
             disabled={analyzing}
           >
             {analyzing ? "Analyzing..." : "Analyze Error with AI"}
-          </button>
+          </Button>
           {!analyzing && (
             <span className="rd-analyze-hint">
               Uses Claude to diagnose the failure and suggest fixes

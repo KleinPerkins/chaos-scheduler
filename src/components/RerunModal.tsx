@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import Button from "./Button";
 import "./RerunModal.css";
 
 interface Props {
@@ -91,17 +92,17 @@ export default function RerunModal({
             </div>
           )}
           <div className="rerun-modal-actions">
-            <button
+            <Button
               type="button"
-              className="btn btn-ghost"
+              variant="ghost"
               disabled={busy}
               onClick={onCancel}
             >
               Cancel
-            </button>
-            <button type="submit" className="btn btn-primary" disabled={busy}>
+            </Button>
+            <Button type="submit" variant="primary" disabled={busy}>
               {busy ? "Rerunning…" : "Rerun"}
-            </button>
+            </Button>
           </div>
         </form>
       </div>
