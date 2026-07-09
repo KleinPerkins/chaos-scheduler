@@ -10,6 +10,7 @@ import {
 import { openExternalSafe } from "../lib/openExternalSafe";
 import Button from "./Button";
 import StatusBadge from "./StatusBadge";
+import StatusDot from "./StatusDot";
 import type {
   ErrorAnalysis,
   Run,
@@ -524,7 +525,7 @@ export default function RunDetail({ runId, onBack }: Props) {
             {tasks.map((task) => (
               <div key={task.id} className="rd-task-row">
                 <div className="rd-task-label">
-                  <span className={`status-dot ${task.status}`} />
+                  <StatusDot status={task.status} />
                   <span>{task.task_id}</span>
                   <span className="rd-task-attempt">
                     attempt {task.attempt_number}
