@@ -9,6 +9,7 @@ import RerunModal from "./RerunModal";
 import type { Run, Workflow, WorkflowHistoryBucket } from "../lib/commands";
 import { formatRunStatusLabel } from "../lib/runStatus";
 import Button from "./Button";
+import StatusBadge from "./StatusBadge";
 import "./RunHistory.css";
 
 interface Props {
@@ -151,9 +152,9 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
               {runs.map((run) => (
                 <tr key={run.id}>
                   <td>
-                    <span className={`status-badge ${run.status}`}>
+                    <StatusBadge status={run.status}>
                       {formatRunStatusLabel(run.status)}
-                    </span>
+                    </StatusBadge>
                   </td>
                   <td>{formatDate(run.started_at)}</td>
                   <td>{formatDuration(run.started_at, run.finished_at)}</td>

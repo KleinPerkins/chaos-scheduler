@@ -4,6 +4,7 @@ import type { Run } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
 import { formatRunStatusLabel } from "../lib/runStatus";
 import Button from "./Button";
+import StatusBadge from "./StatusBadge";
 import "./RunHistory.css";
 import "./QueueView.css";
 
@@ -153,9 +154,9 @@ export default function GlobalHistory({ onViewRun }: Props) {
             {runs.map((run) => (
               <tr key={run.id}>
                 <td>
-                  <span className={`status-badge ${run.status}`}>
+                  <StatusBadge status={run.status}>
                     {formatRunStatusLabel(run.status)}
-                  </span>
+                  </StatusBadge>
                 </td>
                 <td>{run.workflow_name ?? run.workflow_id}</td>
                 <td>{formatDate(run.started_at)}</td>

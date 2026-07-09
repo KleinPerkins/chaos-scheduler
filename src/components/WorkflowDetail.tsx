@@ -14,6 +14,7 @@ import { formatRunStatusLabel } from "../lib/runStatus";
 import EnvironmentBadge from "./EnvironmentBadge";
 import Notice from "./ui/Notice";
 import Button from "./Button";
+import StatusBadge from "./StatusBadge";
 import "./WorkflowDetail.css";
 
 interface Props {
@@ -245,9 +246,9 @@ export default function WorkflowDetail({
               <span className="wd-stat-label">Last run</span>
               <span className="wd-stat-value">
                 {lastRun ? (
-                  <span className={`status-badge ${lastRun.status}`}>
+                  <StatusBadge status={lastRun.status}>
                     {formatRunStatusLabel(lastRun.status)}
-                  </span>
+                  </StatusBadge>
                 ) : (
                   "No runs yet"
                 )}
@@ -321,9 +322,9 @@ export default function WorkflowDetail({
               {runs.map((run) => (
                 <tr key={run.id}>
                   <td>
-                    <span className={`status-badge ${run.status}`}>
+                    <StatusBadge status={run.status}>
                       {formatRunStatusLabel(run.status)}
-                    </span>
+                    </StatusBadge>
                   </td>
                   <td>{formatDate(run.started_at)}</td>
                   <td>{formatDuration(run.started_at, run.finished_at)}</td>

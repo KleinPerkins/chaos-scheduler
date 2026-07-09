@@ -9,6 +9,7 @@ import {
 } from "../lib/commands";
 import { openExternalSafe } from "../lib/openExternalSafe";
 import Button from "./Button";
+import StatusBadge from "./StatusBadge";
 import type {
   ErrorAnalysis,
   Run,
@@ -486,9 +487,9 @@ export default function RunDetail({ runId, onBack }: Props) {
 
       {/* Run metadata bar */}
       <div className="rd-meta-bar">
-        <span className={`status-badge ${run.status}`}>
+        <StatusBadge status={run.status}>
           {formatRunStatusLabel(run.status)}
-        </span>
+        </StatusBadge>
         {isActiveRunStatus(run.status) && (
           <span className="rd-live-indicator" aria-live="polite">
             Live
@@ -556,9 +557,9 @@ export default function RunDetail({ runId, onBack }: Props) {
                     <td>{taskId}</td>
                     <td>{attempt.attempt_number}</td>
                     <td>
-                      <span className={`status-badge ${attempt.status}`}>
+                      <StatusBadge status={attempt.status}>
                         {formatRunStatusLabel(attempt.status)}
-                      </span>
+                      </StatusBadge>
                     </td>
                     <td>
                       {formatDuration(
@@ -630,9 +631,9 @@ export default function RunDetail({ runId, onBack }: Props) {
                     <td>{rel.task_id ?? "workflow"}</td>
                     <td>{rel.wait ? "wait" : "fire-and-forget"}</td>
                     <td>
-                      <span className={`status-badge ${rel.status}`}>
+                      <StatusBadge status={rel.status}>
                         {formatRunStatusLabel(rel.status)}
-                      </span>
+                      </StatusBadge>
                     </td>
                     <td className="rd-meta-mono">
                       {rel.child_run_id ??
