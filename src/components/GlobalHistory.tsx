@@ -2,29 +2,16 @@ import { useEffect, useState } from "react";
 import { getGlobalRunHistory } from "../lib/commands";
 import type { Run } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
-import { formatRunStatusLabel } from "../lib/runStatus";
 import Button from "./Button";
 import EnvSelect from "./EnvSelect";
 import Input from "./Input";
+import RunsTable from "./RunsTable";
 import Select from "./Select";
-import StatusBadge from "./StatusBadge";
 import "./RunHistory.css";
 import "./QueueView.css";
 
 interface Props {
   onViewRun: (run: Run) => void;
-}
-
-function formatDate(iso: string): string {
-  const d = new Date(iso);
-  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${d.toLocaleTimeString(
-    [],
-    {
-      hour: "2-digit",
-      minute: "2-digit",
-      timeZoneName: "short",
-    },
-  )}`;
 }
 
 export default function GlobalHistory({ onViewRun }: Props) {
@@ -134,45 +121,12 @@ export default function GlobalHistory({ onViewRun }: Props) {
             Retry
           </Button>
         </div>
-      ) : runs.length === 0 ? (
-        <div className="rh-empty">No runs match these filters.</div>
       ) : (
-        <table className="rh-table">
-          <thead>
-            <tr>
-              <th>Status</th>
-              <th>Workflow</th>
-              <th>Started</th>
-              <th>Trigger</th>
-              <th>Exit Code</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {runs.map((run) => (
-              <tr key={run.id}>
-                <td>
-                  <StatusBadge status={run.status}>
-                    {formatRunStatusLabel(run.status)}
-                  </StatusBadge>
-                </td>
-                <td>{run.workflow_name ?? run.workflow_id}</td>
-                <td>{formatDate(run.started_at)}</td>
-                <td>{run.trigger_kind ?? "cron"}</td>
-                <td>{run.exit_code ?? "—"}</td>
-                <td>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => onViewRun(run)}
-                  >
-                    Details
-                  </Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <RunsTable
+          runs={runs}
+          emptyLabel="No runs match these filters."
+          onViewRun={onViewRun}
+        />
       )}
     </div>
   );
