@@ -1,4 +1,5 @@
 import type { ActionSpec, ActionKind, Workflow } from "../../lib/commands";
+import Button from "../Button";
 import { defaultAction } from "./specHelpers";
 
 interface Props {
@@ -49,14 +50,15 @@ export default function ActionsEditor({
         {!disabled && (
           <div className="actions-add">
             {ACTION_TYPES.map((t) => (
-              <button
+              <Button
                 key={t.value}
                 type="button"
-                className="btn btn-ghost btn-sm"
+                variant="ghost"
+                size="sm"
                 onClick={() => onChange([...actions, defaultAction(t.value)])}
               >
                 + {t.label}
-              </button>
+              </Button>
             ))}
           </div>
         )}
@@ -192,9 +194,10 @@ export default function ActionsEditor({
                 )}
 
                 {!disabled && (
-                  <button
+                  <Button
                     type="button"
-                    className="btn btn-danger btn-sm"
+                    variant="danger"
+                    size="sm"
                     disabled={protectedEmail}
                     title={
                       protectedEmail
@@ -205,7 +208,7 @@ export default function ActionsEditor({
                     onClick={() => remove(index)}
                   >
                     Remove
-                  </button>
+                  </Button>
                 )}
               </div>
             );

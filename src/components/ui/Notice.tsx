@@ -1,3 +1,4 @@
+import Button from "../Button";
 import "./Notice.css";
 
 export type NoticeVariant = "info" | "success" | "error" | "warning";
@@ -26,14 +27,16 @@ export default function Notice({
     >
       <span className="ui-notice__body">{children}</span>
       {onDismiss && (
-        <button
+        <Button
           type="button"
-          className="ui-notice__dismiss btn btn-ghost btn-sm"
+          variant="ghost"
+          size="sm"
+          className="ui-notice__dismiss"
           onClick={onDismiss}
           aria-label="Dismiss"
         >
           ×
-        </button>
+        </Button>
       )}
     </div>
   );

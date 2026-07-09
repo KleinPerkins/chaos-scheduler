@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import Button from "./Button";
 import "./ErrorBoundary.css";
 
 interface Props {
@@ -36,13 +37,9 @@ export default class ErrorBoundary extends Component<Props, State> {
             {this.state.error.message ||
               "An unexpected rendering error occurred."}
           </p>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={this.handleRetry}
-          >
+          <Button type="button" variant="primary" onClick={this.handleRetry}>
             Try again
-          </button>
+          </Button>
         </div>
       );
     }

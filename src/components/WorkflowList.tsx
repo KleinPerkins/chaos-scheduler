@@ -13,6 +13,7 @@ import type { Workflow } from "../lib/commands";
 import { cronToHuman } from "./ScheduleBuilder";
 import EnvironmentBadge from "./EnvironmentBadge";
 import NoticeBanner from "./NoticeBanner";
+import Button from "./Button";
 import { buildEnqueueIdempotencyKey } from "../lib/workflowValidation";
 import "./WorkflowList.css";
 
@@ -301,19 +302,20 @@ export default function WorkflowList({
             <h1 className="page-title">Workflows</h1>
             <p className="page-subtitle">Could not load workflows</p>
           </div>
-          <button className="btn btn-primary" onClick={onNew}>
+          <Button variant="primary" onClick={onNew}>
             + Add Workflow
-          </button>
+          </Button>
         </div>
         <div className="wf-error">
           <span>{error}</span>
-          <button
-            className="btn btn-ghost btn-sm"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => void refresh()}
             disabled={loading}
           >
             Retry
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -364,9 +366,10 @@ export default function WorkflowList({
         <span className="wf-card-script">{w.script_path}</span>
       </div>
       <div className="wf-card-actions">
-        <button
+        <Button
           type="button"
-          className="btn btn-ghost btn-sm"
+          variant="ghost"
+          size="sm"
           onClick={() => void handleRun(w)}
           disabled={
             isPending(w, "run") ||
@@ -385,10 +388,11 @@ export default function WorkflowList({
               Run
             </>
           )}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          className="btn btn-ghost btn-sm"
+          variant="ghost"
+          size="sm"
           onClick={() => void handleEnqueue(w)}
           disabled={
             isPending(w, "run") ||
@@ -400,31 +404,37 @@ export default function WorkflowList({
           aria-label={`Enqueue ${w.name}`}
         >
           {pendingEnqueueId === w.id ? "Enqueueing…" : "Enqueue"}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          className="btn btn-ghost btn-sm"
+          variant="ghost"
+          size="sm"
           onClick={() => onOpen(w)}
         >
           Details
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          className="btn btn-ghost btn-sm"
+          variant="ghost"
+          size="sm"
           onClick={() => onHistory(w)}
         >
           History
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          className="btn btn-ghost btn-sm"
+          variant="ghost"
+          size="sm"
           onClick={() => onEdit(w)}
         >
           Edit
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          className={`btn btn-sm ${pendingDeleteId === w.id ? "btn-danger-confirm" : "btn-danger"}`}
+          size="sm"
+          className={
+            pendingDeleteId === w.id ? "btn-danger-confirm" : "btn-danger"
+          }
           onClick={() => void handleDelete(w)}
           disabled={isPending(w, "run") || isPending(w, "toggle")}
         >
@@ -433,7 +443,7 @@ export default function WorkflowList({
             : pendingDeleteId === w.id
               ? "Confirm?"
               : "Delete"}
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -469,9 +479,9 @@ export default function WorkflowList({
             configured
           </p>
         </div>
-        <button className="btn btn-primary" onClick={onNew}>
+        <Button variant="primary" onClick={onNew}>
           + Add Workflow
-        </button>
+        </Button>
       </div>
 
       {workflows.length === 0 ? (
@@ -480,9 +490,9 @@ export default function WorkflowList({
           <p className="wf-empty-sub">
             Create your first workflow to start automating PM tasks.
           </p>
-          <button className="btn btn-primary" onClick={onNew}>
+          <Button variant="primary" onClick={onNew}>
             + Add Workflow
-          </button>
+          </Button>
         </div>
       ) : (
         <>

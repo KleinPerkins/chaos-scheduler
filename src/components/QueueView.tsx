@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import Button from "./Button";
 import {
   acknowledgeDeadLetter,
   cancelQueuedRun,
@@ -302,13 +303,13 @@ export default function QueueView({ onBack }: QueueViewProps) {
         </div>
         <div className="queue-actions">
           {onBack && (
-            <button className="btn btn-ghost" onClick={onBack}>
+            <Button variant="ghost" onClick={onBack}>
               Back to Mission Control
-            </button>
+            </Button>
           )}
-          <button className="btn btn-ghost" onClick={load}>
+          <Button variant="ghost" onClick={load}>
             Refresh
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -411,13 +412,14 @@ export default function QueueView({ onBack }: QueueViewProps) {
                       {validation ??
                         `Global cap ${queue.global_parallelism_cap}`}
                     </span>
-                    <button
-                      className="btn btn-primary btn-sm"
+                    <Button
+                      variant="primary"
+                      size="sm"
                       disabled={!!validation || savingId === key}
                       onClick={() => saveQueue(queue)}
                     >
                       {savingId === key ? "Saving..." : "Save"}
-                    </button>
+                    </Button>
                   </div>
                 </div>
               );
@@ -473,8 +475,9 @@ export default function QueueView({ onBack }: QueueViewProps) {
                 ? `${backfillPlan.count} logical slot(s), chain suppression on`
                 : "Preview before dispatching."}
             </span>
-            <button
-              className="btn btn-ghost btn-sm"
+            <Button
+              variant="ghost"
+              size="sm"
               disabled={
                 backfillBusy ||
                 !backfillWorkflowId ||
@@ -484,16 +487,17 @@ export default function QueueView({ onBack }: QueueViewProps) {
               onClick={previewBackfill}
             >
               {backfillBusy ? "Working…" : "Preview"}
-            </button>
-            <button
-              className="btn btn-primary btn-sm"
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
               disabled={
                 backfillBusy || !backfillPlan || backfillPlan.count === 0
               }
               onClick={dispatchBackfillPlan}
             >
               {backfillBusy ? "Dispatching…" : "Dispatch"}
-            </button>
+            </Button>
           </div>
         </div>
       </section>
@@ -535,20 +539,22 @@ export default function QueueView({ onBack }: QueueViewProps) {
                   />
                 </span>
                 <span>
-                  <button
-                    className="btn btn-ghost btn-sm"
+                  <Button
+                    variant="ghost"
+                    size="sm"
                     onClick={() => acknowledge(row.id)}
                     disabled={deadLetterBusyId === row.id}
                   >
                     {deadLetterBusyId === row.id ? "…" : "Ack"}
-                  </button>
-                  <button
-                    className="btn btn-primary btn-sm"
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
                     onClick={() => recover(row.id)}
                     disabled={deadLetterBusyId === row.id}
                   >
                     {deadLetterBusyId === row.id ? "…" : "Recover"}
-                  </button>
+                  </Button>
                 </span>
               </div>
             ))}
@@ -580,15 +586,17 @@ export default function QueueView({ onBack }: QueueViewProps) {
                   ? `${retentionPreview.candidate_runs} candidate run(s), ${retentionPreview.preserved_dead_letter_runs} dead-letter run(s) preserved`
                   : "Retention cleanup never deletes scheduler_dead_letters evidence.")}
             </span>
-            <button
-              className="btn btn-ghost btn-sm"
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => runRetention(true)}
               disabled={retentionBusy}
             >
               {retentionBusy ? "Working…" : "Dry Run"}
-            </button>
-            <button
-              className="btn btn-danger btn-sm"
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
               disabled={
                 retentionBusy ||
                 !retentionPreview ||
@@ -597,7 +605,7 @@ export default function QueueView({ onBack }: QueueViewProps) {
               onClick={() => runRetention(false)}
             >
               {retentionBusy ? "Applying…" : "Apply Cleanup"}
-            </button>
+            </Button>
           </div>
         </div>
       </section>
@@ -634,13 +642,14 @@ export default function QueueView({ onBack }: QueueViewProps) {
                 <span>{formatDate(run.queued_at)}</span>
                 <span>
                   {run.status === "queued" && (
-                    <button
-                      className="btn btn-danger btn-sm"
+                    <Button
+                      variant="danger"
+                      size="sm"
                       onClick={() => cancelRun(run.id)}
                       disabled={cancelBusyId === run.id}
                     >
                       {cancelBusyId === run.id ? "…" : "Cancel"}
-                    </button>
+                    </Button>
                   )}
                 </span>
               </div>

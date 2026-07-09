@@ -1,4 +1,5 @@
 import type { StepSpec } from "../../lib/commands";
+import Button from "../Button";
 import { emptyStep } from "./specHelpers";
 
 interface Props {
@@ -75,14 +76,16 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
                 </select>
               </label>
               {steps.length > 1 && (
-                <button
+                <Button
                   type="button"
-                  className="btn btn-danger btn-sm step-remove"
+                  variant="danger"
+                  size="sm"
+                  className="step-remove"
                   onClick={() => remove(index)}
                   aria-label={`Remove step ${index + 1}`}
                 >
                   Remove
-                </button>
+                </Button>
               )}
             </div>
 
@@ -231,13 +234,15 @@ export default function StepFlowBuilder({ steps, onChange, disabled }: Props) {
         );
       })}
       {!disabled && (
-        <button
+        <Button
           type="button"
-          className="btn btn-ghost btn-sm step-add"
+          variant="ghost"
+          size="sm"
+          className="step-add"
           onClick={add}
         >
           + Add step
-        </button>
+        </Button>
       )}
     </div>
   );

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import Button from "./Button";
 import {
   getAppConfig,
   getLaunchAtLogin,
@@ -653,24 +654,26 @@ export default function Settings() {
             </label>
           </div>
           <div className="settings-row settings-update-row">
-            <button
-              className="btn btn-ghost btn-sm"
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={handleCheckForUpdate}
               disabled={updateChecking || updateInstalling}
             >
               {updateChecking ? "Checking..." : "Check for updates"}
-            </button>
+            </Button>
             {updateSnapshot?.phase === "available" &&
               updateSnapshot.latest_version && (
-                <button
-                  className="btn btn-primary btn-sm"
+                <Button
+                  variant="primary"
+                  size="sm"
                   onClick={handleApplyUpdate}
                   disabled={updateInstalling}
                 >
                   {updateInstalling
                     ? "Installing..."
                     : `Install and Restart v${updateSnapshot.latest_version}`}
-                </button>
+                </Button>
               )}
           </div>
           {updateSnapshot?.phase === "available" && updateSnapshot.notes && (
@@ -689,25 +692,27 @@ export default function Settings() {
               <span className="settings-hint">
                 Skipping v{updateSnapshot.skipped_version}
               </span>
-              <button
-                className="btn btn-ghost btn-sm"
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={handleClearSkip}
                 disabled={prefsBusy}
               >
                 Clear skip
-              </button>
+              </Button>
             </div>
           ) : (
             updateSnapshot?.phase === "available" &&
             updateSnapshot.latest_version && (
               <div className="settings-row settings-update-row">
-                <button
-                  className="btn btn-ghost btn-sm"
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={handleSkipVersion}
                   disabled={prefsBusy}
                 >
                   Skip this version (v{updateSnapshot.latest_version})
-                </button>
+                </Button>
               </div>
             )
           )}

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import Button from "./Button";
 import {
   createApiKey,
   listApiKeys,
@@ -384,9 +385,9 @@ export default function Integrations() {
               logs. Protected environments require an explicit backend override.
             </p>
           )}
-          <button type="submit" className="btn btn-primary" disabled={busy}>
+          <Button type="submit" variant="primary" disabled={busy}>
             {busy ? "Working..." : "Create key"}
-          </button>
+          </Button>
         </form>
 
         {newKey && (
@@ -396,13 +397,14 @@ export default function Integrations() {
             </span>
             <div className="intg-token-row">
               <code className="intg-token">{newKey.token}</code>
-              <button
+              <Button
                 type="button"
-                className="btn btn-ghost btn-sm"
+                variant="ghost"
+                size="sm"
                 onClick={() => copy("token", newKey.token)}
               >
                 {copied === "token" ? "Copied" : "Copy"}
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -439,8 +441,9 @@ export default function Integrations() {
                     {key.revoked ? (
                       <span className="intg-revoked-badge">Revoked</span>
                     ) : (
-                      <button
-                        className="btn btn-danger btn-sm"
+                      <Button
+                        variant="danger"
+                        size="sm"
                         onClick={() => handleRevoke(key.id)}
                         disabled={busy}
                         aria-label={
@@ -452,7 +455,7 @@ export default function Integrations() {
                         {revokePendingId === key.id
                           ? "Confirm revoke?"
                           : "Revoke"}
-                      </button>
+                      </Button>
                     )}
                   </td>
                 </tr>
@@ -547,37 +550,37 @@ export default function Integrations() {
 
             <div className="intg-mcp-actions">
               {!mcpStatus.enabled ? (
-                <button
+                <Button
                   type="button"
-                  className="btn btn-primary"
+                  variant="primary"
                   disabled={mcpBusy}
                   onClick={() => handleMcpProvision(false)}
                 >
                   {mcpBusy ? "Working…" : "Enable managed integration"}
-                </button>
+                </Button>
               ) : (
                 <>
-                  <button
+                  <Button
                     type="button"
-                    className="btn btn-primary"
+                    variant="primary"
                     disabled={mcpBusy}
                     onClick={() => handleMcpProvision(false)}
                   >
                     {mcpBusy ? "Working…" : "Re-provision"}
-                  </button>
+                  </Button>
                   {mcpStatus.cursor_config_conflict && (
-                    <button
+                    <Button
                       type="button"
-                      className="btn btn-ghost"
+                      variant="ghost"
                       disabled={mcpBusy}
                       onClick={() => handleMcpProvision(true)}
                     >
                       Take over conflicting entry
-                    </button>
+                    </Button>
                   )}
-                  <button
+                  <Button
                     type="button"
-                    className="btn btn-danger"
+                    variant="danger"
                     disabled={mcpBusy}
                     onClick={handleMcpRemoveClick}
                     aria-label={
@@ -587,10 +590,10 @@ export default function Integrations() {
                     }
                   >
                     {mcpRemovePending ? "Confirm remove?" : "Remove"}
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     type="button"
-                    className="btn btn-ghost"
+                    variant="ghost"
                     disabled={mcpBusy}
                     onClick={handleMcpPrepareUninstallClick}
                     aria-label={
@@ -602,7 +605,7 @@ export default function Integrations() {
                     {mcpPrepareUninstallPending
                       ? "Confirm?"
                       : "Prepare to uninstall"}
-                  </button>
+                  </Button>
                 </>
               )}
             </div>
@@ -618,9 +621,9 @@ export default function Integrations() {
           manually.
         </p>
         <div className="intg-mcp-actions">
-          <button
+          <Button
             type="button"
-            className="btn btn-primary"
+            variant="primary"
             onClick={() =>
               openExternalSafe(addToCursorLink(tokenForSnippet)).catch(() =>
                 notify("Could not open Cursor.", "error"),
@@ -628,14 +631,14 @@ export default function Integrations() {
             }
           >
             Add to Cursor
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="btn btn-ghost"
+            variant="ghost"
             onClick={() => copy("mcp", mcpConfigSnippet(tokenForSnippet))}
           >
             {copied === "mcp" ? "Copied" : "Copy .cursor/mcp.json"}
-          </button>
+          </Button>
         </div>
         <pre className="intg-snippet" aria-label="Cursor MCP configuration">
           {mcpConfigSnippet(tokenForSnippet)}

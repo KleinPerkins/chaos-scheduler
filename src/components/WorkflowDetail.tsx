@@ -13,6 +13,7 @@ import { cronToHuman } from "./ScheduleBuilder";
 import { formatRunStatusLabel } from "../lib/runStatus";
 import EnvironmentBadge from "./EnvironmentBadge";
 import Notice from "./ui/Notice";
+import Button from "./Button";
 import "./WorkflowDetail.css";
 
 interface Props {
@@ -148,9 +149,9 @@ export default function WorkflowDetail({
     <div className="workflow-detail">
       <div className="page-header">
         <div className="wd-heading">
-          <button className="btn btn-ghost btn-sm" onClick={onBack}>
+          <Button variant="ghost" size="sm" onClick={onBack}>
             &larr; Back
-          </button>
+          </Button>
           <div>
             <div className="wd-title-row">
               <h1 className="page-title">{workflow.name}</h1>
@@ -171,37 +172,42 @@ export default function WorkflowDetail({
           </div>
         </div>
         <div className="wd-actions">
-          <button
-            className="btn btn-ghost btn-sm"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => void refresh()}
             aria-label="Refresh"
             title="Refresh"
           >
             <RefreshCw size={14} strokeWidth={2} />
-          </button>
-          <button
-            className="btn btn-ghost btn-sm"
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={handleRun}
             disabled={busy !== null}
           >
             <Play size={14} strokeWidth={2.5} />
             {busy === "run" ? "Running…" : "Run"}
-          </button>
-          <button
-            className="btn btn-ghost btn-sm"
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={handleEnqueue}
             disabled={busy !== null}
           >
             {busy === "enqueue" ? "Enqueueing…" : "Enqueue"}
-          </button>
-          <button
-            className="btn btn-ghost btn-sm"
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => onFullHistory(workflow)}
           >
             <HistoryIcon size={14} strokeWidth={2} /> Full history
-          </button>
-          <button
-            className="btn btn-primary btn-sm"
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
             onClick={() => onEdit(workflow)}
             disabled={isManaged}
             title={
@@ -209,7 +215,7 @@ export default function WorkflowDetail({
             }
           >
             <Pencil size={14} strokeWidth={2} /> Edit
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -281,24 +287,22 @@ export default function WorkflowDetail({
       <section className="wd-card">
         <div className="wd-runs-header">
           <h2 className="wd-card-title">Recent runs</h2>
-          <button
-            className="btn btn-ghost btn-sm"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => onFullHistory(workflow)}
           >
             View all
-          </button>
+          </Button>
         </div>
         {loading ? (
           <div className="wd-muted">Loading…</div>
         ) : error ? (
           <div className="wd-error">
             <span>Failed to load: {error}</span>
-            <button
-              className="btn btn-ghost btn-sm"
-              onClick={() => void refresh()}
-            >
+            <Button variant="ghost" size="sm" onClick={() => void refresh()}>
               Retry
-            </button>
+            </Button>
           </div>
         ) : runs.length === 0 ? (
           <div className="wd-muted">No runs yet for this workflow.</div>
@@ -329,13 +333,14 @@ export default function WorkflowDetail({
                     </span>
                   </td>
                   <td>
-                    <button
-                      className="btn btn-ghost btn-sm"
+                    <Button
+                      variant="ghost"
+                      size="sm"
                       onClick={() => onViewRun(run.id)}
                       aria-label={`View details for run started ${formatDate(run.started_at)}`}
                     >
                       Details
-                    </button>
+                    </Button>
                   </td>
                 </tr>
               ))}

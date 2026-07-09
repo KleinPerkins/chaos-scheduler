@@ -8,6 +8,7 @@ import { openExternalSafe } from "../lib/openExternalSafe";
 import RerunModal from "./RerunModal";
 import type { Run, Workflow, WorkflowHistoryBucket } from "../lib/commands";
 import { formatRunStatusLabel } from "../lib/runStatus";
+import Button from "./Button";
 import "./RunHistory.css";
 
 interface Props {
@@ -90,9 +91,9 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
           <h1 className="page-title">{workflow.name}</h1>
           <p className="page-subtitle">Run History</p>
         </div>
-        <button className="btn btn-ghost" onClick={onBack}>
+        <Button variant="ghost" onClick={onBack}>
           &larr; Back
-        </button>
+        </Button>
       </div>
 
       {loading ? (
@@ -100,12 +101,9 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
       ) : error ? (
         <div className="rh-error">
           <span>Run history failed to load: {error}</span>
-          <button
-            className="btn btn-ghost btn-sm"
-            onClick={() => void refreshRuns()}
-          >
+          <Button variant="ghost" size="sm" onClick={() => void refreshRuns()}>
             Retry
-          </button>
+          </Button>
         </div>
       ) : runs.length === 0 ? (
         <div className="rh-empty">No runs yet for this workflow.</div>
@@ -169,28 +167,31 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
                   </td>
                   <td>
                     {run.result_url ? (
-                      <button
-                        className="btn btn-ghost btn-sm"
+                      <Button
+                        variant="ghost"
+                        size="sm"
                         onClick={() => {
                           void openExternalSafe(run.result_url!);
                         }}
                       >
                         Open
-                      </button>
+                      </Button>
                     ) : (
                       "—"
                     )}
                   </td>
                   <td>
-                    <button
-                      className="btn btn-ghost btn-sm"
+                    <Button
+                      variant="ghost"
+                      size="sm"
                       onClick={() => onViewLog(run.id)}
                       aria-label={`View details for ${run.status} run started ${formatDate(run.started_at)}`}
                     >
                       Details
-                    </button>
-                    <button
-                      className="btn btn-ghost btn-sm"
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
                       disabled={
                         rerunning === run.id || run.status === "running"
                       }
@@ -201,7 +202,7 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
                       aria-label={`Rerun ${run.status} run started ${formatDate(run.started_at)}`}
                     >
                       {rerunning === run.id ? "Rerunning..." : "Rerun"}
-                    </button>
+                    </Button>
                   </td>
                 </tr>
               ))}
