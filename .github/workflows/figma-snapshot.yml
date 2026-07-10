@@ -1,0 +1,72 @@
+name: Figma Semantic Snapshot
+
+# ADVISORY, scheduled drift check: snapshots the SEMANTIC metadata (node
+# name/type/hierarchy — no pixels) of the live Figma design page (0:1) and the
+# self-contained component-library section (113:514), and diffs it against the
+# committed baseline (design/figma/mission-control.snapshot.json). Surfaces when
+# the design has drifted from what the repo last recorded.
+#
+# Deliberately a SEPARATE workflow, entirely OUTSIDE the `ci-required` fan-in: a
+# live-service (Figma API / PAT) check must NEVER block a code merge. It has no
+# `pull_request` trigger, so it can't gate PRs at all.
+#
+# Refresh the baseline after an intentional design change: run this workflow
+# (or push a change to the script/workflow), download the `figma-snapshot`
+# artifact, and commit it to design/figma/mission-control.snapshot.json.
+
+on:
+  schedule:
+    # Weekly, Monday 12:00 UTC.
+    - cron: "0 12 * * 1"
+  workflow_dispatch:
+  push:
+    paths:
+      - "scripts/figma-snapshot.mjs"
+      - "scripts/figma-snapshot.test.mjs"
+      - ".github/workflows/figma-snapshot.yml"
+      - "design/figma/**"
+
+concurrency:
+  group: figma-snapshot-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    name: Snapshot + diff (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # Credential-free: validates the normalize/diff logic even if the PAT is
+      # missing or the Figma API is down.
+      - name: Unit tests (snapshot/diff logic)
+        run: npm run test:figma-snapshot
+      - name: Guard — FIGMA_ACCESS_TOKEN present
+        env:
+          FIGMA_ACCESS_TOKEN: ${{ secrets.FIGMA_ACCESS_TOKEN }}
+        run: |
+          if [ -z "${FIGMA_ACCESS_TOKEN}" ]; then
+            echo "::error title=Missing FIGMA_ACCESS_TOKEN::Add a Figma personal access token with 'File content: read' (Settings -> Secrets and variables -> Actions)."
+            exit 1
+          fi
+      - name: Snapshot live Figma + diff vs baseline
+        env:
+          FIGMA_ACCESS_TOKEN: ${{ secrets.FIGMA_ACCESS_TOKEN }}
+        run: |
+          node scripts/figma-snapshot.mjs check \
+            --baseline design/figma/mission-control.snapshot.json \
+            --out figma-snapshot.current.json
+      - name: Upload live snapshot
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: figma-snapshot
+          path: figma-snapshot.current.json
+          retention-days: 30
