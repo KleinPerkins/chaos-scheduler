@@ -1,5 +1,5 @@
 use crate::db::{
-    Database, EmailConfig, EmailProfile, MissionControlNeedsAttentionItem,
+    DashboardKpiSummary, Database, EmailConfig, EmailProfile, MissionControlNeedsAttentionItem,
     MissionControlPanelAvailability, MissionControlPreferences, MissionControlSnapshot,
     MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt,
     RunMetric, RunRelationship, RunTask, SchedulerAsset, SchedulerDeadLetter, SchedulerStatus,
@@ -985,6 +985,24 @@ pub fn get_sla_violations(state: State<AppState>) -> Result<Vec<SlaViolation>, S
         .map_err(|e| e.to_string())
 }
 
+/// Windowed KPI roll-up (throughput/hr, avg + max runtime, success rate,
+/// median + max wait) for the v3 dashboard, scoped to `(environmentFilter,
+/// lookback)`. `lookback` accepts the shared grammar (`1d`, `3d`, `7d`,
+/// `30d`, `<n>h`, `all`); defaults to `1d`.
+#[tauri::command]
+pub fn get_dashboard_kpi_summary(
+    state: State<AppState>,
+    environment_filter: Option<String>,
+    lookback: Option<String>,
+) -> Result<DashboardKpiSummary, String> {
+    let (window_modifier, window_seconds) = parse_lookback(lookback.as_deref())?;
+    let environment_filter = normalize_mission_environment_filter(environment_filter, "all");
+    state
+        .db
+        .dashboard_kpi_summary(&environment_filter, &window_modifier, window_seconds)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn query_resource_samples(
     state: State<AppState>,
@@ -1062,6 +1080,36 @@ fn time_window_modifier(value: Option<&str>) -> Result<String, String> {
         _ => return Err(format!("Unsupported time_window unit: {}", unit)),
     };
     Ok(format!("-{} {}", count, sqlite_unit))
+}
+
+/// Parse a dashboard lookback into `(sqlite_modifier, window_seconds)`.
+///
+/// Accepts the same grammar as [`time_window_modifier`] (`<n>h`, `<n>d`,
+/// `<n>m`, `"<n> hours"`, `all`); the second tuple element is the nominal
+/// window length in seconds used for rate math (e.g. throughput/hour). `all`
+/// maps to a 100-year window.
+fn parse_lookback(value: Option<&str>) -> Result<(String, i64), String> {
+    let raw = value.unwrap_or("1d").trim().to_ascii_lowercase();
+    if raw == "all" {
+        return Ok(("-100 years".to_string(), 100 * 365 * 24 * 60 * 60));
+    }
+    let (number, unit) = split_window(&raw).ok_or_else(|| {
+        "lookback must be all, <number>h, <number>d, <number>m, or '<number> hours/days/minutes'"
+            .to_string()
+    })?;
+    let count: i64 = number
+        .parse()
+        .map_err(|_| "lookback count must be a positive integer".to_string())?;
+    if count <= 0 {
+        return Err("lookback count must be positive".to_string());
+    }
+    let (sqlite_unit, unit_seconds) = match unit {
+        "m" | "min" | "minute" | "minutes" => ("minutes", 60),
+        "h" | "hr" | "hour" | "hours" => ("hours", 60 * 60),
+        "d" | "day" | "days" => ("days", 24 * 60 * 60),
+        _ => return Err(format!("Unsupported lookback unit: {}", unit)),
+    };
+    Ok((format!("-{} {}", count, sqlite_unit), count * unit_seconds))
 }
 
 fn split_window(value: &str) -> Option<(&str, &str)> {
@@ -1353,6 +1401,9 @@ pub fn get_mission_control_snapshot(
             &environment_filter,
             &domain_filter,
             sla_violations.len() as i64,
+            // Snapshot preserves the legacy 24h summary window; the v3
+            // dashboard uses the windowed `get_dashboard_kpi_summary` command.
+            "-1 day",
         )
         .map_err(|e| e.to_string())?;
     let recent_runs = state

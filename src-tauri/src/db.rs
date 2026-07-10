@@ -444,8 +444,42 @@ pub struct MissionControlSlaSummary {
     pub violations_count: i64,
     pub success_rate_24h: Option<f64>,
     pub median_wait_seconds: Option<i64>,
+    /// Longest admission wait (queued -> admitted) over the summary window,
+    /// alongside `median_wait_seconds`. `None` when no admitted runs are in
+    /// the window.
+    pub max_wait_seconds: Option<i64>,
     pub long_running_count: i64,
     pub blocked_count: i64,
+}
+
+/// Windowed KPI roll-up for the v3 Mission Control dashboard, keyed by
+/// `(environment, lookback_window)`. Every field is scoped to the same
+/// window; `runs` are joined to `workflows` to resolve the environment (the
+/// `runs` table has no environment column). Runtime is derived from
+/// `started_at`/`finished_at`; wait is derived from `queued_runs`
+/// (`queued_at` -> `admitted_at`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardKpiSummary {
+    /// All runs whose activity (finished, else started) falls in the window.
+    pub total_runs: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+    /// succeeded / (succeeded + failed) over terminal runs in the window;
+    /// `None` when there are no terminal runs.
+    pub success_rate: Option<f64>,
+    /// `total_runs` divided by the window length in hours; `None` when the
+    /// window is non-positive.
+    pub throughput_per_hour: Option<f64>,
+    /// Mean wall-clock runtime (seconds) over finished runs in the window.
+    pub avg_runtime_seconds: Option<f64>,
+    /// Longest wall-clock runtime (seconds) over finished runs in the window.
+    pub max_runtime_seconds: Option<i64>,
+    /// Median admission wait (seconds) over admitted queued runs in the window.
+    pub median_wait_seconds: Option<i64>,
+    /// Longest admission wait (seconds) over admitted queued runs in the window.
+    pub max_wait_seconds: Option<i64>,
+    /// Nominal window length in seconds (echoed from the requested lookback).
+    pub window_seconds: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3436,11 +3470,15 @@ impl Database {
         )
     }
 
+    /// Summary KPIs for the Mission Control header, scoped to `window_modifier`
+    /// (a SQLite datetime modifier such as `"-1 day"`). Callers that want the
+    /// legacy 24h behavior pass `"-1 day"`.
     pub fn mission_control_sla_summary(
         &self,
         environment_filter: &str,
         domain_filter: &str,
         violations_count: i64,
+        window_modifier: &str,
     ) -> rusqlite::Result<MissionControlSlaSummary> {
         let environment_filter = normalize_mission_environment_filter(environment_filter);
         let domain_filter = normalize_mission_domain_filter(domain_filter);
@@ -3450,13 +3488,13 @@ impl Database {
                     SUM(CASE WHEN r.status IN ('success', 'succeeded') THEN 1 ELSE 0 END)
              FROM runs r
              JOIN workflows w ON w.id = r.workflow_id
-             WHERE datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', '-1 day')
+             WHERE datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?3)
                AND r.status IN ('success', 'succeeded', 'failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
                AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
-            params![environment_filter, domain_filter],
+            params![environment_filter, domain_filter, window_modifier],
             |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
         )?;
         let median_wait_seconds = conn
@@ -3465,7 +3503,7 @@ impl Database {
                  FROM queued_runs q
                  JOIN workflows w ON w.id = q.workflow_id
                  WHERE q.admitted_at IS NOT NULL
-                   AND datetime(q.queued_at) >= datetime('now', '-1 day')
+                   AND datetime(q.queued_at) >= datetime('now', ?3)
                    AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                    AND (?2 = 'all'
                      OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
@@ -3476,16 +3514,32 @@ impl Database {
                    FROM queued_runs mq
                    JOIN workflows mw ON mw.id = mq.workflow_id
                    WHERE mq.admitted_at IS NOT NULL
-                     AND datetime(mq.queued_at) >= datetime('now', '-1 day')
+                     AND datetime(mq.queued_at) >= datetime('now', ?3)
                      AND (?1 = 'all' OR COALESCE(NULLIF(mw.environment, ''), 'production') = ?1)
                      AND (?2 = 'all'
                        OR (?2 = '__unowned__' AND (mw.domain IS NULL OR TRIM(mw.domain) = ''))
                        OR TRIM(mw.domain) = ?2)
                  )",
-                params![environment_filter, domain_filter],
+                params![environment_filter, domain_filter, window_modifier],
                 |row| row.get(0),
             )
             .optional()?;
+        let max_wait_seconds = conn
+            .query_row(
+                "SELECT CAST(MAX((julianday(admitted_at) - julianday(queued_at)) * 86400) AS INTEGER)
+                 FROM queued_runs q
+                 JOIN workflows w ON w.id = q.workflow_id
+                 WHERE q.admitted_at IS NOT NULL
+                   AND datetime(q.queued_at) >= datetime('now', ?3)
+                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
+                   AND (?2 = 'all'
+                     OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
+                     OR TRIM(w.domain) = ?2)",
+                params![environment_filter, domain_filter, window_modifier],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten();
         let blocked_count: i64 = conn.query_row(
             "SELECT COUNT(*)
              FROM queued_runs q JOIN workflows w ON w.id = q.workflow_id
@@ -3505,8 +3559,105 @@ impl Database {
                 None
             },
             median_wait_seconds,
+            max_wait_seconds,
             long_running_count: violations_count,
             blocked_count,
+        })
+    }
+
+    /// Windowed KPI roll-up for the v3 dashboard, scoped to `(environment,
+    /// window)`. `window_modifier` is a SQLite datetime modifier (e.g.
+    /// `"-1 day"`); `window_seconds` is the nominal window length used to
+    /// derive `throughput_per_hour`. Not domain-scoped: the v3 global filter
+    /// bar exposes only environment + lookback.
+    pub fn dashboard_kpi_summary(
+        &self,
+        environment_filter: &str,
+        window_modifier: &str,
+        window_seconds: i64,
+    ) -> rusqlite::Result<DashboardKpiSummary> {
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
+        let conn = self.conn()?;
+        let (total_runs, succeeded, failed, avg_runtime_seconds, max_runtime_seconds): (
+            i64,
+            i64,
+            i64,
+            Option<f64>,
+            Option<f64>,
+        ) = conn.query_row(
+            "SELECT
+                COUNT(*),
+                SUM(CASE WHEN r.status IN ('success', 'succeeded') THEN 1 ELSE 0 END),
+                SUM(CASE WHEN r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered') THEN 1 ELSE 0 END),
+                AVG(CASE WHEN r.finished_at IS NOT NULL THEN (julianday(r.finished_at) - julianday(r.started_at)) * 86400 END),
+                MAX(CASE WHEN r.finished_at IS NOT NULL THEN (julianday(r.finished_at) - julianday(r.started_at)) * 86400 END)
+             FROM runs r
+             JOIN workflows w ON w.id = r.workflow_id
+             WHERE datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?2)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)",
+            params![environment_filter, window_modifier],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+
+        // Waits: pull the admitted-run wait durations for the window and reduce
+        // to median + max in Rust (avoids a fragile OFFSET-median subquery and
+        // keeps the reduction obviously correct).
+        let waits: Vec<f64> = {
+            let mut stmt = conn.prepare(
+                "SELECT (julianday(q.admitted_at) - julianday(q.queued_at)) * 86400 AS wait_seconds
+                 FROM queued_runs q
+                 JOIN workflows w ON w.id = q.workflow_id
+                 WHERE q.admitted_at IS NOT NULL
+                   AND datetime(q.queued_at) >= datetime('now', ?2)
+                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
+                 ORDER BY wait_seconds ASC",
+            )?;
+            let rows = stmt.query_map(params![environment_filter, window_modifier], |row| {
+                row.get::<_, f64>(0)
+            })?;
+            rows.collect::<rusqlite::Result<Vec<f64>>>()?
+        };
+        let (median_wait_seconds, max_wait_seconds) = if waits.is_empty() {
+            (None, None)
+        } else {
+            let max = waits[waits.len() - 1];
+            // Upper-of-middle median (matches the legacy `OFFSET count/2`
+            // convention used by `mission_control_sla_summary`).
+            let median = waits[waits.len() / 2];
+            (Some(median.round() as i64), Some(max.round() as i64))
+        };
+
+        let terminal = succeeded + failed;
+        let success_rate = if terminal > 0 {
+            Some(succeeded as f64 / terminal as f64)
+        } else {
+            None
+        };
+        let throughput_per_hour = if window_seconds > 0 {
+            Some(total_runs as f64 / (window_seconds as f64 / 3600.0))
+        } else {
+            None
+        };
+
+        Ok(DashboardKpiSummary {
+            total_runs,
+            succeeded,
+            failed,
+            success_rate,
+            throughput_per_hour,
+            avg_runtime_seconds,
+            max_runtime_seconds: max_runtime_seconds.map(|value| value.round() as i64),
+            median_wait_seconds,
+            max_wait_seconds,
+            window_seconds,
         })
     }
 
@@ -6724,7 +6875,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_ne!(source_runs[0].workflow_id, instance.id);
 
         let sla = db
-            .mission_control_sla_summary("production", "scheduler", 0)
+            .mission_control_sla_summary("production", "scheduler", 0, "-1 day")
             .unwrap();
         assert_eq!(sla.success_rate_24h, Some(1.0));
 
@@ -8251,6 +8402,194 @@ SUMMARY_JSON:{\"title\":\"current\"}
             )
             .unwrap();
         assert_eq!(queue_refs, (None, None));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dashboard_kpi_summary_windows_and_scopes_by_environment() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let prod = db
+            .create_workflow(
+                "Prod WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let sandbox = db
+            .create_workflow(
+                "Sandbox WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 1 * * *",
+                false,
+                true,
+                "UTC",
+                "sandbox",
+                Some("card"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let now = chrono::Utc::now();
+        let at = |mins_ago: i64| (now - chrono::Duration::minutes(mins_ago)).to_rfc3339();
+        let span = |mins_ago: i64, secs: i64| {
+            (now - chrono::Duration::minutes(mins_ago) + chrono::Duration::seconds(secs))
+                .to_rfc3339()
+        };
+        let conn = db.conn().unwrap();
+        let insert_run = |id: &str,
+                          wf: &str,
+                          started: String,
+                          finished: Option<String>,
+                          status: &str| {
+            conn.execute(
+                    "INSERT INTO runs (id, workflow_id, started_at, finished_at, status) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![id, wf, started, finished, status],
+                )
+                .unwrap();
+        };
+        // Prod, in window (1d): 60s success, 120s failed, 1 running (no finish).
+        insert_run("r1", &prod.id, at(120), Some(span(120, 60)), "success");
+        insert_run("r2", &prod.id, at(180), Some(span(180, 120)), "failed");
+        insert_run("r4", &prod.id, at(60), None, "running");
+        // Prod, OUTSIDE window (40h ago).
+        insert_run(
+            "r3",
+            &prod.id,
+            at(40 * 60),
+            Some(span(40 * 60, 10)),
+            "success",
+        );
+        // Sandbox, in window — must not appear under the production filter.
+        insert_run("r5", &sandbox.id, at(60), Some(span(60, 30)), "success");
+
+        let insert_queued = |id: &str, wf: &str, queued: String, admitted: Option<String>| {
+            conn.execute(
+                "INSERT INTO queued_runs (id, workflow_id, queue_name, status, queued_at, admitted_at) VALUES (?1, ?2, 'production-default', 'admitted', ?3, ?4)",
+                params![id, wf, queued, admitted],
+            )
+            .unwrap();
+        };
+        // Prod waits in window: 10s, 20s, 30s -> median 20, max 30.
+        insert_queued("q1", &prod.id, at(300), Some(span(300, 10)));
+        insert_queued("q2", &prod.id, at(240), Some(span(240, 30)));
+        insert_queued("q3", &prod.id, at(120), Some(span(120, 20)));
+        // Prod wait OUTSIDE window (40h ago, 100s) must be excluded.
+        insert_queued("q4", &prod.id, at(40 * 60), Some(span(40 * 60, 100)));
+        // Sandbox wait (50s) must be excluded by the production filter.
+        insert_queued("q5", &sandbox.id, at(120), Some(span(120, 50)));
+
+        let kpi = db
+            .dashboard_kpi_summary("production", "-1 day", 86_400)
+            .unwrap();
+        assert_eq!(
+            kpi.total_runs, 3,
+            "r1, r2, r4 in window; r3 out; r5 sandbox"
+        );
+        assert_eq!(kpi.succeeded, 1);
+        assert_eq!(kpi.failed, 1);
+        assert_eq!(kpi.success_rate, Some(0.5));
+        assert_eq!(kpi.max_runtime_seconds, Some(120));
+        assert!(
+            (kpi.avg_runtime_seconds.unwrap() - 90.0).abs() < 1.0,
+            "avg runtime ~90s, got {:?}",
+            kpi.avg_runtime_seconds
+        );
+        assert_eq!(kpi.median_wait_seconds, Some(20));
+        assert_eq!(kpi.max_wait_seconds, Some(30));
+        assert_eq!(kpi.window_seconds, 86_400);
+        assert!(
+            (kpi.throughput_per_hour.unwrap() - 3.0 / 24.0).abs() < 1e-9,
+            "throughput 3 runs / 24h, got {:?}",
+            kpi.throughput_per_hour
+        );
+
+        // "all"-environment KPI sees the sandbox run too (total_runs = 4).
+        let all = db.dashboard_kpi_summary("all", "-1 day", 86_400).unwrap();
+        assert_eq!(all.total_runs, 4);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mission_control_sla_summary_reports_max_wait_and_respects_window() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let prod = db
+            .create_workflow(
+                "Prod WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let now = chrono::Utc::now();
+        let at = |mins_ago: i64| (now - chrono::Duration::minutes(mins_ago)).to_rfc3339();
+        let span = |mins_ago: i64, secs: i64| {
+            (now - chrono::Duration::minutes(mins_ago) + chrono::Duration::seconds(secs))
+                .to_rfc3339()
+        };
+        let conn = db.conn().unwrap();
+        let insert_queued = |id: &str, queued: String, admitted: Option<String>| {
+            conn.execute(
+                "INSERT INTO queued_runs (id, workflow_id, queue_name, status, queued_at, admitted_at) VALUES (?1, ?2, 'production-default', 'admitted', ?3, ?4)",
+                params![id, prod.id, queued, admitted],
+            )
+            .unwrap();
+        };
+        // In window: 15s, 30s, 45s -> median 30, max 45.
+        insert_queued("q1", at(300), Some(span(300, 15)));
+        insert_queued("q2", at(240), Some(span(240, 30)));
+        insert_queued("q3", at(120), Some(span(120, 45)));
+        // Out of window: 500s (must be excluded by the 1d window).
+        insert_queued("q4", at(40 * 60), Some(span(40 * 60, 500)));
+
+        // The legacy summary CASTs julianday deltas to INTEGER (truncation), so
+        // allow 1s of float slack rather than asserting an exact second.
+        let sla = db
+            .mission_control_sla_summary("production", "all", 0, "-1 day")
+            .unwrap();
+        assert!(
+            (sla.median_wait_seconds.unwrap() - 30).abs() <= 1,
+            "median wait ~30s, got {:?}",
+            sla.median_wait_seconds
+        );
+        assert!(
+            (sla.max_wait_seconds.unwrap() - 45).abs() <= 1,
+            "max wait ~45s, got {:?}",
+            sla.max_wait_seconds
+        );
+
+        // A very wide window pulls the 500s outlier into the max.
+        let wide = db
+            .mission_control_sla_summary("production", "all", 0, "-100 years")
+            .unwrap();
+        assert!(
+            (wide.max_wait_seconds.unwrap() - 500).abs() <= 1,
+            "wide-window max wait ~500s, got {:?}",
+            wide.max_wait_seconds
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

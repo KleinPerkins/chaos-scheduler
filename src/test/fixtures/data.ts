@@ -98,6 +98,7 @@ export const emptyMissionControlSnapshot: MissionControlSnapshot = {
     violations_count: 0,
     success_rate_24h: 1,
     median_wait_seconds: 0,
+    max_wait_seconds: 0,
     long_running_count: 0,
     blocked_count: 0,
   },

@@ -337,8 +337,28 @@ export interface MissionControlSlaSummary {
   violations_count: number;
   success_rate_24h: number | null;
   median_wait_seconds: number | null;
+  /** Longest admission wait (seconds) over the summary window. */
+  max_wait_seconds: number | null;
   long_running_count: number;
   blocked_count: number;
+}
+
+/** Windowed KPI roll-up for the v3 dashboard, keyed by `(environment,
+ * lookback)`. Mirrors `db::DashboardKpiSummary`. */
+export interface DashboardKpiSummary {
+  total_runs: number;
+  succeeded: number;
+  failed: number;
+  /** succeeded / (succeeded + failed) over terminal runs; null when none. */
+  success_rate: number | null;
+  /** total_runs / window hours; null when the window is non-positive. */
+  throughput_per_hour: number | null;
+  avg_runtime_seconds: number | null;
+  max_runtime_seconds: number | null;
+  median_wait_seconds: number | null;
+  max_wait_seconds: number | null;
+  /** Nominal window length in seconds (echoed from the requested lookback). */
+  window_seconds: number;
 }
 
 export interface MissionControlNeedsAttentionItem {
@@ -797,6 +817,16 @@ export function getWorkflowHistoryBuckets(
 
 export function getSlaViolations(): Promise<SlaViolation[]> {
   return invoke("get_sla_violations");
+}
+
+/** Windowed KPI roll-up (throughput/hr, avg + max runtime, success rate,
+ * median + max wait) for the v3 dashboard. `lookback` accepts the shared
+ * grammar (`1d`, `3d`, `7d`, `30d`, `<n>h`, `all`); defaults to `1d`. */
+export function getDashboardKpiSummary(
+  environmentFilter?: string,
+  lookback?: string,
+): Promise<DashboardKpiSummary> {
+  return invoke("get_dashboard_kpi_summary", { environmentFilter, lookback });
 }
 
 export function getSchedulerStatus(): Promise<SchedulerStatus> {
