@@ -1,12 +1,13 @@
 use crate::db::{
-    DashboardBlockTaxonomy, DashboardKpiDelta, DashboardKpiSummary, DashboardQueueHealthSummary,
-    DashboardQueueUtilizationHistory, DashboardStatusCount, DashboardTrendSeries,
-    DashboardWaitRuntimeTrend, DashboardWorkflowBaseline, DashboardWorkflowFailureCount, Database,
-    EmailConfig, EmailProfile, MissionControlNeedsAttentionItem, MissionControlPanelAvailability,
-    MissionControlPreferences, MissionControlSnapshot, MissionControlUpcomingRun, NextRun,
-    QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask,
-    SchedulerAsset, SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow,
-    WorkflowHistoryBucket, WorkflowResourceSample, WorkflowTokenUsageRollup,
+    DashboardBlockTaxonomy, DashboardExecutionSlots, DashboardKpiDelta, DashboardKpiSummary,
+    DashboardQueueHealthSummary, DashboardQueueUtilizationHistory, DashboardStatusCount,
+    DashboardTrendSeries, DashboardWaitRuntimeTrend, DashboardWorkflowBaseline,
+    DashboardWorkflowFailureCount, Database, EmailConfig, EmailProfile,
+    MissionControlNeedsAttentionItem, MissionControlPanelAvailability, MissionControlPreferences,
+    MissionControlSnapshot, MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun,
+    RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask, SchedulerAsset,
+    SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
+    WorkflowResourceSample, WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use crate::service::{SchedulerService, WorkflowDraft};
@@ -1171,6 +1172,20 @@ pub fn get_dashboard_queue_utilization_history(
     state
         .db
         .dashboard_queue_utilization_history(&environment_filter, &window_modifier, grain)
+        .map_err(|e| e.to_string())
+}
+
+/// Observable execution slots for the v3 dashboard: running runs vs configured
+/// concurrency capacity, per queue and globally. Live snapshot (no lookback).
+#[tauri::command]
+pub fn get_dashboard_execution_slots(
+    state: State<AppState>,
+    environment_filter: Option<String>,
+) -> Result<DashboardExecutionSlots, String> {
+    let environment_filter = normalize_mission_environment_filter(environment_filter, "all");
+    state
+        .db
+        .dashboard_execution_slots(&environment_filter)
         .map_err(|e| e.to_string())
 }
 

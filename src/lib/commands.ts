@@ -521,6 +521,28 @@ export interface DashboardQueueUtilizationHistory {
   degraded_utilization: number;
 }
 
+/** Execution slots for one queue: running runs vs configured capacity. Mirrors
+ * `db::DashboardExecutionSlotQueue`. `available` = max(capacity - running, 0). */
+export interface DashboardExecutionSlotQueue {
+  name: string;
+  environment: string;
+  running: number;
+  capacity: number;
+  available: number;
+  utilization: number;
+}
+
+/** Execution-slot occupancy per queue + global. Mirrors
+ * `db::DashboardExecutionSlots`. Global capacity is the scheduler-wide
+ * `global_parallelism_cap`; global running is the sum of the queues' running. */
+export interface DashboardExecutionSlots {
+  queues: DashboardExecutionSlotQueue[];
+  global_running: number;
+  global_capacity: number;
+  global_available: number;
+  global_utilization: number;
+}
+
 export interface MissionControlNeedsAttentionItem {
   id: string;
   severity: string;
@@ -1096,6 +1118,14 @@ export function getDashboardQueueUtilizationHistory(
     environmentFilter,
     lookback,
   });
+}
+
+/** Execution slots: running runs vs configured concurrency capacity, per queue
+ * and global. Live snapshot (no lookback). */
+export function getDashboardExecutionSlots(
+  environmentFilter?: string,
+): Promise<DashboardExecutionSlots> {
+  return invoke("get_dashboard_execution_slots", { environmentFilter });
 }
 
 export function getSchedulerStatus(): Promise<SchedulerStatus> {
