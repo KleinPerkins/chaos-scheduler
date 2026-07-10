@@ -1,0 +1,54 @@
+/*
+ * LookbackSelect — segmented lookback-window pill group.
+ * Colors/type bind to the shared tokens (see tokens.css / DESIGN-SYSTEM.md);
+ * never raw hex. Matches the Figma master (node 121:585).
+ */
+
+.lookback-select {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.lookback-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 7px 13px;
+  border: none;
+  border-radius: calc(var(--radius) - 2px);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.lookback-option:hover {
+  color: var(--text-primary);
+}
+
+.lookback-option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.lookback-option.active {
+  background: var(--accent);
+  color: var(--text-inverse);
+  font-weight: 600;
+}
+
+.lookback-option.active:hover {
+  background: var(--accent-hover);
+  color: var(--text-inverse);
+}
