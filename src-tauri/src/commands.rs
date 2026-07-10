@@ -1,10 +1,10 @@
 use crate::db::{
-    DashboardKpiSummary, DashboardStatusCount, Database, EmailConfig, EmailProfile,
-    MissionControlNeedsAttentionItem, MissionControlPanelAvailability, MissionControlPreferences,
-    MissionControlSnapshot, MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun,
-    RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask, SchedulerAsset,
-    SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
-    WorkflowResourceSample, WorkflowTokenUsageRollup,
+    DashboardKpiSummary, DashboardStatusCount, DashboardTrendSeries, Database, EmailConfig,
+    EmailProfile, MissionControlNeedsAttentionItem, MissionControlPanelAvailability,
+    MissionControlPreferences, MissionControlSnapshot, MissionControlUpcomingRun, NextRun,
+    QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask,
+    SchedulerAsset, SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow,
+    WorkflowHistoryBucket, WorkflowResourceSample, WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use crate::service::{SchedulerService, WorkflowDraft};
@@ -1019,6 +1019,29 @@ pub fn get_dashboard_status_distribution(
         .map_err(|e| e.to_string())
 }
 
+/// Cross-workflow success/fail trend for the v3 dashboard, scoped to
+/// `(environmentFilter, lookback)`. The bucket grain (`hour`/`day`) is chosen
+/// from the lookback and returned alongside the buckets. `lookback` accepts the
+/// shared grammar; defaults to `1d`.
+#[tauri::command]
+pub fn get_dashboard_success_fail_trend(
+    state: State<AppState>,
+    environment_filter: Option<String>,
+    lookback: Option<String>,
+) -> Result<DashboardTrendSeries, String> {
+    let (window_modifier, window_seconds) = parse_lookback(lookback.as_deref())?;
+    let grain = bucket_grain(window_seconds);
+    let environment_filter = normalize_mission_environment_filter(environment_filter, "all");
+    let buckets = state
+        .db
+        .dashboard_success_fail_trend(&environment_filter, &window_modifier, grain)
+        .map_err(|e| e.to_string())?;
+    Ok(DashboardTrendSeries {
+        grain: grain.to_string(),
+        buckets,
+    })
+}
+
 #[tauri::command]
 pub fn query_resource_samples(
     state: State<AppState>,
@@ -1126,6 +1149,17 @@ fn parse_lookback(value: Option<&str>) -> Result<(String, i64), String> {
         _ => return Err(format!("Unsupported lookback unit: {}", unit)),
     };
     Ok((format!("-{} {}", count, sqlite_unit), count * unit_seconds))
+}
+
+/// Choose a trend bucket grain from the nominal window length: sub-day
+/// (`"hour"`) for windows up to 3 days, otherwise `"day"`. Keeps short
+/// lookbacks (1d/3d) hourly and longer ones (7d/30d) daily.
+fn bucket_grain(window_seconds: i64) -> &'static str {
+    if window_seconds <= 3 * 24 * 60 * 60 {
+        "hour"
+    } else {
+        "day"
+    }
 }
 
 fn split_window(value: &str) -> Option<(&str, &str)> {
@@ -1609,6 +1643,37 @@ mod tests {
             created_at: "2026-05-12T00:00:00Z".to_string(),
             updated_at: "2026-05-12T00:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn bucket_grain_switches_from_hour_to_day_above_three_days() {
+        assert_eq!(bucket_grain(24 * 60 * 60), "hour"); // 1d
+        assert_eq!(bucket_grain(3 * 24 * 60 * 60), "hour"); // 3d (inclusive)
+        assert_eq!(bucket_grain(3 * 24 * 60 * 60 + 1), "day"); // just over 3d
+        assert_eq!(bucket_grain(7 * 24 * 60 * 60), "day"); // 7d
+        assert_eq!(bucket_grain(30 * 24 * 60 * 60), "day"); // 30d
+    }
+
+    #[test]
+    fn parse_lookback_maps_grammar_to_modifier_and_seconds() {
+        assert_eq!(
+            parse_lookback(Some("1d")).unwrap(),
+            ("-1 days".to_string(), 86_400)
+        );
+        assert_eq!(
+            parse_lookback(Some("3d")).unwrap(),
+            ("-3 days".to_string(), 3 * 86_400)
+        );
+        assert_eq!(
+            parse_lookback(Some("12h")).unwrap(),
+            ("-12 hours".to_string(), 12 * 3_600)
+        );
+        assert_eq!(
+            parse_lookback(None).unwrap(),
+            ("-1 days".to_string(), 86_400)
+        );
+        assert!(parse_lookback(Some("0d")).is_err());
+        assert!(parse_lookback(Some("bogus")).is_err());
     }
 
     #[test]
