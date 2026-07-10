@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       e2e: ${{ steps.filter.outputs.e2e }}
+      code_connect: ${{ steps.filter.outputs.code_connect }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -32,6 +33,14 @@ jobs:
               - 'src/index.css'
               - 'src/playwright-gate.ts'
               - 'playwright.config.ts'
+            code_connect:
+              - 'src/**/*.figma.tsx'
+              - 'src/components/**/*.tsx'
+              - 'figma.config.json'
+              - 'tsconfig.figma.json'
+              - 'scripts/check-code-connect.mjs'
+              - 'scripts/check-code-connect.test.mjs'
+              - '.github/workflows/ci.yml'
 
   frontend:
     name: Frontend (lint, typecheck, build)
@@ -170,6 +179,34 @@ jobs:
       - name: Verify generated tokens are committed-fresh
         run: npm run tokens:check
 
+  # Credential-free Code Connect health check. The repo is the source of truth
+  # for its Figma mappings (src/**/*.figma.tsx); the live publish needs a PAT and
+  # is deliberately outside ci-required, so this required, credential-free check
+  # catches a malformed mapping on the PR that introduces it. It (1) type-checks
+  # every mapping against the real component (real props), (2) runs the
+  # credential-free `figma connect parse`, and (3) validates each existing
+  # mapping resolves to a real source file and renders a real snippet. It does
+  # NOT require every component to have a mapping. Runs when a mapping OR a
+  # mapped source file changes (see the `code_connect` filter above).
+  code-connect:
+    name: Code Connect (typecheck + parse + coverage)
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.code_connect == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Type-check Code Connect mappings (real component props)
+        run: npm run figma:typecheck
+      - name: Unit tests (Code Connect validator)
+        run: npm run test:code-connect
+      - name: Parse + validate mappings (credential-free)
+        run: npm run code-connect:check
+
   # Pre-release guard: the Rust `tauri` crate and the JS `@tauri-apps/*` packages
   # must share a major.minor or `tauri build` aborts in the release job (root
   # cause of the 0.3.0 desktop build failure). Compile-free lockfile check.
@@ -200,6 +237,7 @@ jobs:
         commitlint,
         tauri-versions,
         tokens,
+        code-connect,
       ]
     runs-on: ubuntu-latest
     steps:
