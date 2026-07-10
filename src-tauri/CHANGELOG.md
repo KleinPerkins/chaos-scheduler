@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v1.1.0...chaos-scheduler-tauri-v1.2.0) (2026-07-10)
+
+
+### Miscellaneous Chores
+
+* **chaos-scheduler-tauri:** Synchronize chaos-scheduler-desktop versions
+
 ## [1.1.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v1.0.4...chaos-scheduler-tauri-v1.1.0) (2026-07-09)
 
 
