@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.1.0...chaos-scheduler-v1.2.0) (2026-07-10)
+
+
+### Features
+
+* **figma:** add Code Connect mappings for 10 masters + AGENTS.md fact fixes ([#174](https://github.com/KleinPerkins/chaos-scheduler/issues/174)) ([3cc958d](https://github.com/KleinPerkins/chaos-scheduler/commit/3cc958d6bc8e4ede5d42d491f04369f3d56ff69e))
+
+
+### Documentation
+
+* **agents:** reflect live Code Connect + CI auto-publish ([#176](https://github.com/KleinPerkins/chaos-scheduler/issues/176)) ([8117c8d](https://github.com/KleinPerkins/chaos-scheduler/commit/8117c8deee1bbf3a4304324eaf24f29ecba4888f))
+
 ## [1.1.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.0.4...chaos-scheduler-v1.1.0) (2026-07-09)
 
 
