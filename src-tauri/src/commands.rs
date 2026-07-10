@@ -1,8 +1,8 @@
 use crate::db::{
-    DashboardBlockTaxonomy, DashboardExecutionSlots, DashboardKpiDelta, DashboardKpiSummary,
-    DashboardQueueHealthSummary, DashboardQueueUtilizationHistory, DashboardStatusCount,
-    DashboardTrendSeries, DashboardWaitRuntimeTrend, DashboardWorkflowBaseline,
-    DashboardWorkflowFailureCount, Database, EmailConfig, EmailProfile,
+    DashboardBlastRadius, DashboardBlockTaxonomy, DashboardExecutionSlots, DashboardKpiDelta,
+    DashboardKpiSummary, DashboardQueueHealthSummary, DashboardQueueUtilizationHistory,
+    DashboardStatusCount, DashboardTrendSeries, DashboardWaitRuntimeTrend,
+    DashboardWorkflowBaseline, DashboardWorkflowFailureCount, Database, EmailConfig, EmailProfile,
     MissionControlNeedsAttentionItem, MissionControlPanelAvailability, MissionControlPreferences,
     MissionControlSnapshot, MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun,
     RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask, SchedulerAsset,
@@ -1186,6 +1186,25 @@ pub fn get_dashboard_execution_slots(
     state
         .db
         .dashboard_execution_slots(&environment_filter)
+        .map_err(|e| e.to_string())
+}
+
+/// Downstream blast-radius per workflow for the v3 dashboard: from
+/// `run_relationships` chain edges, the downstream dependent count + max chain
+/// depth of each in-window run, rolled up per workflow. `lookback` defaults to
+/// `7d` (blast radius wants a wider window than the live dashboard lookback).
+#[tauri::command]
+pub fn get_dashboard_blast_radius(
+    state: State<AppState>,
+    environment_filter: Option<String>,
+    lookback: Option<String>,
+) -> Result<Vec<DashboardBlastRadius>, String> {
+    let (window_modifier, _window_seconds) =
+        parse_lookback(Some(lookback.as_deref().unwrap_or("7d")))?;
+    let environment_filter = normalize_mission_environment_filter(environment_filter, "all");
+    state
+        .db
+        .dashboard_blast_radius(&environment_filter, &window_modifier)
         .map_err(|e| e.to_string())
 }
 

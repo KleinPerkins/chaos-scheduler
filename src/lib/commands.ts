@@ -543,6 +543,20 @@ export interface DashboardExecutionSlots {
   global_utilization: number;
 }
 
+/** Downstream blast-radius rollup for one workflow. Mirrors
+ * `db::DashboardBlastRadius`. `*_downstream_count` is the count of distinct
+ * downstream runs reachable via run_relationships chain edges; `max_depth` is
+ * the longest such chain. Count/depth only — no DAG shape, no per-edge waits. */
+export interface DashboardBlastRadius {
+  workflow_id: string;
+  workflow_name: string;
+  environment: string;
+  runs_considered: number;
+  max_downstream_count: number;
+  avg_downstream_count: number;
+  max_depth: number;
+}
+
 export interface MissionControlNeedsAttentionItem {
   id: string;
   severity: string;
@@ -1126,6 +1140,16 @@ export function getDashboardExecutionSlots(
   environmentFilter?: string,
 ): Promise<DashboardExecutionSlots> {
   return invoke("get_dashboard_execution_slots", { environmentFilter });
+}
+
+/** Downstream blast-radius per workflow: from run_relationships chain edges, the
+ * downstream dependent count + max chain depth of each in-window run, rolled up
+ * per workflow. `lookback` defaults to `7d`. */
+export function getDashboardBlastRadius(
+  environmentFilter?: string,
+  lookback?: string,
+): Promise<DashboardBlastRadius[]> {
+  return invoke("get_dashboard_blast_radius", { environmentFilter, lookback });
 }
 
 export function getSchedulerStatus(): Promise<SchedulerStatus> {
