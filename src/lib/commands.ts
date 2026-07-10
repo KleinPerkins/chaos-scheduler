@@ -403,6 +403,39 @@ export interface DashboardWaitRuntimeTrend {
   runtime: DashboardMetricBucket[];
 }
 
+/** One workflow's in-window failure recurrence. Mirrors
+ * `db::DashboardWorkflowFailureCount`. */
+export interface DashboardWorkflowFailureCount {
+  workflow_id: string;
+  workflow_name: string;
+  environment: string;
+  failure_count: number;
+  total_runs: number;
+}
+
+/** One queue's current health classification. Mirrors `db::DashboardQueueHealth`. */
+export interface DashboardQueueHealth {
+  name: string;
+  environment: string;
+  capacity: number;
+  max_queued: number | null;
+  active_count: number;
+  queued_count: number;
+  utilization: number;
+  status: "healthy" | "warn" | "degraded";
+}
+
+/** Current queue-health summary + tallies + echoed thresholds. Mirrors
+ * `db::DashboardQueueHealthSummary`. */
+export interface DashboardQueueHealthSummary {
+  queues: DashboardQueueHealth[];
+  healthy: number;
+  warn: number;
+  degraded: number;
+  warn_utilization: number;
+  degraded_backlog: number;
+}
+
 export interface MissionControlNeedsAttentionItem {
   id: string;
   severity: string;
@@ -907,6 +940,27 @@ export function getDashboardWaitRuntimeTrend(
     environmentFilter,
     lookback,
   });
+}
+
+/** Per-workflow failure recurrence for the v3 dashboard, worst first. Only
+ * workflows with at least one failure in the window are returned. `lookback`
+ * accepts the shared grammar; defaults to `1d`. */
+export function getDashboardFailureRecurrence(
+  environmentFilter?: string,
+  lookback?: string,
+): Promise<DashboardWorkflowFailureCount[]> {
+  return invoke("get_dashboard_failure_recurrence", {
+    environmentFilter,
+    lookback,
+  });
+}
+
+/** Current queue-health summary for the v3 dashboard. Reflects live occupancy,
+ * so it takes no lookback. */
+export function getDashboardQueueHealth(
+  environmentFilter?: string,
+): Promise<DashboardQueueHealthSummary> {
+  return invoke("get_dashboard_queue_health", { environmentFilter });
 }
 
 export function getSchedulerStatus(): Promise<SchedulerStatus> {
