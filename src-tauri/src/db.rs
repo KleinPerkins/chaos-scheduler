@@ -723,6 +723,26 @@ pub struct DashboardExecutionSlots {
     pub global_utilization: f64,
 }
 
+/// Downstream blast-radius rollup for one workflow over a window. Per in-window
+/// run we measure, from `run_relationships` parent->child chain edges, the count
+/// of distinct downstream runs (`downstream_count`) and the longest downstream
+/// chain (`depth`); those per-run measures are rolled up to the workflow. A
+/// count/depth contract only — no fan-out DAG shape, no per-edge wait durations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardBlastRadius {
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub environment: String,
+    /// In-window runs of this workflow considered as chain roots.
+    pub runs_considered: i64,
+    /// Worst-case downstream dependent count across the considered runs.
+    pub max_downstream_count: i64,
+    /// Mean downstream dependent count across the considered runs (0s included).
+    pub avg_downstream_count: f64,
+    /// Longest downstream chain depth across the considered runs.
+    pub max_depth: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionControlNeedsAttentionItem {
     pub id: String,
@@ -4555,6 +4575,76 @@ impl Database {
             global_available,
             global_utilization,
         })
+    }
+
+    /// Downstream blast-radius per workflow over `(environment, window)`. For each
+    /// in-window run (windowed on its `started_at`) we compute, from
+    /// `run_relationships` parent->child chain edges, the count of distinct
+    /// downstream runs and the longest downstream chain (depth), then roll those
+    /// per-run measures up to the workflow (max + avg count, max depth) over the
+    /// runs considered. The recursive traversal is depth-guarded against cycles.
+    /// A count/depth contract only — no fan-out DAG shape, no per-edge waits.
+    pub fn dashboard_blast_radius(
+        &self,
+        environment_filter: &str,
+        window_modifier: &str,
+    ) -> rusqlite::Result<Vec<DashboardBlastRadius>> {
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "WITH RECURSIVE
+                 in_scope AS (
+                     SELECT r.id AS run_id,
+                            r.workflow_id AS wid,
+                            w.name AS wname,
+                            COALESCE(NULLIF(w.environment, ''), 'production') AS env
+                     FROM runs r
+                     JOIN workflows w ON w.id = r.workflow_id
+                     WHERE datetime(r.started_at) >= datetime('now', ?2)
+                       AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
+                 ),
+                 descendants AS (
+                     SELECT s.run_id AS root, rr.child_run_id AS node, 1 AS depth
+                     FROM in_scope s
+                     JOIN run_relationships rr ON rr.parent_run_id = s.run_id
+                     WHERE rr.child_run_id IS NOT NULL
+                     UNION ALL
+                     SELECT d.root, rr.child_run_id, d.depth + 1
+                     FROM descendants d
+                     JOIN run_relationships rr ON rr.parent_run_id = d.node
+                     WHERE rr.child_run_id IS NOT NULL AND d.depth < 64
+                 ),
+                 per_run AS (
+                     SELECT root AS run_id,
+                            COUNT(DISTINCT node) AS downstream_count,
+                            MAX(depth) AS max_depth
+                     FROM descendants
+                     GROUP BY root
+                 )
+             SELECT s.wid,
+                    s.wname,
+                    s.env,
+                    COUNT(DISTINCT s.run_id) AS runs_considered,
+                    COALESCE(MAX(pr.downstream_count), 0) AS max_downstream,
+                    COALESCE(AVG(COALESCE(pr.downstream_count, 0)), 0) AS avg_downstream,
+                    COALESCE(MAX(pr.max_depth), 0) AS max_depth
+             FROM in_scope s
+             LEFT JOIN per_run pr ON pr.run_id = s.run_id
+             GROUP BY s.wid, s.wname, s.env
+             ORDER BY max_downstream DESC, s.wname ASC",
+        )?;
+        let rows = stmt.query_map(params![environment_filter, window_modifier], |row| {
+            Ok(DashboardBlastRadius {
+                workflow_id: row.get(0)?,
+                workflow_name: row.get(1)?,
+                environment: row.get(2)?,
+                runs_considered: row.get(3)?,
+                max_downstream_count: row.get(4)?,
+                avg_downstream_count: row.get(5)?,
+                max_depth: row.get(6)?,
+            })
+        })?;
+        rows.collect()
     }
 
     /// Rolling per-workflow runtime baselines over a trailing window: expected
@@ -11018,6 +11108,85 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let all_slots = db.dashboard_execution_slots("all").unwrap();
         check(&all_slots, "all");
         assert_eq!(all_slots.global_running, 2, "prod + sandbox running");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dashboard_blast_radius_counts_downstream_and_depth() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let mk = |name: &str, env: &str, domain: &str| {
+            db.create_workflow(
+                name,
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                env,
+                Some(domain),
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let a = mk("WF A", "production", "scheduler");
+        let b = mk("WF B", "production", "card");
+        let s = mk("WF S", "sandbox", "card");
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = db.conn().unwrap();
+        let run = |id: &str, wf: &str| {
+            conn.execute(
+                "INSERT INTO runs (id, workflow_id, started_at, status) VALUES (?1, ?2, ?3, 'success')",
+                params![id, wf, now],
+            )
+            .unwrap();
+        };
+        run("rA1", &a.id);
+        run("rA2", &a.id);
+        run("rA3", &a.id);
+        run("rB1", &b.id);
+        run("rS1", &s.id);
+        let edge = |id: &str, parent: &str, child: &str, child_wf: &str| {
+            conn.execute(
+                "INSERT INTO run_relationships (id, parent_run_id, child_run_id, child_workflow_id, relationship, wait, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'run_workflow', 0, 'succeeded', ?5, ?5)",
+                params![id, parent, child, child_wf, now],
+            )
+            .unwrap();
+        };
+        // Chain: rA1 -> rA2 -> rA3, plus a branch rA1 -> rB1.
+        edge("e1", "rA1", "rA2", &a.id);
+        edge("e2", "rA2", "rA3", &a.id);
+        edge("e3", "rA1", "rB1", &b.id);
+
+        let prod = db.dashboard_blast_radius("production", "-1 day").unwrap();
+        assert_eq!(prod.len(), 2, "A and B (sandbox excluded)");
+        // Ordered by max_downstream DESC -> A first.
+        let wa = &prod[0];
+        assert_eq!(wa.workflow_id, a.id);
+        assert_eq!(wa.runs_considered, 3, "rA1, rA2, rA3");
+        assert_eq!(wa.max_downstream_count, 3, "rA1 -> {{rA2, rA3, rB1}}");
+        assert_eq!(wa.max_depth, 2, "rA1 -> rA2 -> rA3");
+        assert!(
+            (wa.avg_downstream_count - 4.0 / 3.0).abs() < 1e-9,
+            "(3 + 1 + 0) / 3, got {}",
+            wa.avg_downstream_count
+        );
+        let wb = prod.iter().find(|w| w.workflow_id == b.id).unwrap();
+        assert_eq!(wb.runs_considered, 1);
+        assert_eq!(wb.max_downstream_count, 0, "rB1 has no downstream");
+        assert_eq!(wb.max_depth, 0);
+
+        // "all" adds the sandbox workflow (no downstream edges).
+        let all = db.dashboard_blast_radius("all", "-1 day").unwrap();
+        assert_eq!(all.len(), 3);
+        let ws = all.iter().find(|w| w.workflow_id == s.id).unwrap();
+        assert_eq!(ws.runs_considered, 1);
+        assert_eq!(ws.max_downstream_count, 0);
 
         let _ = std::fs::remove_dir_all(dir);
     }
