@@ -442,6 +442,7 @@ pub fn run() {
             commands::get_dashboard_kpi_summary,
             commands::get_dashboard_status_distribution,
             commands::get_dashboard_success_fail_trend,
+            commands::get_dashboard_wait_runtime_trend,
             commands::query_resource_samples,
             commands::query_token_usage_rollup,
             commands::query_stale_assets,

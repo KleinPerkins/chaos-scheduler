@@ -384,6 +384,25 @@ export interface DashboardTrendSeries {
   buckets: DashboardTrendBucket[];
 }
 
+/** One bucket of a wait/runtime duration trend. Mirrors `db::DashboardMetricBucket`.
+ * `baseline_avg_seconds` is the 30-day trailing average ending at the bucket. */
+export interface DashboardMetricBucket {
+  bucket: string;
+  avg_seconds: number | null;
+  max_seconds: number | null;
+  count: number;
+  baseline_avg_seconds: number | null;
+}
+
+/** Wait + runtime duration trends over (environment, lookback), each bucketed
+ * at the chosen grain with a 30-day trailing-average baseline per bucket.
+ * Mirrors `db::DashboardWaitRuntimeTrend`. */
+export interface DashboardWaitRuntimeTrend {
+  grain: "hour" | "day";
+  wait: DashboardMetricBucket[];
+  runtime: DashboardMetricBucket[];
+}
+
 export interface MissionControlNeedsAttentionItem {
   id: string;
   severity: string;
@@ -872,6 +891,19 @@ export function getDashboardSuccessFailTrend(
   lookback?: string,
 ): Promise<DashboardTrendSeries> {
   return invoke("get_dashboard_success_fail_trend", {
+    environmentFilter,
+    lookback,
+  });
+}
+
+/** Wait + runtime duration trends for the v3 dashboard, each bucketed at a
+ * grain chosen from the lookback with a 30-day trailing-average baseline per
+ * bucket. `lookback` accepts the shared grammar; defaults to `1d`. */
+export function getDashboardWaitRuntimeTrend(
+  environmentFilter?: string,
+  lookback?: string,
+): Promise<DashboardWaitRuntimeTrend> {
+  return invoke("get_dashboard_wait_runtime_trend", {
     environmentFilter,
     lookback,
   });

@@ -1,10 +1,11 @@
 use crate::db::{
-    DashboardKpiSummary, DashboardStatusCount, DashboardTrendSeries, Database, EmailConfig,
-    EmailProfile, MissionControlNeedsAttentionItem, MissionControlPanelAvailability,
-    MissionControlPreferences, MissionControlSnapshot, MissionControlUpcomingRun, NextRun,
-    QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask,
-    SchedulerAsset, SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow,
-    WorkflowHistoryBucket, WorkflowResourceSample, WorkflowTokenUsageRollup,
+    DashboardKpiSummary, DashboardStatusCount, DashboardTrendSeries, DashboardWaitRuntimeTrend,
+    Database, EmailConfig, EmailProfile, MissionControlNeedsAttentionItem,
+    MissionControlPanelAvailability, MissionControlPreferences, MissionControlSnapshot,
+    MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt,
+    RunMetric, RunRelationship, RunTask, SchedulerAsset, SchedulerDeadLetter, SchedulerStatus,
+    SlaViolation, Workflow, WorkflowHistoryBucket, WorkflowResourceSample,
+    WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use crate::service::{SchedulerService, WorkflowDraft};
@@ -1040,6 +1041,25 @@ pub fn get_dashboard_success_fail_trend(
         grain: grain.to_string(),
         buckets,
     })
+}
+
+/// Wait + runtime duration trends for the v3 dashboard, scoped to
+/// `(environmentFilter, lookback)`, each bucketed at a grain chosen from the
+/// lookback with a 30-day trailing-average baseline per bucket. `lookback`
+/// accepts the shared grammar; defaults to `1d`.
+#[tauri::command]
+pub fn get_dashboard_wait_runtime_trend(
+    state: State<AppState>,
+    environment_filter: Option<String>,
+    lookback: Option<String>,
+) -> Result<DashboardWaitRuntimeTrend, String> {
+    let (window_modifier, window_seconds) = parse_lookback(lookback.as_deref())?;
+    let grain = bucket_grain(window_seconds);
+    let environment_filter = normalize_mission_environment_filter(environment_filter, "all");
+    state
+        .db
+        .dashboard_wait_runtime_trend(&environment_filter, &window_modifier, grain)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -513,6 +513,40 @@ pub struct DashboardTrendSeries {
     pub buckets: Vec<DashboardTrendBucket>,
 }
 
+/// One time bucket of a duration-metric trend (wait or runtime). Carries the
+/// in-bucket average and max (seconds) plus the sample count, and a 30-day
+/// trailing-average baseline ending at this bucket (an overlay reference).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardMetricBucket {
+    /// ISO-8601 UTC bucket start (`YYYY-MM-DDTHH:00:00Z` for hour grain,
+    /// `YYYY-MM-DDT00:00:00Z` for day grain).
+    pub bucket: String,
+    /// Mean metric over samples in the bucket; `None` when the bucket is empty.
+    pub avg_seconds: Option<f64>,
+    /// Largest metric over samples in the bucket; `None` when empty.
+    pub max_seconds: Option<f64>,
+    /// Sample count that fed `avg_seconds`/`max_seconds`.
+    pub count: i64,
+    /// Mean metric over the trailing 30 days ending at this bucket (inclusive
+    /// of the bucket), across all in-scope samples. `None` when there are no
+    /// samples in the trailing window. This is the baseline line the trend is
+    /// read against.
+    pub baseline_avg_seconds: Option<f64>,
+}
+
+/// Wait + runtime duration trends over `(environment, lookback)`, each bucketed
+/// at the chosen grain, with a 30-day trailing-average baseline per bucket.
+/// `wait` is admission wait (`queued_at`→`admitted_at`) bucketed on `queued_at`;
+/// `runtime` is execution time (`started_at`→`finished_at`) bucketed on
+/// `started_at`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardWaitRuntimeTrend {
+    /// `"hour"` (sub-day) or `"day"`.
+    pub grain: String,
+    pub wait: Vec<DashboardMetricBucket>,
+    pub runtime: Vec<DashboardMetricBucket>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionControlNeedsAttentionItem {
     pub id: String,
@@ -3767,6 +3801,177 @@ impl Database {
             })
         })?;
         rows.collect()
+    }
+
+    /// Wait + runtime duration trends over `(environment, window)` at `grain`.
+    /// `wait` is admission wait (`queued_at`→`admitted_at`) from `queued_runs`
+    /// bucketed on `queued_at`; `runtime` is execution time
+    /// (`started_at`→`finished_at`) from `runs` bucketed on `started_at`. Each
+    /// bucket carries avg/max/count plus a 30-day trailing-average baseline
+    /// (see `DashboardMetricBucket`). `grain` is chosen by the caller from the
+    /// lookback; any value other than `"hour"` is treated as day grain.
+    pub fn dashboard_wait_runtime_trend(
+        &self,
+        environment_filter: &str,
+        window_modifier: &str,
+        grain: &str,
+    ) -> rusqlite::Result<DashboardWaitRuntimeTrend> {
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
+        let hour = grain == "hour";
+        let grain_seconds: i64 = if hour { 3_600 } else { 86_400 };
+        let conn = self.conn()?;
+
+        let runtime = Self::metric_trend(
+            &conn,
+            &environment_filter,
+            window_modifier,
+            hour,
+            grain_seconds,
+            "r.started_at",
+            "(julianday(r.finished_at) - julianday(r.started_at)) * 86400.0",
+            "runs r JOIN workflows w ON w.id = r.workflow_id",
+            "r.finished_at IS NOT NULL",
+        )?;
+        let wait = Self::metric_trend(
+            &conn,
+            &environment_filter,
+            window_modifier,
+            hour,
+            grain_seconds,
+            "q.queued_at",
+            "(julianday(q.admitted_at) - julianday(q.queued_at)) * 86400.0",
+            "queued_runs q JOIN workflows w ON w.id = q.workflow_id",
+            "q.admitted_at IS NOT NULL",
+        )?;
+
+        Ok(DashboardWaitRuntimeTrend {
+            grain: if hour { "hour" } else { "day" }.to_string(),
+            wait,
+            runtime,
+        })
+    }
+
+    /// Fetch one duration-metric trend (in-window per-bucket avg/max/count) plus
+    /// the extended-range per-bucket sums that feed the 30-day trailing
+    /// baseline, then reduce them together. Every SQL fragment is a fixed
+    /// internal constant (never user input); only `environment_filter` and
+    /// `window_modifier` are bound parameters.
+    #[allow(clippy::too_many_arguments)]
+    fn metric_trend(
+        conn: &Connection,
+        environment_filter: &str,
+        window_modifier: &str,
+        hour: bool,
+        grain_seconds: i64,
+        bucket_col: &str,
+        value_expr: &str,
+        from_clause: &str,
+        not_null_pred: &str,
+    ) -> rusqlite::Result<Vec<DashboardMetricBucket>> {
+        let bucket_expr = if hour {
+            "substr(ts, 1, 13) || ':00:00Z'"
+        } else {
+            "substr(ts, 1, 10) || 'T00:00:00Z'"
+        };
+        // `extra` appends the extra `-30 days` modifier for the baseline range.
+        let inner = |extra: &str| {
+            format!(
+                "SELECT {bucket_col} AS ts, {value_expr} AS secs
+                 FROM {from_clause}
+                 WHERE {not_null_pred}
+                   AND datetime({bucket_col}) >= datetime('now', ?2{extra})
+                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)"
+            )
+        };
+        let display_sql = format!(
+            "SELECT {bucket_expr} AS bucket, AVG(secs) AS avg_s, MAX(secs) AS max_s, COUNT(*) AS cnt
+             FROM ({source})
+             GROUP BY bucket
+             ORDER BY bucket ASC",
+            source = inner("")
+        );
+        let extended_sql = format!(
+            "SELECT {bucket_expr} AS bucket, SUM(secs) AS sum_s, COUNT(*) AS cnt
+             FROM ({source})
+             GROUP BY bucket
+             ORDER BY bucket ASC",
+            source = inner(", '-30 days'")
+        );
+
+        let mut display_stmt = conn.prepare(&display_sql)?;
+        let display: Vec<(String, Option<f64>, Option<f64>, i64)> = display_stmt
+            .query_map(params![environment_filter, window_modifier], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut extended_stmt = conn.prepare(&extended_sql)?;
+        let extended: Vec<(String, f64, i64)> = extended_stmt
+            .query_map(params![environment_filter, window_modifier], |row| {
+                Ok((row.get(0)?, row.get::<_, f64>(1)?, row.get(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(Self::assemble_metric_trend(
+            display,
+            extended,
+            grain_seconds,
+        ))
+    }
+
+    /// Attach a 30-day trailing-average baseline to each in-window display
+    /// bucket. `display` is `(bucket, avg, max, count)`; `extended` is
+    /// `(bucket, sum_seconds, count)` over the window extended 30 days earlier.
+    /// For each display bucket the baseline averages every extended sample in
+    /// `[bucket_start - 30d, bucket_start + grain)` (i.e. the trailing 30 days
+    /// ending at the bucket, inclusive of the bucket). Pure — unit-tested
+    /// directly.
+    fn assemble_metric_trend(
+        display: Vec<(String, Option<f64>, Option<f64>, i64)>,
+        extended: Vec<(String, f64, i64)>,
+        grain_seconds: i64,
+    ) -> Vec<DashboardMetricBucket> {
+        let parsed: Vec<(chrono::DateTime<chrono::Utc>, f64, i64)> = extended
+            .into_iter()
+            .filter_map(|(bucket, sum, count)| {
+                chrono::DateTime::parse_from_rfc3339(&bucket)
+                    .ok()
+                    .map(|dt| (dt.with_timezone(&chrono::Utc), sum, count))
+            })
+            .collect();
+        let trailing = chrono::Duration::days(30);
+        let width = chrono::Duration::seconds(grain_seconds);
+        display
+            .into_iter()
+            .map(|(bucket, avg_seconds, max_seconds, count)| {
+                let baseline_avg_seconds = chrono::DateTime::parse_from_rfc3339(&bucket)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .and_then(|start| {
+                        let lo = start - trailing;
+                        let hi = start + width;
+                        let (mut sum, mut n) = (0.0_f64, 0_i64);
+                        for (t, s, c) in &parsed {
+                            if *t >= lo && *t < hi {
+                                sum += *s;
+                                n += *c;
+                            }
+                        }
+                        if n > 0 {
+                            Some(sum / n as f64)
+                        } else {
+                            None
+                        }
+                    });
+                DashboardMetricBucket {
+                    bucket,
+                    avg_seconds,
+                    max_seconds,
+                    count,
+                    baseline_avg_seconds,
+                }
+            })
+            .collect()
     }
 
     pub fn mission_control_recent_runs(
@@ -8827,6 +9032,199 @@ SUMMARY_JSON:{\"title\":\"current\"}
             .unwrap();
         assert_eq!(all_recent.total, 3, "A + B + sandbox");
         assert_eq!(all_recent.failed, 2);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn assemble_metric_trend_computes_trailing_30day_baseline() {
+        // Day grain (86400s). Display buckets pass avg/max/count through; the
+        // baseline for each is the mean over extended samples in
+        // [bucket - 30d, bucket + 1d).
+        let display = vec![
+            (
+                "2026-03-01T00:00:00Z".to_string(),
+                Some(200.0),
+                Some(200.0),
+                1,
+            ),
+            (
+                "2026-03-31T00:00:00Z".to_string(),
+                Some(50.0),
+                Some(50.0),
+                1,
+            ),
+            // No trailing samples in [2026-05-02, 2026-06-02) -> baseline None.
+            ("2026-06-01T00:00:00Z".to_string(), Some(9.0), Some(9.0), 1),
+        ];
+        let extended = vec![
+            ("2026-02-01T00:00:00Z".to_string(), 100.0, 1), // 28d before Mar-01
+            ("2026-03-01T00:00:00Z".to_string(), 200.0, 1), // the Mar-01 day
+            ("2026-03-31T00:00:00Z".to_string(), 50.0, 1),  // the Mar-31 day
+        ];
+        let out = Database::assemble_metric_trend(display, extended, 86_400);
+
+        assert_eq!(out.len(), 3);
+        // Mar-01 window [Jan-30, Mar-02): Feb-01(100) + Mar-01(200) -> 150.
+        assert_eq!(out[0].bucket, "2026-03-01T00:00:00Z");
+        assert_eq!(out[0].avg_seconds, Some(200.0), "avg passes through");
+        assert_eq!(out[0].count, 1);
+        assert!((out[0].baseline_avg_seconds.unwrap() - 150.0).abs() < 1e-9);
+        // Mar-31 window [Mar-01, Apr-01): Mar-01(200) + Mar-31(50) -> 125.
+        assert!((out[1].baseline_avg_seconds.unwrap() - 125.0).abs() < 1e-9);
+        // No trailing samples -> None.
+        assert_eq!(out[2].baseline_avg_seconds, None);
+    }
+
+    #[test]
+    fn dashboard_wait_runtime_trend_buckets_and_baseline() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let a = db
+            .create_workflow(
+                "WF A",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let b = db
+            .create_workflow(
+                "WF B",
+                None,
+                "scripts/workflows/noop.py",
+                "0 1 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("card"),
+                None,
+                None,
+            )
+            .unwrap();
+        let sandbox = db
+            .create_workflow(
+                "WF S",
+                None,
+                "scripts/workflows/noop.py",
+                "0 2 * * *",
+                false,
+                true,
+                "UTC",
+                "sandbox",
+                Some("card"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let now = chrono::Utc::now();
+        let at = |mins_ago: i64| (now - chrono::Duration::minutes(mins_ago)).to_rfc3339();
+        let span = |mins_ago: i64, secs: i64| {
+            (now - chrono::Duration::minutes(mins_ago) + chrono::Duration::seconds(secs))
+                .to_rfc3339()
+        };
+        let hour_bucket = |mins_ago: i64| format!("{}:00:00Z", &at(mins_ago)[..13]);
+        let conn = db.conn().unwrap();
+        let insert_run = |id: &str, wf: &str, started: String, finished: String, status: &str| {
+            conn.execute(
+                "INSERT INTO runs (id, workflow_id, started_at, finished_at, status) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, wf, started, finished, status],
+            )
+            .unwrap();
+        };
+        let insert_queued = |id: &str, wf: &str, queued: String, admitted: String| {
+            conn.execute(
+                "INSERT INTO queued_runs (id, workflow_id, queue_name, status, queued_at, admitted_at) VALUES (?1, ?2, 'production-default', 'admitted', ?3, ?4)",
+                params![id, wf, queued, admitted],
+            )
+            .unwrap();
+        };
+
+        // Runtime: same hour bucket (now-120m) A=60s + B=120s; earlier hour
+        // (now-300m) A=30s; sandbox (now-120m)=999s excluded under production.
+        insert_run("r1", &a.id, at(120), span(120, 60), "success");
+        insert_run("r2", &b.id, at(120), span(120, 120), "failed");
+        insert_run("r3", &a.id, at(300), span(300, 30), "success");
+        insert_run("rs", &sandbox.id, at(120), span(120, 999), "success");
+        // 10 days ago (outside the 1d display window, inside the 30d baseline).
+        insert_run(
+            "rold",
+            &a.id,
+            at(10 * 24 * 60),
+            span(10 * 24 * 60, 300),
+            "success",
+        );
+
+        // Wait: now-120m A=10s + B=20s; now-300m A=40s; sandbox excluded;
+        // 10 days ago 200s feeds the baseline only.
+        insert_queued("q1", &a.id, at(120), span(120, 10));
+        insert_queued("q2", &b.id, at(120), span(120, 20));
+        insert_queued("q3", &a.id, at(300), span(300, 40));
+        insert_queued("qs", &sandbox.id, at(120), span(120, 99));
+        insert_queued("qold", &a.id, at(10 * 24 * 60), span(10 * 24 * 60, 200));
+
+        let trend = db
+            .dashboard_wait_runtime_trend("production", "-1 day", "hour")
+            .unwrap();
+        assert_eq!(trend.grain, "hour");
+
+        // Runtime buckets.
+        let rt_recent = trend
+            .runtime
+            .iter()
+            .find(|bk| bk.bucket == hour_bucket(120))
+            .unwrap();
+        assert_eq!(rt_recent.count, 2, "A + B, sandbox excluded");
+        assert!((rt_recent.avg_seconds.unwrap() - 90.0).abs() < 1.0);
+        assert!((rt_recent.max_seconds.unwrap() - 120.0).abs() < 1.0);
+        // Baseline pulls in the earlier + 10-day-old runs: (60+120+30+300)/4.
+        assert!(
+            (rt_recent.baseline_avg_seconds.unwrap() - 127.5).abs() < 1.0,
+            "runtime baseline ~127.5, got {:?}",
+            rt_recent.baseline_avg_seconds
+        );
+        let rt_earlier = trend
+            .runtime
+            .iter()
+            .find(|bk| bk.bucket == hour_bucket(300))
+            .unwrap();
+        assert_eq!(rt_earlier.count, 1);
+        assert!((rt_earlier.avg_seconds.unwrap() - 30.0).abs() < 1.0);
+
+        // Wait buckets.
+        let w_recent = trend
+            .wait
+            .iter()
+            .find(|bk| bk.bucket == hour_bucket(120))
+            .unwrap();
+        assert_eq!(w_recent.count, 2, "A + B, sandbox excluded");
+        assert!((w_recent.avg_seconds.unwrap() - 15.0).abs() < 1.0);
+        assert!((w_recent.max_seconds.unwrap() - 20.0).abs() < 1.0);
+        assert!(
+            w_recent.baseline_avg_seconds.is_some(),
+            "wait baseline present (includes 10-day-old wait)"
+        );
+
+        // "all" includes the sandbox run in the now-120m runtime bucket.
+        let all = db
+            .dashboard_wait_runtime_trend("all", "-1 day", "hour")
+            .unwrap();
+        let all_recent = all
+            .runtime
+            .iter()
+            .find(|bk| bk.bucket == hour_bucket(120))
+            .unwrap();
+        assert_eq!(all_recent.count, 3, "A + B + sandbox");
 
         let _ = std::fs::remove_dir_all(dir);
     }
