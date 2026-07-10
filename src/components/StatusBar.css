@@ -1,0 +1,101 @@
+/*
+ * StatusBar — proportional run-status distribution bar + legend.
+ * Colors bind to the shared status tokens (see tokens.css / DESIGN-SYSTEM.md);
+ * never raw hex. Matches the Figma master (node 60:145).
+ */
+
+.status-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 100%;
+}
+
+.status-bar-track {
+  display: flex;
+  gap: 3px;
+  align-items: stretch;
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg-tertiary);
+}
+
+.status-bar-seg {
+  height: 100%;
+  min-width: 2px;
+}
+
+/* Segment colors — keyed by status token, matching StatusDot / StatusBadge. */
+.status-bar-seg.success,
+.status-bar-seg.succeeded {
+  background: var(--success);
+}
+
+.status-bar-seg.running,
+.status-bar-seg.queued,
+.status-bar-seg.admitted {
+  background: var(--running);
+}
+
+.status-bar-seg.failed,
+.status-bar-seg.timed_out,
+.status-bar-seg.cancelled,
+.status-bar-seg.stale {
+  background: var(--error);
+}
+
+.status-bar-seg.warning,
+.status-bar-seg.poll_exhausted {
+  background: var(--warning);
+}
+
+.status-bar-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.status-bar-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.status-bar-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-bar-dot.success,
+.status-bar-dot.succeeded {
+  background: var(--success);
+}
+
+.status-bar-dot.running,
+.status-bar-dot.queued,
+.status-bar-dot.admitted {
+  background: var(--running);
+}
+
+.status-bar-dot.failed,
+.status-bar-dot.timed_out,
+.status-bar-dot.cancelled,
+.status-bar-dot.stale {
+  background: var(--error);
+}
+
+.status-bar-dot.warning,
+.status-bar-dot.poll_exhausted {
+  background: var(--warning);
+}
