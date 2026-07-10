@@ -496,6 +496,31 @@ export interface DashboardBlockTaxonomy {
   heavy_blockers: DashboardHeavyBlocker[];
 }
 
+/** One time bucket of queue-occupancy history. Mirrors
+ * `db::DashboardQueueOccupancyBucket`. Each `(queue, sample)` is one data point;
+ * `bucket` is the ISO-8601 UTC bucket start. Utilization is `running/capacity`
+ * over samples with a positive capacity (else null). */
+export interface DashboardQueueOccupancyBucket {
+  bucket: string;
+  avg_running: number | null;
+  max_running: number | null;
+  avg_queued: number | null;
+  max_queued: number | null;
+  avg_utilization: number | null;
+  max_utilization: number | null;
+  sample_count: number;
+}
+
+/** Queue-utilization history over (environment, lookback) + threshold bands.
+ * Mirrors `db::DashboardQueueUtilizationHistory`. Backed by the periodic
+ * queue-occupancy sampler. */
+export interface DashboardQueueUtilizationHistory {
+  grain: "hour" | "day";
+  buckets: DashboardQueueOccupancyBucket[];
+  warn_utilization: number;
+  degraded_utilization: number;
+}
+
 export interface MissionControlNeedsAttentionItem {
   id: string;
   severity: string;
@@ -1055,6 +1080,19 @@ export function getDashboardBlockTaxonomy(
   lookback?: string,
 ): Promise<DashboardBlockTaxonomy> {
   return invoke("get_dashboard_block_taxonomy", {
+    environmentFilter,
+    lookback,
+  });
+}
+
+/** Queue-utilization history: a per-bucket occupancy series over (environment,
+ * lookback) at a grain chosen from the lookback, plus healthy/warn/degraded
+ * utilization thresholds. Backed by the periodic queue-occupancy sampler. */
+export function getDashboardQueueUtilizationHistory(
+  environmentFilter?: string,
+  lookback?: string,
+): Promise<DashboardQueueUtilizationHistory> {
+  return invoke("get_dashboard_queue_utilization_history", {
     environmentFilter,
     lookback,
   });

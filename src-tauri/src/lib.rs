@@ -448,6 +448,7 @@ pub fn run() {
             commands::get_dashboard_workflow_baselines,
             commands::get_dashboard_kpi_wow,
             commands::get_dashboard_block_taxonomy,
+            commands::get_dashboard_queue_utilization_history,
             commands::query_resource_samples,
             commands::query_token_usage_rollup,
             commands::query_stale_assets,

@@ -664,6 +664,37 @@ pub struct DashboardBlockTaxonomy {
     pub heavy_blockers: Vec<DashboardHeavyBlocker>,
 }
 
+/// One time bucket of queue-occupancy history. Aggregated across every queue
+/// sample that fell in the bucket (each `(queue, sample)` is one data point):
+/// avg/max running, avg/max queued, avg/max utilization (`running / capacity`,
+/// only over samples with a positive capacity), and the backing sample count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardQueueOccupancyBucket {
+    /// ISO-8601 UTC bucket start.
+    pub bucket: String,
+    pub avg_running: Option<f64>,
+    pub max_running: Option<i64>,
+    pub avg_queued: Option<f64>,
+    pub max_queued: Option<i64>,
+    pub avg_utilization: Option<f64>,
+    pub max_utilization: Option<f64>,
+    pub sample_count: i64,
+}
+
+/// Queue-utilization history over `(environment, lookback)`: a per-bucket
+/// occupancy series at the chosen grain plus the healthy/warn/degraded
+/// utilization thresholds the UI should band by. Backed by the periodic
+/// `queue_occupancy_samples` sampler. Thresholds are FLAGGED defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardQueueUtilizationHistory {
+    pub grain: String,
+    pub buckets: Vec<DashboardQueueOccupancyBucket>,
+    /// Utilization at/above which a queue is "warn" (0..1).
+    pub warn_utilization: f64,
+    /// Utilization at/above which a queue is "degraded" (0..1).
+    pub degraded_utilization: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionControlNeedsAttentionItem {
     pub id: String,
@@ -878,7 +909,7 @@ pub enum IdempotencyReservation {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 11;
+pub const CURRENT_SCHEMA_VERSION: i64 = 12;
 
 pub struct Database {
     path: String,
@@ -1270,6 +1301,17 @@ impl Database {
                 emitted_at TEXT NOT NULL,
                 labels_json TEXT
             );
+            CREATE TABLE IF NOT EXISTS queue_occupancy_samples (
+                id TEXT PRIMARY KEY,
+                queue_name TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                running INTEGER NOT NULL,
+                queued INTEGER NOT NULL,
+                capacity INTEGER,
+                sampled_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_queue_occ_samples_env_time ON queue_occupancy_samples(environment, sampled_at);
+            CREATE INDEX IF NOT EXISTS idx_queue_occ_samples_sampled_at ON queue_occupancy_samples(sampled_at);
             CREATE INDEX IF NOT EXISTS idx_runs_workflow_started ON runs(workflow_id, started_at DESC);
             CREATE INDEX IF NOT EXISTS idx_queued_runs_queue_status ON queued_runs(queue_name, status, priority DESC, queued_at ASC);
             CREATE INDEX IF NOT EXISTS idx_queued_runs_workflow_status ON queued_runs(workflow_id, status);
@@ -1343,7 +1385,29 @@ impl Database {
             (9, Self::migrate_v9_drop_workflow_corpus),
             (10, Self::migrate_v10_rename_mission_filter_key),
             (11, Self::migrate_v11_production_sandbox_environments),
+            (12, Self::migrate_v12_queue_occupancy_samples),
         ]
+    }
+
+    /// v12: add the `queue_occupancy_samples` table for the queue-utilization
+    /// history sampler (periodic per-queue running/queued/capacity snapshots).
+    /// Additive and idempotent — a new observability table with no bearing on
+    /// existing scheduling, run, or queue write paths.
+    fn migrate_v12_queue_occupancy_samples(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS queue_occupancy_samples (
+                id TEXT PRIMARY KEY,
+                queue_name TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                running INTEGER NOT NULL,
+                queued INTEGER NOT NULL,
+                capacity INTEGER,
+                sampled_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_queue_occ_samples_env_time ON queue_occupancy_samples(environment, sampled_at);
+            CREATE INDEX IF NOT EXISTS idx_queue_occ_samples_sampled_at ON queue_occupancy_samples(sampled_at);",
+        )?;
+        Ok(())
     }
 
     /// v11: retire legacy `source`/`instance` environment names in favor of
@@ -4306,6 +4370,118 @@ impl Database {
         }
     }
 
+    /// Capture one queue-occupancy snapshot: for every configured queue, append
+    /// its current running/queued/capacity to `queue_occupancy_samples`. Driven
+    /// periodically by the scheduler loop. Returns the number of samples written.
+    /// Append-only observability — it never touches scheduling/queue write paths.
+    pub fn sample_queue_occupancy(&self) -> rusqlite::Result<usize> {
+        let queues = self.list_queues()?;
+        if queues.is_empty() {
+            return Ok(0);
+        }
+        let sampled_at = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "INSERT INTO queue_occupancy_samples
+               (id, queue_name, environment, running, queued, capacity, sampled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        let mut written = 0usize;
+        for q in queues {
+            let capacity: Option<i64> = if q.capacity > 0 {
+                Some(q.capacity)
+            } else {
+                None
+            };
+            stmt.execute(params![
+                uuid::Uuid::new_v4().to_string(),
+                q.name,
+                normalize_mission_environment_filter(&q.environment),
+                q.active_count,
+                q.queued_count,
+                capacity,
+                sampled_at,
+            ])?;
+            written += 1;
+        }
+        Ok(written)
+    }
+
+    /// Delete queue-occupancy samples older than `retention_modifier` (an SQLite
+    /// datetime modifier, e.g. `-30 days`). Returns the number of rows pruned.
+    /// Called alongside the sampler so the table stays bounded.
+    pub fn prune_queue_occupancy_samples(
+        &self,
+        retention_modifier: &str,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        let deleted = conn.execute(
+            "DELETE FROM queue_occupancy_samples WHERE datetime(sampled_at) < datetime('now', ?1)",
+            params![retention_modifier],
+        )?;
+        Ok(deleted)
+    }
+
+    /// Queue-utilization history over `(environment, window)` at `grain`. Each
+    /// `(queue, sample)` row is one data point; per bucket we report avg/max
+    /// running, avg/max queued, and avg/max utilization (`running / capacity`,
+    /// only over samples with a positive capacity). Thresholds echoed for the UI
+    /// are FLAGGED defaults. `bucket_expr`/`grain` come from a fixed internal set
+    /// (never user input), so formatting them into the SQL is injection-safe.
+    pub fn dashboard_queue_utilization_history(
+        &self,
+        environment_filter: &str,
+        window_modifier: &str,
+        grain: &str,
+    ) -> rusqlite::Result<DashboardQueueUtilizationHistory> {
+        // Utilization bands FLAGGED for orchestrator review.
+        const WARN_UTILIZATION: f64 = 0.75;
+        const DEGRADED_UTILIZATION: f64 = 0.9;
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
+        let bucket_expr = if grain == "hour" {
+            "substr(s.sampled_at, 1, 13) || ':00:00Z'"
+        } else {
+            "substr(s.sampled_at, 1, 10) || 'T00:00:00Z'"
+        };
+        let sql = format!(
+            "SELECT {bucket_expr} AS bucket,
+                    AVG(s.running) AS avg_running,
+                    MAX(s.running) AS max_running,
+                    AVG(s.queued) AS avg_queued,
+                    MAX(s.queued) AS max_queued,
+                    AVG(CASE WHEN s.capacity > 0 THEN CAST(s.running AS REAL) / s.capacity END) AS avg_util,
+                    MAX(CASE WHEN s.capacity > 0 THEN CAST(s.running AS REAL) / s.capacity END) AS max_util,
+                    COUNT(*) AS cnt
+             FROM queue_occupancy_samples s
+             WHERE datetime(s.sampled_at) >= datetime('now', ?2)
+               AND (?1 = 'all' OR s.environment = ?1)
+             GROUP BY bucket
+             ORDER BY bucket ASC"
+        );
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&sql)?;
+        let buckets = stmt
+            .query_map(params![environment_filter, window_modifier], |row| {
+                Ok(DashboardQueueOccupancyBucket {
+                    bucket: row.get(0)?,
+                    avg_running: row.get(1)?,
+                    max_running: row.get(2)?,
+                    avg_queued: row.get(3)?,
+                    max_queued: row.get(4)?,
+                    avg_utilization: row.get(5)?,
+                    max_utilization: row.get(6)?,
+                    sample_count: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(DashboardQueueUtilizationHistory {
+            grain: grain.to_string(),
+            buckets,
+            warn_utilization: WARN_UTILIZATION,
+            degraded_utilization: DEGRADED_UTILIZATION,
+        })
+    }
+
     /// Rolling per-workflow runtime baselines over a trailing window: expected
     /// (p50) and mean execution time plus the backing sample count, for every
     /// workflow with at least one finished run in the window. The p50 is
@@ -6450,7 +6626,7 @@ mod tests {
         // Tripwire: refresh this fixture (seed schema + asserted columns) the
         // next time a migration lands so the newest N-1 -> N paths stay covered.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 11,
+            CURRENT_SCHEMA_VERSION, 12,
             "add a v(N-1)->v(N) fixture when a new migration ships"
         );
 
@@ -6532,7 +6708,7 @@ mod tests {
             assert_eq!(v, 7);
         }
 
-        // Apply the pending v8–v11 migrations.
+        // Apply the pending v8–v12 migrations.
         let conn = db.conn().unwrap();
         db.run_migrations(&conn, 7).unwrap();
 
@@ -6540,6 +6716,20 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
+
+        // v12 adds the queue-occupancy sampler table (created only by the
+        // migration here, since this fixture never runs the base `init` batch).
+        let occ_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='queue_occupancy_samples'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            occ_table, 1,
+            "v12 migration should add queue_occupancy_samples"
+        );
 
         let run_cols = runs_columns(&conn);
         for expected in [
@@ -10409,6 +10599,223 @@ SUMMARY_JSON:{\"title\":\"current\"}
             .heavy_blockers
             .iter()
             .any(|h| h.workflow_id == sand.id));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sample_queue_occupancy_snapshots_live_queues() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        db.upsert_queue("production-default", "production", 2, None, None)
+            .unwrap();
+        db.upsert_queue("batch", "production", 3, None, None)
+            .unwrap();
+        let prod = db
+            .create_workflow(
+                "Prod WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = db.conn().unwrap();
+            conn.execute(
+                "INSERT INTO runs (id, workflow_id, started_at, status) VALUES ('run-p', ?1, ?2, 'running')",
+                params![prod.id, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO queued_runs (id, workflow_id, queue_name, status, queued_at) VALUES ('q1', ?1, 'production-default', 'queued', ?2)",
+                params![prod.id, now],
+            )
+            .unwrap();
+        }
+
+        // The snapshot must equal the live list_queues() occupancy, one row each.
+        let live = db.list_queues().unwrap();
+        let written = db.sample_queue_occupancy().unwrap();
+        assert_eq!(written, live.len());
+        assert!(written >= 2, "at least the two configured queues");
+
+        let conn = db.conn().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT queue_name, running, queued, capacity FROM queue_occupancy_samples")
+            .unwrap();
+        let rows: Vec<(String, i64, i64, Option<i64>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows.len(), live.len());
+        for q in &live {
+            let row = rows
+                .iter()
+                .find(|r| r.0 == q.name)
+                .unwrap_or_else(|| panic!("no sample for queue {}", q.name));
+            assert_eq!(row.1, q.active_count, "running for {}", q.name);
+            assert_eq!(row.2, q.queued_count, "queued for {}", q.name);
+            let expected_cap = if q.capacity > 0 {
+                Some(q.capacity)
+            } else {
+                None
+            };
+            assert_eq!(row.3, expected_cap, "capacity for {}", q.name);
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dashboard_queue_utilization_history_buckets_and_thresholds() {
+        use chrono::Timelike;
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        let now = chrono::Utc::now();
+        let h0 = now
+            .with_minute(0)
+            .unwrap()
+            .with_second(0)
+            .unwrap()
+            .with_nanosecond(0)
+            .unwrap();
+        let at = |h: i64, m: i64| {
+            (h0 + chrono::Duration::hours(h) + chrono::Duration::minutes(m)).to_rfc3339()
+        };
+        let bkt = |h: i64| {
+            (h0 + chrono::Duration::hours(h))
+                .format("%Y-%m-%dT%H:00:00Z")
+                .to_string()
+        };
+        let conn = db.conn().unwrap();
+        let ins = |id: &str,
+                   queue: &str,
+                   env: &str,
+                   running: i64,
+                   queued: i64,
+                   capacity: Option<i64>,
+                   sampled_at: String| {
+            conn.execute(
+                "INSERT INTO queue_occupancy_samples (id, queue_name, environment, running, queued, capacity, sampled_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![id, queue, env, running, queued, capacity, sampled_at],
+            )
+            .unwrap();
+        };
+        // Bucket b(-2): two prod samples. Bucket b(-1): one prod + one sandbox.
+        ins(
+            "o1",
+            "production-default",
+            "production",
+            1,
+            0,
+            Some(4),
+            at(-2, 5),
+        );
+        ins(
+            "o2",
+            "production-default",
+            "production",
+            3,
+            2,
+            Some(4),
+            at(-2, 40),
+        );
+        ins(
+            "o3",
+            "production-default",
+            "production",
+            2,
+            1,
+            Some(4),
+            at(-1, 20),
+        );
+        ins("o4", "sandbox-default", "sandbox", 5, 0, None, at(-1, 25));
+
+        let prod = db
+            .dashboard_queue_utilization_history("production", "-1 day", "hour")
+            .unwrap();
+        assert_eq!(prod.grain, "hour");
+        assert_eq!(prod.warn_utilization, 0.75);
+        assert_eq!(prod.degraded_utilization, 0.9);
+        assert_eq!(prod.buckets.len(), 2, "two distinct hour buckets");
+        assert_eq!(prod.buckets[0].bucket, bkt(-2), "ascending order");
+        assert_eq!(prod.buckets[1].bucket, bkt(-1));
+        let b2 = &prod.buckets[0];
+        assert_eq!(b2.sample_count, 2);
+        assert!((b2.avg_running.unwrap() - 2.0).abs() < 1e-9);
+        assert_eq!(b2.max_running, Some(3));
+        assert!((b2.avg_queued.unwrap() - 1.0).abs() < 1e-9);
+        assert_eq!(b2.max_queued, Some(2));
+        assert!(
+            (b2.avg_utilization.unwrap() - 0.5).abs() < 1e-9,
+            "(0.25+0.75)/2"
+        );
+        assert!((b2.max_utilization.unwrap() - 0.75).abs() < 1e-9);
+        let b1 = &prod.buckets[1];
+        assert_eq!(b1.sample_count, 1);
+        assert!((b1.avg_utilization.unwrap() - 0.5).abs() < 1e-9);
+
+        // "all" pulls the sandbox sample into b(-1); util counts only capped rows.
+        let all = db
+            .dashboard_queue_utilization_history("all", "-1 day", "hour")
+            .unwrap();
+        let all_b1 = all.buckets.iter().find(|b| b.bucket == bkt(-1)).unwrap();
+        assert_eq!(all_b1.sample_count, 2);
+        assert_eq!(all_b1.max_running, Some(5));
+        assert!(
+            (all_b1.avg_utilization.unwrap() - 0.5).abs() < 1e-9,
+            "only the capacity>0 row (o3) contributes utilization"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_queue_occupancy_samples_removes_only_old_rows() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let now = chrono::Utc::now();
+        let recent = now.to_rfc3339();
+        let old = (now - chrono::Duration::days(40)).to_rfc3339();
+        {
+            let conn = db.conn().unwrap();
+            let ins = |id: &str, sampled_at: &str| {
+                conn.execute(
+                    "INSERT INTO queue_occupancy_samples (id, queue_name, environment, running, queued, capacity, sampled_at) VALUES (?1, 'q', 'production', 1, 0, 2, ?2)",
+                    params![id, sampled_at],
+                )
+                .unwrap();
+            };
+            ins("recent", &recent);
+            ins("old", &old);
+        }
+
+        let deleted = db.prune_queue_occupancy_samples("-30 days").unwrap();
+        assert_eq!(deleted, 1, "only the 40-day-old row is pruned");
+        let conn = db.conn().unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM queue_occupancy_samples", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(remaining, 1);
+        let kept: String = conn
+            .query_row("SELECT id FROM queue_occupancy_samples", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, "recent");
 
         let _ = std::fs::remove_dir_all(dir);
     }
