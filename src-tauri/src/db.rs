@@ -482,6 +482,24 @@ pub struct DashboardKpiSummary {
     pub window_seconds: i64,
 }
 
+/// Week-over-week (period-over-period) KPI comparison: the current window vs the
+/// immediately-prior equal window, plus current-minus-previous deltas for the
+/// KPI set. Optional deltas are `None` when either side is absent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardKpiDelta {
+    pub current: DashboardKpiSummary,
+    pub previous: DashboardKpiSummary,
+    pub total_runs_delta: i64,
+    pub succeeded_delta: i64,
+    pub failed_delta: i64,
+    pub success_rate_delta: Option<f64>,
+    pub throughput_per_hour_delta: Option<f64>,
+    pub avg_runtime_seconds_delta: Option<f64>,
+    pub max_runtime_seconds_delta: Option<i64>,
+    pub median_wait_seconds_delta: Option<i64>,
+    pub max_wait_seconds_delta: Option<i64>,
+}
+
 /// One slice of the dashboard status donut: a canonical run status and its
 /// count over the `(environment, lookback)` window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3701,8 +3719,32 @@ impl Database {
         window_modifier: &str,
         window_seconds: i64,
     ) -> rusqlite::Result<DashboardKpiSummary> {
-        let environment_filter = normalize_mission_environment_filter(environment_filter);
         let conn = self.conn()?;
+        // No upper bound: `+100 years` keeps the predicate always-true, so this
+        // is identical to the original half-open `>= now-window` behavior.
+        self.kpi_summary_windowed(
+            &conn,
+            environment_filter,
+            window_modifier,
+            "+100 years",
+            window_seconds,
+        )
+    }
+
+    /// Bounded KPI roll-up over `[now+lower_modifier, now+upper_modifier)`.
+    /// Backs both [`Database::dashboard_kpi_summary`] (open upper bound) and the
+    /// week-over-week comparison (which needs a closed prior window). Both
+    /// modifiers are SQLite datetime modifiers; `window_seconds` is the nominal
+    /// window length used to derive `throughput_per_hour`.
+    fn kpi_summary_windowed(
+        &self,
+        conn: &Connection,
+        environment_filter: &str,
+        lower_modifier: &str,
+        upper_modifier: &str,
+        window_seconds: i64,
+    ) -> rusqlite::Result<DashboardKpiSummary> {
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
         let (total_runs, succeeded, failed, avg_runtime_seconds, max_runtime_seconds): (
             i64,
             i64,
@@ -3719,8 +3761,9 @@ impl Database {
              FROM runs r
              JOIN workflows w ON w.id = r.workflow_id
              WHERE datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?2)
+               AND datetime(COALESCE(r.finished_at, r.started_at)) < datetime('now', ?3)
                AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)",
-            params![environment_filter, window_modifier],
+            params![environment_filter, lower_modifier, upper_modifier],
             |row| {
                 Ok((
                     row.get(0)?,
@@ -3742,12 +3785,14 @@ impl Database {
                  JOIN workflows w ON w.id = q.workflow_id
                  WHERE q.admitted_at IS NOT NULL
                    AND datetime(q.queued_at) >= datetime('now', ?2)
+                   AND datetime(q.queued_at) < datetime('now', ?3)
                    AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                  ORDER BY wait_seconds ASC",
             )?;
-            let rows = stmt.query_map(params![environment_filter, window_modifier], |row| {
-                row.get::<_, f64>(0)
-            })?;
+            let rows = stmt.query_map(
+                params![environment_filter, lower_modifier, upper_modifier],
+                |row| row.get::<_, f64>(0),
+            )?;
             rows.collect::<rusqlite::Result<Vec<f64>>>()?
         };
         let (median_wait_seconds, max_wait_seconds) = if waits.is_empty() {
@@ -3783,6 +3828,71 @@ impl Database {
             median_wait_seconds,
             max_wait_seconds,
             window_seconds,
+        })
+    }
+
+    /// Week-over-week (period-over-period) KPI comparison: the current window
+    /// `[now-W, now)` versus the immediately-prior equal window `[now-2W, now-W)`
+    /// for the same environment, plus the current-minus-previous deltas. `W` is
+    /// `window_seconds`; both sub-windows reuse [`Database::kpi_summary_windowed`]
+    /// so the KPI math is identical to the live summary. Optional deltas are
+    /// `Some` only when both sides are present.
+    pub fn dashboard_kpi_wow(
+        &self,
+        environment_filter: &str,
+        window_seconds: i64,
+    ) -> rusqlite::Result<DashboardKpiDelta> {
+        let conn = self.conn()?;
+        let current_lower = format!("-{} seconds", window_seconds);
+        let previous_lower = format!("-{} seconds", window_seconds.saturating_mul(2));
+        let previous_upper = current_lower.clone();
+        let current = self.kpi_summary_windowed(
+            &conn,
+            environment_filter,
+            &current_lower,
+            "+100 years",
+            window_seconds,
+        )?;
+        let previous = self.kpi_summary_windowed(
+            &conn,
+            environment_filter,
+            &previous_lower,
+            &previous_upper,
+            window_seconds,
+        )?;
+
+        let opt_f64 = |a: Option<f64>, b: Option<f64>| match (a, b) {
+            (Some(a), Some(b)) => Some(a - b),
+            _ => None,
+        };
+        let opt_i64 = |a: Option<i64>, b: Option<i64>| match (a, b) {
+            (Some(a), Some(b)) => Some(a - b),
+            _ => None,
+        };
+        Ok(DashboardKpiDelta {
+            total_runs_delta: current.total_runs - previous.total_runs,
+            succeeded_delta: current.succeeded - previous.succeeded,
+            failed_delta: current.failed - previous.failed,
+            success_rate_delta: opt_f64(current.success_rate, previous.success_rate),
+            throughput_per_hour_delta: opt_f64(
+                current.throughput_per_hour,
+                previous.throughput_per_hour,
+            ),
+            avg_runtime_seconds_delta: opt_f64(
+                current.avg_runtime_seconds,
+                previous.avg_runtime_seconds,
+            ),
+            max_runtime_seconds_delta: opt_i64(
+                current.max_runtime_seconds,
+                previous.max_runtime_seconds,
+            ),
+            median_wait_seconds_delta: opt_i64(
+                current.median_wait_seconds,
+                previous.median_wait_seconds,
+            ),
+            max_wait_seconds_delta: opt_i64(current.max_wait_seconds, previous.max_wait_seconds),
+            current,
+            previous,
         })
     }
 
@@ -9674,6 +9784,103 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(sd.status, "warn", "active 1 < cap 2 with 1 queued");
         assert_eq!(all.degraded, 1);
         assert_eq!(all.warn, 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dashboard_kpi_wow_compares_current_vs_prior_window() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let prod = db
+            .create_workflow(
+                "Prod WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let sandbox = db
+            .create_workflow(
+                "Sandbox WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 1 * * *",
+                false,
+                true,
+                "UTC",
+                "sandbox",
+                Some("card"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let now = chrono::Utc::now();
+        let at = |mins_ago: i64| (now - chrono::Duration::minutes(mins_ago)).to_rfc3339();
+        let span = |mins_ago: i64, secs: i64| {
+            (now - chrono::Duration::minutes(mins_ago) + chrono::Duration::seconds(secs))
+                .to_rfc3339()
+        };
+        let conn = db.conn().unwrap();
+        let insert_run = |id: &str, wf: &str, mins_ago: i64, secs: i64, status: &str| {
+            conn.execute(
+                "INSERT INTO runs (id, workflow_id, started_at, finished_at, status) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, wf, at(mins_ago), span(mins_ago, secs), status],
+            )
+            .unwrap();
+        };
+        let insert_wait = |id: &str, wf: &str, mins_ago: i64, secs: i64| {
+            conn.execute(
+                "INSERT INTO queued_runs (id, workflow_id, queue_name, status, queued_at, admitted_at) VALUES (?1, ?2, 'production-default', 'admitted', ?3, ?4)",
+                params![id, wf, at(mins_ago), span(mins_ago, secs)],
+            )
+            .unwrap();
+        };
+
+        // Window = 1h. Current [now-60m, now): 2 prod runs (1 ok, 1 failed).
+        insert_run("c1", &prod.id, 20, 60, "success");
+        insert_run("c2", &prod.id, 20, 120, "failed");
+        // Prior [now-120m, now-60m): 1 prod run (ok).
+        insert_run("p1", &prod.id, 80, 90, "success");
+        // Outside both windows.
+        insert_run("o1", &prod.id, 150, 30, "failed");
+        // Sandbox in the current window: excluded under production.
+        insert_run("s1", &sandbox.id, 20, 30, "failed");
+        // Waits: current median 20s, prior median 40s.
+        insert_wait("wc", &prod.id, 20, 20);
+        insert_wait("wp", &prod.id, 80, 40);
+
+        let wow = db.dashboard_kpi_wow("production", 3_600).unwrap();
+        assert_eq!(wow.current.total_runs, 2, "c1 + c2");
+        assert_eq!(wow.previous.total_runs, 1, "p1 only");
+        assert_eq!(wow.total_runs_delta, 1);
+        assert_eq!(wow.current.succeeded, 1);
+        assert_eq!(wow.current.failed, 1);
+        assert_eq!(wow.previous.succeeded, 1);
+        assert_eq!(wow.previous.failed, 0);
+        assert_eq!(wow.succeeded_delta, 0);
+        assert_eq!(wow.failed_delta, 1);
+        assert_eq!(wow.current.success_rate, Some(0.5));
+        assert_eq!(wow.previous.success_rate, Some(1.0));
+        assert!((wow.success_rate_delta.unwrap() - (-0.5)).abs() < 1e-9);
+        assert_eq!(wow.current.median_wait_seconds, Some(20));
+        assert_eq!(wow.previous.median_wait_seconds, Some(40));
+        assert_eq!(wow.median_wait_seconds_delta, Some(-20));
+        assert_eq!(wow.current.window_seconds, 3_600);
+
+        // "all" pulls the sandbox failure into the current window.
+        let all = db.dashboard_kpi_wow("all", 3_600).unwrap();
+        assert_eq!(all.current.total_runs, 3, "c1 + c2 + sandbox");
+        assert_eq!(all.current.failed, 2);
 
         let _ = std::fs::remove_dir_all(dir);
     }

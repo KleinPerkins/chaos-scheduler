@@ -1,11 +1,12 @@
 use crate::db::{
-    DashboardKpiSummary, DashboardQueueHealthSummary, DashboardStatusCount, DashboardTrendSeries,
-    DashboardWaitRuntimeTrend, DashboardWorkflowBaseline, DashboardWorkflowFailureCount, Database,
-    EmailConfig, EmailProfile, MissionControlNeedsAttentionItem, MissionControlPanelAvailability,
-    MissionControlPreferences, MissionControlSnapshot, MissionControlUpcomingRun, NextRun,
-    QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask,
-    SchedulerAsset, SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow,
-    WorkflowHistoryBucket, WorkflowResourceSample, WorkflowTokenUsageRollup,
+    DashboardKpiDelta, DashboardKpiSummary, DashboardQueueHealthSummary, DashboardStatusCount,
+    DashboardTrendSeries, DashboardWaitRuntimeTrend, DashboardWorkflowBaseline,
+    DashboardWorkflowFailureCount, Database, EmailConfig, EmailProfile,
+    MissionControlNeedsAttentionItem, MissionControlPanelAvailability, MissionControlPreferences,
+    MissionControlSnapshot, MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun,
+    RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask, SchedulerAsset,
+    SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
+    WorkflowResourceSample, WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use crate::service::{SchedulerService, WorkflowDraft};
@@ -1092,6 +1093,25 @@ pub fn get_dashboard_queue_health(
     state
         .db
         .dashboard_queue_health(&environment_filter)
+        .map_err(|e| e.to_string())
+}
+
+/// Week-over-week KPI comparison for the v3 dashboard: the current window vs the
+/// immediately-prior equal window, plus deltas. `lookback` accepts the shared
+/// grammar but defaults to `7d` so the out-of-the-box comparison is a true
+/// week-over-week; pass e.g. `1d` for day-over-day.
+#[tauri::command]
+pub fn get_dashboard_kpi_wow(
+    state: State<AppState>,
+    environment_filter: Option<String>,
+    lookback: Option<String>,
+) -> Result<DashboardKpiDelta, String> {
+    let (_window_modifier, window_seconds) =
+        parse_lookback(Some(lookback.as_deref().unwrap_or("7d")))?;
+    let environment_filter = normalize_mission_environment_filter(environment_filter, "all");
+    state
+        .db
+        .dashboard_kpi_wow(&environment_filter, window_seconds)
         .map_err(|e| e.to_string())
 }
 
