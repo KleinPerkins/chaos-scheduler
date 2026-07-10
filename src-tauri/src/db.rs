@@ -625,6 +625,45 @@ pub struct DashboardWorkflowBaseline {
     pub mean_runtime_seconds: Option<f64>,
 }
 
+/// Currently-blocked runs grouped by a reason-taxonomy category, with the count
+/// and the summed current wait (seconds) attributed to that category.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardBlockReasonCount {
+    /// One of `resource`, `event`, `host`, `workload`, `user`, `unknown`.
+    pub reason_category: String,
+    pub count: i64,
+    pub current_wait_seconds_total: f64,
+}
+
+/// A workflow that is a heavy source of current blocking: how many of its runs
+/// are blocked right now and the summed current wait (Σ-wait) across them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardHeavyBlocker {
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub environment: String,
+    pub blocked_count: i64,
+    pub sigma_wait_seconds: f64,
+}
+
+/// Blocked/waiting reason taxonomy over an environment: the current-blocked set
+/// classified into reason categories (from `run_relationships.reason` /
+/// `queue_events.reason`), current-wait totals, the trailing (historical)
+/// admission-wait stats over the lookback, and the heaviest per-workflow
+/// blockers by Σ current wait.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardBlockTaxonomy {
+    pub by_reason: Vec<DashboardBlockReasonCount>,
+    pub current_blocked_count: i64,
+    pub current_wait_seconds_total: f64,
+    pub current_wait_seconds_max: f64,
+    /// Mean admission wait (seconds) over admitted runs in the lookback window.
+    pub trailing_wait_seconds_avg: Option<f64>,
+    /// Longest admission wait (seconds) over admitted runs in the lookback.
+    pub trailing_wait_seconds_max: Option<f64>,
+    pub heavy_blockers: Vec<DashboardHeavyBlocker>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionControlNeedsAttentionItem {
     pub id: String,
@@ -4317,6 +4356,217 @@ impl Database {
             })
         })?;
         rows.collect()
+    }
+
+    /// Blocked/waiting reason taxonomy for `environment_filter`. Classifies every
+    /// currently-`queued` run into a reason category (from its
+    /// `run_relationships.reason`, else the latest `queue_events.reason` for its
+    /// workflow+queue) and reports per-category counts + Σ current wait, the
+    /// current-wait totals, the trailing (historical) admission-wait stats over
+    /// `window_modifier`, and the heaviest per-workflow blockers by Σ current
+    /// wait. Current wait is `now - queued_at`; trailing wait is
+    /// `admitted_at - queued_at` over admitted runs in the window.
+    pub fn dashboard_block_taxonomy(
+        &self,
+        environment_filter: &str,
+        window_modifier: &str,
+    ) -> rusqlite::Result<DashboardBlockTaxonomy> {
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
+        let conn = self.conn()?;
+
+        // Current-blocked set: one row per queued run, with its best-effort
+        // reason and how long it has been waiting.
+        struct BlockedRow {
+            workflow_id: String,
+            workflow_name: String,
+            environment: String,
+            current_wait_seconds: f64,
+            reason: Option<String>,
+        }
+        let blocked: Vec<BlockedRow> = {
+            let mut stmt = conn.prepare(
+                "SELECT q.workflow_id,
+                        w.name,
+                        COALESCE(NULLIF(w.environment, ''), 'production') AS env,
+                        (julianday('now') - julianday(q.queued_at)) * 86400.0 AS current_wait_seconds,
+                        COALESCE(
+                          (SELECT rr.reason FROM run_relationships rr
+                            WHERE rr.queued_run_id = q.id AND rr.reason IS NOT NULL
+                            ORDER BY rr.created_at DESC LIMIT 1),
+                          (SELECT qe.reason FROM queue_events qe
+                            WHERE qe.workflow_id = q.workflow_id AND qe.queue_name = q.queue_name
+                              AND qe.reason IS NOT NULL
+                            ORDER BY qe.emitted_at DESC LIMIT 1)
+                        ) AS reason
+                 FROM queued_runs q
+                 JOIN workflows w ON w.id = q.workflow_id
+                 WHERE q.status = 'queued'
+                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)",
+            )?;
+            let rows = stmt.query_map(params![environment_filter], |row| {
+                Ok(BlockedRow {
+                    workflow_id: row.get(0)?,
+                    workflow_name: row.get(1)?,
+                    environment: row.get(2)?,
+                    current_wait_seconds: row.get::<_, f64>(3)?.max(0.0),
+                    reason: row.get(4)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        // Aggregate by category and by workflow in one pass.
+        let mut by_category: std::collections::HashMap<&'static str, (i64, f64)> =
+            std::collections::HashMap::new();
+        let mut by_workflow: std::collections::HashMap<String, DashboardHeavyBlocker> =
+            std::collections::HashMap::new();
+        let mut current_wait_seconds_total = 0.0_f64;
+        let mut current_wait_seconds_max = 0.0_f64;
+        for row in &blocked {
+            let category = Self::classify_block_reason(row.reason.as_deref());
+            let entry = by_category.entry(category).or_insert((0, 0.0));
+            entry.0 += 1;
+            entry.1 += row.current_wait_seconds;
+            let wf = by_workflow
+                .entry(row.workflow_id.clone())
+                .or_insert_with(|| DashboardHeavyBlocker {
+                    workflow_id: row.workflow_id.clone(),
+                    workflow_name: row.workflow_name.clone(),
+                    environment: row.environment.clone(),
+                    blocked_count: 0,
+                    sigma_wait_seconds: 0.0,
+                });
+            wf.blocked_count += 1;
+            wf.sigma_wait_seconds += row.current_wait_seconds;
+            current_wait_seconds_total += row.current_wait_seconds;
+            if row.current_wait_seconds > current_wait_seconds_max {
+                current_wait_seconds_max = row.current_wait_seconds;
+            }
+        }
+
+        let mut by_reason: Vec<DashboardBlockReasonCount> = by_category
+            .into_iter()
+            .map(|(category, (count, wait))| DashboardBlockReasonCount {
+                reason_category: category.to_string(),
+                count,
+                current_wait_seconds_total: wait,
+            })
+            .collect();
+        by_reason.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.reason_category.cmp(&b.reason_category))
+        });
+
+        let mut heavy_blockers: Vec<DashboardHeavyBlocker> = by_workflow.into_values().collect();
+        heavy_blockers.sort_by(|a, b| {
+            b.sigma_wait_seconds
+                .partial_cmp(&a.sigma_wait_seconds)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.workflow_name.cmp(&b.workflow_name))
+        });
+
+        // Trailing (historical) admission wait over the lookback window.
+        let (trailing_wait_seconds_avg, trailing_wait_seconds_max): (Option<f64>, Option<f64>) =
+            conn.query_row(
+                "SELECT AVG(w_s), MAX(w_s) FROM (
+                     SELECT (julianday(q.admitted_at) - julianday(q.queued_at)) * 86400.0 AS w_s
+                     FROM queued_runs q
+                     JOIN workflows w ON w.id = q.workflow_id
+                     WHERE q.admitted_at IS NOT NULL
+                       AND datetime(q.queued_at) >= datetime('now', ?2)
+                       AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
+                 )",
+                params![environment_filter, window_modifier],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+
+        Ok(DashboardBlockTaxonomy {
+            by_reason,
+            current_blocked_count: blocked.len() as i64,
+            current_wait_seconds_total,
+            current_wait_seconds_max,
+            trailing_wait_seconds_avg,
+            trailing_wait_seconds_max,
+            heavy_blockers,
+        })
+    }
+
+    /// Classify a blocked/waiting run's free-text reason into a taxonomy
+    /// category: `resource` (capacity/mutex/concurrency), `event`
+    /// (dependency/upstream/asset waits), `host` (node/worker/connectivity),
+    /// `workload` (queue-assignment / workflow-config faults), `user`
+    /// (manual holds / dedup / cancellation), or `unknown` (unmatched or
+    /// missing). Case-insensitive substring match, checked in priority order.
+    /// Pure — unit-tested directly. FLAGGED for orchestrator review.
+    fn classify_block_reason(reason: Option<&str>) -> &'static str {
+        let text = match reason {
+            Some(raw) if !raw.trim().is_empty() => raw.to_ascii_lowercase(),
+            _ => return "unknown",
+        };
+        let has = |needles: &[&str]| needles.iter().any(|n| text.contains(n));
+        if has(&[
+            "capacity",
+            "at cap",
+            "mutex",
+            "tag cap",
+            "concurren",
+            "max queued",
+            "throttl",
+            "rate limit",
+            "queue full",
+            "busy",
+        ]) {
+            "resource"
+        } else if has(&[
+            "depends_on",
+            "depends on",
+            "waits_for",
+            "waits for",
+            "waiting for",
+            "upstream",
+            "dependency",
+            "trigger",
+            "asset",
+            "await",
+        ]) {
+            "event"
+        } else if has(&[
+            "host",
+            "node",
+            "worker",
+            "unreachable",
+            "offline",
+            "connection",
+            "agent",
+        ]) {
+            "host"
+        } else if has(&[
+            "queue assignment",
+            "no queue",
+            "loop rejected",
+            "invalid",
+            "config",
+            "spec",
+            "script",
+            "malformed",
+        ]) {
+            "workload"
+        } else if has(&[
+            "manual",
+            "paused",
+            "hold",
+            "already exists",
+            "duplicate",
+            "dedup",
+            "cancel",
+            "user",
+            "skip",
+        ]) {
+            "user"
+        } else {
+            "unknown"
+        }
     }
 
     pub fn mission_control_recent_runs(
@@ -9971,6 +10221,194 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let sb = all.iter().find(|w| w.workflow_id == s.id).unwrap();
         assert_eq!(sb.sample_count, 3);
         assert!((sb.p50_runtime_seconds.unwrap() - 5.0).abs() < 0.5);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn classify_block_reason_maps_taxonomy_categories() {
+        let c = Database::classify_block_reason;
+        assert_eq!(c(Some("AtCapacity: queue at capacity")), "resource");
+        assert_eq!(c(Some("workflow mutex busy")), "resource");
+        assert_eq!(c(Some("waiting for upstream dependency")), "event");
+        assert_eq!(c(Some("asset not yet materialized")), "event");
+        assert_eq!(c(Some("worker node offline")), "host");
+        assert_eq!(c(Some("invalid workflow spec")), "workload");
+        assert_eq!(c(Some("duplicate request, already exists")), "user");
+        assert_eq!(c(Some("paused by operator")), "user");
+        assert_eq!(c(Some("some novel unmatched string")), "unknown");
+        assert_eq!(c(Some("   ")), "unknown", "blank -> unknown");
+        assert_eq!(c(None), "unknown", "missing -> unknown");
+    }
+
+    #[test]
+    fn dashboard_block_taxonomy_classifies_current_and_trailing() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let prod = db
+            .create_workflow(
+                "Prod WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let sand = db
+            .create_workflow(
+                "Sandbox WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 1 * * *",
+                false,
+                true,
+                "UTC",
+                "sandbox",
+                Some("card"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let now = chrono::Utc::now();
+        let at = |mins_ago: i64| (now - chrono::Duration::minutes(mins_ago)).to_rfc3339();
+        let span = |mins_ago: i64, secs: i64| {
+            (now - chrono::Duration::minutes(mins_ago) + chrono::Duration::seconds(secs))
+                .to_rfc3339()
+        };
+        let now_s = now.to_rfc3339();
+        let conn = db.conn().unwrap();
+        // A parent run to satisfy the run_relationships FK (invisible to the aggregate).
+        conn.execute(
+            "INSERT INTO runs (id, workflow_id, started_at, status) VALUES ('parent', ?1, ?2, 'running')",
+            params![prod.id, now_s],
+        )
+        .unwrap();
+        let blocked = |id: &str, wf: &str, queue: &str, mins_ago: i64| {
+            conn.execute(
+                "INSERT INTO queued_runs (id, workflow_id, queue_name, status, queued_at) VALUES (?1, ?2, ?3, 'queued', ?4)",
+                params![id, wf, queue, at(mins_ago)],
+            )
+            .unwrap();
+        };
+        let admitted = |id: &str, wf: &str, mins_ago: i64, wait_secs: i64| {
+            conn.execute(
+                "INSERT INTO queued_runs (id, workflow_id, queue_name, status, queued_at, admitted_at) VALUES (?1, ?2, 'production-default', 'admitted', ?3, ?4)",
+                params![id, wf, at(mins_ago), span(mins_ago, wait_secs)],
+            )
+            .unwrap();
+        };
+        let add_rel = |id: &str, queued_run_id: &str, wf: &str, reason: &str| {
+            conn.execute(
+                "INSERT INTO run_relationships
+                   (id, parent_run_id, child_workflow_id, queued_run_id, relationship, wait, status, reason, created_at, updated_at)
+                 VALUES (?1, 'parent', ?2, ?3, 'waits_for', 1, 'waiting', ?4, ?5, ?5)",
+                params![id, wf, queued_run_id, reason, now_s],
+            )
+            .unwrap();
+        };
+        let add_qevent = |id: &str, wf: &str, queue: &str, reason: &str| {
+            conn.execute(
+                "INSERT INTO queue_events (id, queue_name, environment, workflow_id, event_type, reason, emitted_at) VALUES (?1, ?2, 'production', ?3, 'queued', ?4, ?5)",
+                params![id, queue, wf, reason, now_s],
+            )
+            .unwrap();
+        };
+
+        // Current-blocked set (status='queued'):
+        // qb1: reason via run_relationships -> resource; wait ~600s.
+        blocked("qb1", &prod.id, "production-default", 10);
+        add_rel("r1", "qb1", &prod.id, "AtCapacity: queue at capacity");
+        // qb2: reason via queue_events fallback (workflow+queue) -> event; wait ~300s.
+        blocked("qb2", &prod.id, "production-default", 5);
+        add_qevent(
+            "e1",
+            &prod.id,
+            "production-default",
+            "waiting for upstream dependency",
+        );
+        // qb3: no reason anywhere (distinct queue, no queue_events) -> unknown; wait ~120s.
+        blocked("qb3", &prod.id, "batch", 2);
+        // qb5: reason via run_relationships -> user; wait ~180s.
+        blocked("qb5", &prod.id, "batch", 3);
+        add_rel("r5", "qb5", &prod.id, "duplicate request, already exists");
+        // qb4: sandbox, host reason; excluded under production. wait ~1200s.
+        blocked("qb4", &sand.id, "sandbox-default", 20);
+        add_rel("r4", "qb4", &sand.id, "worker node offline");
+
+        // Trailing (admitted in window): prod waits 30s + 90s; sandbox 300s.
+        admitted("ta1", &prod.id, 60, 30);
+        admitted("ta2", &prod.id, 120, 90);
+        admitted("ta3", &sand.id, 60, 300);
+
+        let prod_tax = db
+            .dashboard_block_taxonomy("production", "-7 days")
+            .unwrap();
+        assert_eq!(prod_tax.current_blocked_count, 4, "qb1,qb2,qb3,qb5");
+        assert_eq!(prod_tax.by_reason.len(), 4, "resource,event,user,unknown");
+        let cat = |name: &str| {
+            prod_tax
+                .by_reason
+                .iter()
+                .find(|r| r.reason_category == name)
+                .unwrap_or_else(|| panic!("missing category {name}"))
+        };
+        assert_eq!(cat("resource").count, 1);
+        assert_eq!(cat("event").count, 1);
+        assert_eq!(cat("user").count, 1);
+        assert_eq!(cat("unknown").count, 1);
+        assert!(
+            (cat("resource").current_wait_seconds_total - 600.0).abs() < 5.0,
+            "resource Σwait ~600, got {}",
+            cat("resource").current_wait_seconds_total
+        );
+        assert!((cat("event").current_wait_seconds_total - 300.0).abs() < 5.0);
+        assert!((cat("unknown").current_wait_seconds_total - 120.0).abs() < 5.0);
+        assert!((cat("user").current_wait_seconds_total - 180.0).abs() < 5.0);
+        assert!(
+            (prod_tax.current_wait_seconds_total - 1200.0).abs() < 20.0,
+            "total Σwait ~1200, got {}",
+            prod_tax.current_wait_seconds_total
+        );
+        assert!(
+            (prod_tax.current_wait_seconds_max - 600.0).abs() < 5.0,
+            "max wait ~600 (qb1), got {}",
+            prod_tax.current_wait_seconds_max
+        );
+        // Trailing admission wait: exact spans 30 + 90 -> avg 60, max 90.
+        assert!((prod_tax.trailing_wait_seconds_avg.unwrap() - 60.0).abs() < 0.01);
+        assert!((prod_tax.trailing_wait_seconds_max.unwrap() - 90.0).abs() < 0.01);
+        // One heavy blocker (prod): all 4 blocked runs, Σwait ~1200.
+        assert_eq!(prod_tax.heavy_blockers.len(), 1);
+        assert_eq!(prod_tax.heavy_blockers[0].workflow_id, prod.id);
+        assert_eq!(prod_tax.heavy_blockers[0].blocked_count, 4);
+        assert!((prod_tax.heavy_blockers[0].sigma_wait_seconds - 1200.0).abs() < 20.0);
+
+        // "all" pulls in the sandbox host-blocked run + its trailing 300s wait.
+        let all_tax = db.dashboard_block_taxonomy("all", "-7 days").unwrap();
+        assert_eq!(all_tax.current_blocked_count, 5);
+        assert_eq!(
+            all_tax
+                .by_reason
+                .iter()
+                .find(|r| r.reason_category == "host")
+                .unwrap()
+                .count,
+            1
+        );
+        assert!((all_tax.trailing_wait_seconds_max.unwrap() - 300.0).abs() < 0.01);
+        assert_eq!(all_tax.heavy_blockers.len(), 2, "prod + sandbox");
+        assert!(all_tax
+            .heavy_blockers
+            .iter()
+            .any(|h| h.workflow_id == sand.id));
 
         let _ = std::fs::remove_dir_all(dir);
     }
