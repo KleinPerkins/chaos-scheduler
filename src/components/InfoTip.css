@@ -1,0 +1,118 @@
+/*
+ * InfoTip — hover/focus definition affordance.
+ * Colors/type bind to the shared tokens (see tokens.css / DESIGN-SYSTEM.md);
+ * never raw hex. Matches the Figma master (node 115:531).
+ */
+
+.info-tip {
+  position: relative;
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.info-tip-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--bg-tertiary);
+  color: var(--accent);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  line-height: 1;
+  cursor: help;
+}
+
+.info-tip-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.info-tip-card {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: -1px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 280px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--duration-fast) var(--ease-standard),
+    visibility var(--duration-fast) var(--ease-standard);
+}
+
+.info-tip:hover .info-tip-card,
+.info-tip:focus-within .info-tip-card {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.info-tip-title {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.info-tip-def {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  line-height: var(--line-height-normal);
+}
+
+.info-tip-glossary {
+  display: flex;
+  flex-direction: column;
+  font-size: var(--font-size-xs);
+}
+
+.info-tip-g-row {
+  display: flex;
+  gap: 8px;
+  padding: 5px 0;
+}
+
+.info-tip-g-row + .info-tip-g-row {
+  border-top: 1px solid var(--border);
+}
+
+.info-tip-g-head {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.info-tip-g-term {
+  flex-shrink: 0;
+  width: 92px;
+  color: var(--text-primary);
+}
+
+.info-tip-g-head .info-tip-g-term {
+  color: var(--text-secondary);
+}
+
+.info-tip-g-meaning {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-secondary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .info-tip-card {
+    transition: none;
+  }
+}
