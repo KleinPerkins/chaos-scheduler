@@ -13,6 +13,7 @@
     "figma:typecheck": "tsc -p tsconfig.figma.json",
     "code-connect:check": "node scripts/check-code-connect.mjs",
     "test:code-connect": "node --test scripts/check-code-connect.test.mjs",
+    "test:figma-snapshot": "node --test scripts/figma-snapshot.test.mjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc -b --noEmit",
