@@ -436,6 +436,17 @@ export interface DashboardQueueHealthSummary {
   degraded_backlog: number;
 }
 
+/** One workflow's rolling runtime baseline (expected p50 + mean) over a
+ * trailing window. Mirrors `db::DashboardWorkflowBaseline`. */
+export interface DashboardWorkflowBaseline {
+  workflow_id: string;
+  workflow_name: string;
+  environment: string;
+  sample_count: number;
+  p50_runtime_seconds: number | null;
+  mean_runtime_seconds: number | null;
+}
+
 export interface MissionControlNeedsAttentionItem {
   id: string;
   severity: string;
@@ -961,6 +972,19 @@ export function getDashboardQueueHealth(
   environmentFilter?: string,
 ): Promise<DashboardQueueHealthSummary> {
   return invoke("get_dashboard_queue_health", { environmentFilter });
+}
+
+/** Rolling per-workflow runtime baselines (expected p50 + mean) over a trailing
+ * window. `lookback` accepts the shared grammar but defaults to `30d` (a
+ * baseline needs a longer window than the live dashboard lookback). */
+export function getDashboardWorkflowBaselines(
+  environmentFilter?: string,
+  lookback?: string,
+): Promise<DashboardWorkflowBaseline[]> {
+  return invoke("get_dashboard_workflow_baselines", {
+    environmentFilter,
+    lookback,
+  });
 }
 
 export function getSchedulerStatus(): Promise<SchedulerStatus> {
