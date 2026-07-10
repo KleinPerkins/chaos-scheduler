@@ -1,11 +1,11 @@
 use crate::db::{
     DashboardKpiSummary, DashboardQueueHealthSummary, DashboardStatusCount, DashboardTrendSeries,
-    DashboardWaitRuntimeTrend, DashboardWorkflowFailureCount, Database, EmailConfig, EmailProfile,
-    MissionControlNeedsAttentionItem, MissionControlPanelAvailability, MissionControlPreferences,
-    MissionControlSnapshot, MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun,
-    RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask, SchedulerAsset,
-    SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
-    WorkflowResourceSample, WorkflowTokenUsageRollup,
+    DashboardWaitRuntimeTrend, DashboardWorkflowBaseline, DashboardWorkflowFailureCount, Database,
+    EmailConfig, EmailProfile, MissionControlNeedsAttentionItem, MissionControlPanelAvailability,
+    MissionControlPreferences, MissionControlSnapshot, MissionControlUpcomingRun, NextRun,
+    QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask,
+    SchedulerAsset, SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow,
+    WorkflowHistoryBucket, WorkflowResourceSample, WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use crate::service::{SchedulerService, WorkflowDraft};
@@ -1092,6 +1092,25 @@ pub fn get_dashboard_queue_health(
     state
         .db
         .dashboard_queue_health(&environment_filter)
+        .map_err(|e| e.to_string())
+}
+
+/// Rolling per-workflow runtime baselines (expected p50 + mean) over a trailing
+/// window, for the race-track `%`-complete estimate and long-runner deviation.
+/// `lookback` accepts the shared grammar but defaults to `30d` (not `1d`): a
+/// baseline needs a longer trailing window than the live dashboard lookback.
+#[tauri::command]
+pub fn get_dashboard_workflow_baselines(
+    state: State<AppState>,
+    environment_filter: Option<String>,
+    lookback: Option<String>,
+) -> Result<Vec<DashboardWorkflowBaseline>, String> {
+    let (window_modifier, _window_seconds) =
+        parse_lookback(Some(lookback.as_deref().unwrap_or("30d")))?;
+    let environment_filter = normalize_mission_environment_filter(environment_filter, "all");
+    state
+        .db
+        .dashboard_workflow_runtime_baselines(&environment_filter, &window_modifier)
         .map_err(|e| e.to_string())
 }
 

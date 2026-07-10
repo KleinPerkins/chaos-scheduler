@@ -590,6 +590,23 @@ pub struct DashboardQueueHealthSummary {
     pub degraded_backlog: i64,
 }
 
+/// One workflow's rolling runtime baseline over a trailing window: the expected
+/// (p50) and mean execution time, plus the sample count that backs them. Powers
+/// the race-track `%`-complete estimate and long-runner deviation. `p50`/`mean`
+/// are `None` only when the workflow has no finished runs in the window (in
+/// which case it is omitted from the result entirely).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardWorkflowBaseline {
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub environment: String,
+    pub sample_count: i64,
+    /// Expected runtime (median / p50), seconds. Upper-of-middle for even N,
+    /// matching the median convention used elsewhere in the dashboard.
+    pub p50_runtime_seconds: Option<f64>,
+    pub mean_runtime_seconds: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionControlNeedsAttentionItem {
     pub id: String,
@@ -4138,6 +4155,58 @@ impl Database {
         } else {
             "healthy"
         }
+    }
+
+    /// Rolling per-workflow runtime baselines over a trailing window: expected
+    /// (p50) and mean execution time plus the backing sample count, for every
+    /// workflow with at least one finished run in the window. The p50 is
+    /// computed in SQL with an ordered window (`ROW_NUMBER`/`COUNT() OVER`),
+    /// selecting the upper-of-middle row (`rn = cnt / 2 + 1`) to match the
+    /// dashboard median convention. Windowed on `started_at`. `window_modifier`
+    /// is the trailing-baseline window (callers pass a longer window than the
+    /// dashboard lookback — see the IPC default).
+    pub fn dashboard_workflow_runtime_baselines(
+        &self,
+        environment_filter: &str,
+        window_modifier: &str,
+    ) -> rusqlite::Result<Vec<DashboardWorkflowBaseline>> {
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "WITH base AS (
+                 SELECT w.id AS wid,
+                        w.name AS wname,
+                        COALESCE(NULLIF(w.environment, ''), 'production') AS env,
+                        (julianday(r.finished_at) - julianday(r.started_at)) * 86400.0 AS secs
+                 FROM runs r
+                 JOIN workflows w ON w.id = r.workflow_id
+                 WHERE r.finished_at IS NOT NULL
+                   AND datetime(r.started_at) >= datetime('now', ?2)
+                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
+             ),
+             ranked AS (
+                 SELECT wid, wname, env, secs,
+                        ROW_NUMBER() OVER (PARTITION BY wid ORDER BY secs) AS rn,
+                        COUNT(*) OVER (PARTITION BY wid) AS cnt,
+                        AVG(secs) OVER (PARTITION BY wid) AS mean_secs
+                 FROM base
+             )
+             SELECT wid, wname, env, cnt, mean_secs, secs AS p50
+             FROM ranked
+             WHERE rn = cnt / 2 + 1
+             ORDER BY wname ASC",
+        )?;
+        let rows = stmt.query_map(params![environment_filter, window_modifier], |row| {
+            Ok(DashboardWorkflowBaseline {
+                workflow_id: row.get(0)?,
+                workflow_name: row.get(1)?,
+                environment: row.get(2)?,
+                sample_count: row.get(3)?,
+                mean_runtime_seconds: row.get(4)?,
+                p50_runtime_seconds: row.get(5)?,
+            })
+        })?;
+        rows.collect()
     }
 
     pub fn mission_control_recent_runs(
@@ -9605,6 +9674,96 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(sd.status, "warn", "active 1 < cap 2 with 1 queued");
         assert_eq!(all.degraded, 1);
         assert_eq!(all.warn, 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dashboard_workflow_runtime_baselines_p50_and_mean() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let mk = |name: &str, env: &str, domain: &str| {
+            db.create_workflow(
+                name,
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                env,
+                Some(domain),
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let a = mk("WF A", "production", "scheduler");
+        let b = mk("WF B", "production", "card");
+        let c = mk("WF C", "production", "card");
+        let s = mk("WF S", "sandbox", "card");
+
+        let now = chrono::Utc::now();
+        let at = |mins_ago: i64| (now - chrono::Duration::minutes(mins_ago)).to_rfc3339();
+        let span = |mins_ago: i64, secs: i64| {
+            (now - chrono::Duration::minutes(mins_ago) + chrono::Duration::seconds(secs))
+                .to_rfc3339()
+        };
+        let conn = db.conn().unwrap();
+        let insert = |id: &str, wf: &str, mins_ago: i64, secs: i64| {
+            conn.execute(
+                "INSERT INTO runs (id, workflow_id, started_at, finished_at, status) VALUES (?1, ?2, ?3, ?4, 'success')",
+                params![id, wf, at(mins_ago), span(mins_ago, secs)],
+            )
+            .unwrap();
+        };
+        // A: 5 runtimes [10,20,30,100,500] -> p50 (upper-of-middle) = 30, mean 132.
+        insert("a1", &a.id, 120, 10);
+        insert("a2", &a.id, 130, 20);
+        insert("a3", &a.id, 140, 30);
+        insert("a4", &a.id, 150, 100);
+        insert("a5", &a.id, 160, 500);
+        // A: out-of-window run must not affect the baseline.
+        insert("a_old", &a.id, 40 * 60, 9999);
+        // B: 2 runtimes [40,60] -> p50 = 60 (upper-of-middle), mean 50.
+        insert("b1", &b.id, 120, 40);
+        insert("b2", &b.id, 130, 60);
+        // C: single runtime 80.
+        insert("c1", &c.id, 120, 80);
+        // S (sandbox): excluded under production.
+        insert("s1", &s.id, 120, 5);
+        insert("s2", &s.id, 130, 5);
+        insert("s3", &s.id, 140, 5);
+
+        let prod = db
+            .dashboard_workflow_runtime_baselines("production", "-1 day")
+            .unwrap();
+        assert_eq!(prod.len(), 3, "A, B, C (sandbox excluded)");
+        // Ordered by workflow name ASC.
+        assert_eq!(prod[0].workflow_id, a.id);
+        assert_eq!(prod[0].sample_count, 5, "out-of-window run excluded");
+        assert!((prod[0].p50_runtime_seconds.unwrap() - 30.0).abs() < 0.5);
+        assert!((prod[0].mean_runtime_seconds.unwrap() - 132.0).abs() < 0.5);
+        assert_eq!(prod[1].workflow_id, b.id);
+        assert_eq!(prod[1].sample_count, 2);
+        assert!(
+            (prod[1].p50_runtime_seconds.unwrap() - 60.0).abs() < 0.5,
+            "even N -> upper-of-middle 60, got {:?}",
+            prod[1].p50_runtime_seconds
+        );
+        assert!((prod[1].mean_runtime_seconds.unwrap() - 50.0).abs() < 0.5);
+        assert_eq!(prod[2].workflow_id, c.id);
+        assert_eq!(prod[2].sample_count, 1);
+        assert!((prod[2].p50_runtime_seconds.unwrap() - 80.0).abs() < 0.5);
+
+        let all = db
+            .dashboard_workflow_runtime_baselines("all", "-1 day")
+            .unwrap();
+        assert_eq!(all.len(), 4, "includes sandbox WF S");
+        let sb = all.iter().find(|w| w.workflow_id == s.id).unwrap();
+        assert_eq!(sb.sample_count, 3);
+        assert!((sb.p50_runtime_seconds.unwrap() - 5.0).abs() < 0.5);
 
         let _ = std::fs::remove_dir_all(dir);
     }
