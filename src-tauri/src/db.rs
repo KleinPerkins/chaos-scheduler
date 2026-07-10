@@ -493,6 +493,26 @@ pub struct DashboardStatusCount {
     pub count: i64,
 }
 
+/// One time bucket of the success/fail trend, keyed to the bucket's UTC start.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardTrendBucket {
+    /// ISO-8601 UTC bucket start (`YYYY-MM-DDTHH:00:00Z` for hour grain,
+    /// `YYYY-MM-DDT00:00:00Z` for day grain).
+    pub bucket: String,
+    pub total: i64,
+    pub failed: i64,
+    pub succeeded: i64,
+}
+
+/// A cross-workflow success/fail trend over `(environment, lookback)`, plus the
+/// bucket grain that was chosen from the lookback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardTrendSeries {
+    /// `"hour"` (sub-day) or `"day"`.
+    pub grain: String,
+    pub buckets: Vec<DashboardTrendBucket>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionControlNeedsAttentionItem {
     pub id: String,
@@ -3699,6 +3719,51 @@ impl Database {
             Ok(DashboardStatusCount {
                 status: row.get(0)?,
                 count: row.get(1)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Cross-workflow success/fail trend buckets over `(environment, window)`,
+    /// generalizing `workflow_history_buckets` to all workflows in the
+    /// environment and to a sub-day (`"hour"`) or `"day"` grain. Bucketing is
+    /// on `started_at` (the run's time axis, matching `workflow_history_buckets`).
+    /// `grain` is chosen by the caller from the lookback; any value other than
+    /// `"hour"` is treated as day grain.
+    pub fn dashboard_success_fail_trend(
+        &self,
+        environment_filter: &str,
+        window_modifier: &str,
+        grain: &str,
+    ) -> rusqlite::Result<Vec<DashboardTrendBucket>> {
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
+        // `bucket_expr` is selected from a fixed internal set (never user
+        // input), so string-formatting it into the SQL is injection-safe.
+        let bucket_expr = if grain == "hour" {
+            "substr(r.started_at, 1, 13) || ':00:00Z'"
+        } else {
+            "substr(r.started_at, 1, 10) || 'T00:00:00Z'"
+        };
+        let sql = format!(
+            "SELECT {bucket_expr} AS bucket,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered') THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN r.status IN ('success', 'succeeded') THEN 1 ELSE 0 END) AS succeeded
+             FROM runs r
+             JOIN workflows w ON w.id = r.workflow_id
+             WHERE datetime(r.started_at) >= datetime('now', ?2)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
+             GROUP BY bucket
+             ORDER BY bucket ASC"
+        );
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![environment_filter, window_modifier], |row| {
+            Ok(DashboardTrendBucket {
+                bucket: row.get(0)?,
+                total: row.get(1)?,
+                failed: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                succeeded: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
             })
         })?;
         rows.collect()
@@ -8647,6 +8712,121 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let all = db.dashboard_status_distribution("all", "-1 day").unwrap();
         let all_failed = all.iter().find(|entry| entry.status == "failed").unwrap();
         assert_eq!(all_failed.count, 2);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dashboard_success_fail_trend_buckets_cross_workflow_by_grain() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let a = db
+            .create_workflow(
+                "WF A",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let b = db
+            .create_workflow(
+                "WF B",
+                None,
+                "scripts/workflows/noop.py",
+                "0 1 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("card"),
+                None,
+                None,
+            )
+            .unwrap();
+        let sandbox = db
+            .create_workflow(
+                "WF S",
+                None,
+                "scripts/workflows/noop.py",
+                "0 2 * * *",
+                false,
+                true,
+                "UTC",
+                "sandbox",
+                Some("card"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let now = chrono::Utc::now();
+        let at = |mins_ago: i64| (now - chrono::Duration::minutes(mins_ago)).to_rfc3339();
+        let hour_bucket = |mins_ago: i64| format!("{}:00:00Z", &at(mins_ago)[..13]);
+        let conn = db.conn().unwrap();
+        let insert_run = |id: &str, wf: &str, started: String, status: &str| {
+            conn.execute(
+                "INSERT INTO runs (id, workflow_id, started_at, finished_at, status) VALUES (?1, ?2, ?3, ?3, ?4)",
+                params![id, wf, started, status],
+            )
+            .unwrap();
+        };
+        // Same hour bucket (now-120m), cross-workflow: A success + B failed.
+        insert_run("r1", &a.id, at(120), "success");
+        insert_run("r2", &b.id, at(120), "failed");
+        // Different hour bucket (now-300m): A succeeded (alias -> succeeded).
+        insert_run("r3", &a.id, at(300), "succeeded");
+        // Sandbox in window — excluded under the production filter.
+        insert_run("s1", &sandbox.id, at(120), "failed");
+
+        let hourly = db
+            .dashboard_success_fail_trend("production", "-1 day", "hour")
+            .unwrap();
+        assert_eq!(hourly.len(), 2, "two distinct hour buckets");
+        assert!(hourly[0].bucket <= hourly[1].bucket, "ascending order");
+        let recent = hourly
+            .iter()
+            .find(|bk| bk.bucket == hour_bucket(120))
+            .unwrap();
+        assert_eq!(recent.total, 2);
+        assert_eq!(recent.failed, 1);
+        assert_eq!(recent.succeeded, 1);
+        let earlier = hourly
+            .iter()
+            .find(|bk| bk.bucket == hour_bucket(300))
+            .unwrap();
+        assert_eq!(earlier.total, 1);
+        assert_eq!(earlier.succeeded, 1);
+
+        // Day grain over a long window: runs ~2 days apart land in distinct day
+        // buckets, each keyed to midnight UTC.
+        insert_run("d2", &a.id, at(60 + 48 * 60), "failed");
+        let daily = db
+            .dashboard_success_fail_trend("production", "-30 days", "day")
+            .unwrap();
+        assert!(
+            daily.iter().all(|bk| bk.bucket.ends_with("T00:00:00Z")),
+            "day buckets keyed to midnight UTC"
+        );
+        assert!(daily.len() >= 2, "today + ~2-days-ago buckets");
+
+        // "all" includes the sandbox failure in the now-120m hour bucket.
+        let all_hourly = db
+            .dashboard_success_fail_trend("all", "-1 day", "hour")
+            .unwrap();
+        let all_recent = all_hourly
+            .iter()
+            .find(|bk| bk.bucket == hour_bucket(120))
+            .unwrap();
+        assert_eq!(all_recent.total, 3, "A + B + sandbox");
+        assert_eq!(all_recent.failed, 2);
 
         let _ = std::fs::remove_dir_all(dir);
     }

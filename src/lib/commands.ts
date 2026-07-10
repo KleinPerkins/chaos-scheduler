@@ -368,6 +368,22 @@ export interface DashboardStatusCount {
   count: number;
 }
 
+/** One time bucket of the success/fail trend. Mirrors `db::DashboardTrendBucket`.
+ * `bucket` is the ISO-8601 UTC bucket start. */
+export interface DashboardTrendBucket {
+  bucket: string;
+  total: number;
+  failed: number;
+  succeeded: number;
+}
+
+/** Cross-workflow success/fail trend plus the chosen bucket grain. Mirrors
+ * `db::DashboardTrendSeries`. */
+export interface DashboardTrendSeries {
+  grain: "hour" | "day";
+  buckets: DashboardTrendBucket[];
+}
+
 export interface MissionControlNeedsAttentionItem {
   id: string;
   severity: string;
@@ -843,6 +859,19 @@ export function getDashboardStatusDistribution(
   lookback?: string,
 ): Promise<DashboardStatusCount[]> {
   return invoke("get_dashboard_status_distribution", {
+    environmentFilter,
+    lookback,
+  });
+}
+
+/** Cross-workflow success/fail trend for the v3 dashboard. The bucket grain
+ * (`hour`/`day`) is chosen from the lookback and returned in the series.
+ * `lookback` accepts the shared grammar; defaults to `1d`. */
+export function getDashboardSuccessFailTrend(
+  environmentFilter?: string,
+  lookback?: string,
+): Promise<DashboardTrendSeries> {
+  return invoke("get_dashboard_success_fail_trend", {
     environmentFilter,
     lookback,
   });
