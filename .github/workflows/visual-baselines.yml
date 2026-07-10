@@ -1,0 +1,62 @@
+name: Visual Baselines (generate)
+
+# Regenerates the committed Linux screenshot baselines for the deterministic
+# visual harness (e2e/visual + playwright.visual.config.ts) INSIDE the SAME
+# pinned Playwright container the `visual` CI job compares against, so font
+# rasterization is identical and screenshots are stable.
+#
+# It NEVER commits — it uploads the regenerated `*-linux.png` baselines as the
+# `visual-baselines-linux` artifact for a human to download and commit via a
+# normal PR. This is also how the first baselines were bootstrapped and how you
+# refresh them after an intentional visual change:
+#
+#   1. Trigger from the Actions tab (workflow_dispatch), or push a harness change
+#      (this workflow also runs on changes to e2e/visual / the visual config).
+#   2. Download the `visual-baselines-linux` artifact.
+#   3. Replace e2e/visual/__screenshots__/*-linux.png and open a PR.
+#
+# Kept OUTSIDE ci-required: it is a generator, not a gate.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "e2e/visual/**"
+      - "playwright.visual.config.ts"
+      - ".github/workflows/visual-baselines.yml"
+
+concurrency:
+  group: visual-baselines-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Generate Linux baselines
+    runs-on: ubuntu-latest
+    # Pin to the same image tag as the `visual` job in ci.yml. Bump BOTH in
+    # lockstep whenever @playwright/test changes major.minor.
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-jammy
+    steps:
+      - uses: actions/checkout@v7
+      # The container runs as root while the checkout is owned by the runner
+      # user, so git refuses to operate ("dubious ownership") — which breaks the
+      # `lefthook install` in the `prepare` lifecycle during `npm ci`.
+      - name: Trust workspace (container runs as root)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - name: Regenerate visual baselines (--update-snapshots)
+        run: npm run test:visual:update
+      - name: Upload regenerated baselines
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-baselines-linux
+          path: e2e/visual/__screenshots__/**
+          retention-days: 7

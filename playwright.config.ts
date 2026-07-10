@@ -4,6 +4,9 @@ const port = 5173;
 
 export default defineConfig({
   testDir: "./e2e",
+  // Visual-regression specs run under their own deterministic, pinned-container
+  // config (playwright.visual.config.ts); keep them out of the functional run.
+  testIgnore: "**/visual/**",
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,

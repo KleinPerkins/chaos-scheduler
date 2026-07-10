@@ -20,6 +20,7 @@ jobs:
     outputs:
       e2e: ${{ steps.filter.outputs.e2e }}
       code_connect: ${{ steps.filter.outputs.code_connect }}
+      visual: ${{ steps.filter.outputs.visual }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -40,6 +41,11 @@ jobs:
               - 'tsconfig.figma.json'
               - 'scripts/check-code-connect.mjs'
               - 'scripts/check-code-connect.test.mjs'
+              - '.github/workflows/ci.yml'
+            visual:
+              - 'src/**'
+              - 'e2e/visual/**'
+              - 'playwright.visual.config.ts'
               - '.github/workflows/ci.yml'
 
   frontend:
@@ -207,6 +213,42 @@ jobs:
       - name: Parse + validate mappings (credential-free)
         run: npm run code-connect:check
 
+  # Deterministic visual-regression check. ADVISORY — intentionally NOT part of
+  # the ci-required fan-in below, so a legitimate rendering change on the
+  # parallel component track can never block a merge; it exists to SIGNAL visual
+  # drift. It renders the stable surfaces inside the SAME pinned Playwright
+  # container the baselines were generated in (v1.61.1-jammy — keep in lockstep
+  # with visual-baselines.yml) and compares against the committed `-linux`
+  # screenshots (e2e/visual/__screenshots__/*-linux.png). After an intentional
+  # UI change, refresh the baselines via the visual-baselines.yml workflow. Runs
+  # when product UI (src/**) or the harness changes.
+  visual:
+    name: Visual regression (stable surfaces)
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.visual == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-jammy
+    steps:
+      - uses: actions/checkout@v7
+      - name: Trust workspace (container runs as root)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - name: Compare stable surfaces against committed baselines
+        run: npm run test:visual
+        env:
+          CI: true
+      - name: Upload visual diff on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-diff
+          path: test-results/**
+          retention-days: 7
+
   # Pre-release guard: the Rust `tauri` crate and the JS `@tauri-apps/*` packages
   # must share a major.minor or `tauri build` aborts in the release job (root
   # cause of the 0.3.0 desktop build failure). Compile-free lockfile check.
@@ -224,6 +266,9 @@ jobs:
   # Single required status check for branch protection on `main`.
   # Configure "ci-required" as the sole required check; it fans in from every
   # other job so adding/removing jobs never requires editing branch protection.
+  # NOTE: the `visual` job is deliberately EXCLUDED from `needs` below — it is an
+  # advisory signal (baselines can legitimately drift on the component track) and
+  # must never block a merge. Do not add it here.
   ci-required:
     name: ci-required
     if: always()

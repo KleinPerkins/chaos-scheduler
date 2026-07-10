@@ -24,6 +24,8 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:install": "playwright install chromium",
+    "test:visual": "playwright test -c playwright.visual.config.ts",
+    "test:visual:update": "playwright test -c playwright.visual.config.ts --update-snapshots",
     "test:packages": "npm run test:packages:sdk-ts && npm run test:packages:mcp-server",
     "test:packages:sdk-ts": "npm ci --prefix packages/sdk-ts && npm run build --prefix packages/sdk-ts && npm test --prefix packages/sdk-ts",
     "test:packages:mcp-server": "npm ci --prefix packages/mcp-server && npm run build --prefix packages/mcp-server && npm test --prefix packages/mcp-server",

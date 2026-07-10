@@ -26,5 +26,11 @@ dist-ssr
 # Playwright / Vitest artifacts
 playwright-report/
 test-results/
+# Visual baselines are generated + compared in the pinned Linux container, so
+# only the committed `-linux` screenshots are authoritative. A local
+# `npm run test:visual:update` on macOS/Windows writes `-darwin`/`-win32`
+# baselines that must NOT be committed.
+e2e/visual/__screenshots__/*-darwin.png
+e2e/visual/__screenshots__/*-win32.png
 scheduler.db
 *.db
