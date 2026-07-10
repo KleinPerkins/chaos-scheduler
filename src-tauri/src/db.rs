@@ -695,6 +695,34 @@ pub struct DashboardQueueUtilizationHistory {
     pub degraded_utilization: f64,
 }
 
+/// Observable execution slots for one queue: currently-running runs against the
+/// queue's configured capacity. `available` is `max(capacity - running, 0)` and
+/// `utilization` is `running / max(capacity, 1)`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardExecutionSlotQueue {
+    pub name: String,
+    pub environment: String,
+    pub running: i64,
+    pub capacity: i64,
+    pub available: i64,
+    pub utilization: f64,
+}
+
+/// Execution-slot occupancy: running runs vs configured concurrency capacity,
+/// per queue and globally. The global capacity is the scheduler-wide
+/// `global_parallelism_cap`; global running is the sum of the (filtered) queues'
+/// running counts so the global row reconciles with the per-queue rows. Purely
+/// derived from live running-count + configured capacity — no per-worker health,
+/// liveness, or unreachable-worker concept.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardExecutionSlots {
+    pub queues: Vec<DashboardExecutionSlotQueue>,
+    pub global_running: i64,
+    pub global_capacity: i64,
+    pub global_available: i64,
+    pub global_utilization: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionControlNeedsAttentionItem {
     pub id: String,
@@ -4479,6 +4507,53 @@ impl Database {
             buckets,
             warn_utilization: WARN_UTILIZATION,
             degraded_utilization: DEGRADED_UTILIZATION,
+        })
+    }
+
+    /// Observable execution slots for `environment_filter`: running runs vs
+    /// configured concurrency capacity, per queue and globally. Per-queue values
+    /// come from live `list_queues()` occupancy; the global capacity is the
+    /// scheduler-wide `global_parallelism_cap` and global running is the sum of
+    /// the filtered queues' running so the global row reconciles with the rows.
+    /// Live snapshot (no lookback). Derived only from running-count + configured
+    /// capacity — no per-worker health/liveness/unreachable modeling.
+    pub fn dashboard_execution_slots(
+        &self,
+        environment_filter: &str,
+    ) -> rusqlite::Result<DashboardExecutionSlots> {
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
+        let global_capacity = self.global_parallelism_cap()?;
+        let queues: Vec<DashboardExecutionSlotQueue> = self
+            .list_queues()?
+            .into_iter()
+            .filter(|q| {
+                environment_filter == "all"
+                    || normalize_mission_environment_filter(&q.environment) == environment_filter
+            })
+            .map(|q| {
+                let capacity = q.capacity.max(0);
+                let running = q.active_count;
+                let available = (capacity - running).max(0);
+                let utilization = running as f64 / capacity.max(1) as f64;
+                DashboardExecutionSlotQueue {
+                    name: q.name,
+                    environment: q.environment,
+                    running,
+                    capacity,
+                    available,
+                    utilization,
+                }
+            })
+            .collect();
+        let global_running: i64 = queues.iter().map(|q| q.running).sum();
+        let global_available = (global_capacity - global_running).max(0);
+        let global_utilization = global_running as f64 / global_capacity.max(1) as f64;
+        Ok(DashboardExecutionSlots {
+            queues,
+            global_running,
+            global_capacity,
+            global_available,
+            global_utilization,
         })
     }
 
@@ -10816,6 +10891,133 @@ SUMMARY_JSON:{\"title\":\"current\"}
             .query_row("SELECT id FROM queue_occupancy_samples", [], |r| r.get(0))
             .unwrap();
         assert_eq!(kept, "recent");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dashboard_execution_slots_per_queue_and_global() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        db.upsert_queue("production-default", "production", 2, None, None)
+            .unwrap();
+        db.upsert_queue("batch", "production", 3, None, None)
+            .unwrap();
+        db.upsert_queue("sandbox-default", "sandbox", 2, None, None)
+            .unwrap();
+        let prod = db
+            .create_workflow(
+                "Prod WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let sand = db
+            .create_workflow(
+                "Sandbox WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 1 * * *",
+                false,
+                true,
+                "UTC",
+                "sandbox",
+                Some("card"),
+                None,
+                None,
+            )
+            .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = db.conn().unwrap();
+            conn.execute(
+                "INSERT INTO runs (id, workflow_id, started_at, status) VALUES ('run-p', ?1, ?2, 'running')",
+                params![prod.id, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO runs (id, workflow_id, started_at, status) VALUES ('run-s', ?1, ?2, 'running')",
+                params![sand.id, now],
+            )
+            .unwrap();
+        }
+
+        let cap = db.global_parallelism_cap().unwrap();
+        // Per-queue slots must match live list_queues() occupancy.
+        let live = db.list_queues().unwrap();
+        let check = |slots: &DashboardExecutionSlots, env: &str| {
+            let want: Vec<_> = live
+                .iter()
+                .filter(|q| env == "all" || q.environment == env)
+                .collect();
+            assert_eq!(slots.queues.len(), want.len());
+            for q in &want {
+                let s = slots
+                    .queues
+                    .iter()
+                    .find(|s| s.name == q.name)
+                    .unwrap_or_else(|| panic!("missing slot {}", q.name));
+                assert_eq!(s.running, q.active_count, "running {}", q.name);
+                assert_eq!(s.capacity, q.capacity.max(0), "capacity {}", q.name);
+                assert_eq!(
+                    s.available,
+                    (q.capacity.max(0) - q.active_count).max(0),
+                    "available {}",
+                    q.name
+                );
+                let expect_util = q.active_count as f64 / q.capacity.max(1) as f64;
+                assert!(
+                    (s.utilization - expect_util).abs() < 1e-9,
+                    "util {}",
+                    q.name
+                );
+            }
+            let sum: i64 = slots.queues.iter().map(|s| s.running).sum();
+            assert_eq!(
+                slots.global_running, sum,
+                "global reconciles with per-queue"
+            );
+            assert_eq!(slots.global_capacity, cap);
+            assert_eq!(slots.global_available, (cap - sum).max(0));
+            assert!((slots.global_utilization - sum as f64 / cap.max(1) as f64).abs() < 1e-9);
+        };
+
+        let prod_slots = db.dashboard_execution_slots("production").unwrap();
+        check(&prod_slots, "production");
+        // Concrete: production-default has the one running prod run against cap 2.
+        let pd = prod_slots
+            .queues
+            .iter()
+            .find(|s| s.name == "production-default")
+            .unwrap();
+        assert_eq!(pd.running, 1);
+        assert_eq!(pd.capacity, 2);
+        assert_eq!(pd.available, 1);
+        assert!((pd.utilization - 0.5).abs() < 1e-9);
+        let batch = prod_slots
+            .queues
+            .iter()
+            .find(|s| s.name == "batch")
+            .unwrap();
+        assert_eq!(batch.running, 0);
+        assert_eq!(batch.available, 3);
+        assert_eq!(
+            prod_slots.global_running, 1,
+            "sandbox excluded under production"
+        );
+
+        let all_slots = db.dashboard_execution_slots("all").unwrap();
+        check(&all_slots, "all");
+        assert_eq!(all_slots.global_running, 2, "prod + sandbox running");
 
         let _ = std::fs::remove_dir_all(dir);
     }
