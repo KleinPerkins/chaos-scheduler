@@ -1,12 +1,12 @@
 use crate::db::{
     DashboardBlockTaxonomy, DashboardKpiDelta, DashboardKpiSummary, DashboardQueueHealthSummary,
-    DashboardStatusCount, DashboardTrendSeries, DashboardWaitRuntimeTrend,
-    DashboardWorkflowBaseline, DashboardWorkflowFailureCount, Database, EmailConfig, EmailProfile,
-    MissionControlNeedsAttentionItem, MissionControlPanelAvailability, MissionControlPreferences,
-    MissionControlSnapshot, MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun,
-    RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask, SchedulerAsset,
-    SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
-    WorkflowResourceSample, WorkflowTokenUsageRollup,
+    DashboardQueueUtilizationHistory, DashboardStatusCount, DashboardTrendSeries,
+    DashboardWaitRuntimeTrend, DashboardWorkflowBaseline, DashboardWorkflowFailureCount, Database,
+    EmailConfig, EmailProfile, MissionControlNeedsAttentionItem, MissionControlPanelAvailability,
+    MissionControlPreferences, MissionControlSnapshot, MissionControlUpcomingRun, NextRun,
+    QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask,
+    SchedulerAsset, SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow,
+    WorkflowHistoryBucket, WorkflowResourceSample, WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use crate::service::{SchedulerService, WorkflowDraft};
@@ -1152,6 +1152,25 @@ pub fn get_dashboard_block_taxonomy(
     state
         .db
         .dashboard_block_taxonomy(&environment_filter, &window_modifier)
+        .map_err(|e| e.to_string())
+}
+
+/// Queue-utilization history for the v3 dashboard: a per-bucket occupancy series
+/// over (environment, lookback) at a grain chosen from the lookback (sub-day ->
+/// `hour`, else `day`), plus the healthy/warn/degraded utilization thresholds.
+/// Backed by the periodic queue-occupancy sampler.
+#[tauri::command]
+pub fn get_dashboard_queue_utilization_history(
+    state: State<AppState>,
+    environment_filter: Option<String>,
+    lookback: Option<String>,
+) -> Result<DashboardQueueUtilizationHistory, String> {
+    let (window_modifier, window_seconds) = parse_lookback(lookback.as_deref())?;
+    let grain = bucket_grain(window_seconds);
+    let environment_filter = normalize_mission_environment_filter(environment_filter, "all");
+    state
+        .db
+        .dashboard_queue_utilization_history(&environment_filter, &window_modifier, grain)
         .map_err(|e| e.to_string())
 }
 

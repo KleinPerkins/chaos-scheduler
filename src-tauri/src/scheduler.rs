@@ -3571,6 +3571,11 @@ pub fn start_scheduler_loop(
             .expect("Failed to create scheduler runtime");
 
         rt.block_on(async {
+            // Queue-occupancy sampler cadence + retention. Additive observability
+            // that piggybacks on the scheduler tick; FLAGGED for review.
+            const QUEUE_SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
+            const QUEUE_SAMPLE_RETENTION: &str = "-30 days";
+            let mut last_queue_sample: Option<std::time::Instant> = None;
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
                 interval.tick().await;
@@ -3578,6 +3583,27 @@ pub fn start_scheduler_loop(
                 if SHUTDOWN.load(Ordering::Relaxed) {
                     log::info!("Scheduler shutting down gracefully");
                     break;
+                }
+
+                // Periodic queue-occupancy sampling + retention pruning. Appends
+                // observability rows only; never affects scheduling behavior.
+                let should_sample = match last_queue_sample {
+                    Some(t) => t.elapsed() >= QUEUE_SAMPLE_INTERVAL,
+                    None => true,
+                };
+                if should_sample {
+                    last_queue_sample = Some(std::time::Instant::now());
+                    match db.sample_queue_occupancy() {
+                        Ok(count) => {
+                            log::debug!("Sampled queue occupancy for {count} queue(s)");
+                            if let Err(err) =
+                                db.prune_queue_occupancy_samples(QUEUE_SAMPLE_RETENTION)
+                            {
+                                log::warn!("Failed to prune queue occupancy samples: {err}");
+                            }
+                        }
+                        Err(err) => log::warn!("Queue occupancy sampling failed: {err}"),
+                    }
                 }
 
                 let (due, notify_success, notify_failure, email_enabled) = {
