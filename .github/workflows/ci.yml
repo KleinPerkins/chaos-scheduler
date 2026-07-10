@@ -21,6 +21,7 @@ jobs:
       e2e: ${{ steps.filter.outputs.e2e }}
       code_connect: ${{ steps.filter.outputs.code_connect }}
       visual: ${{ steps.filter.outputs.visual }}
+      a11y: ${{ steps.filter.outputs.a11y }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -46,6 +47,12 @@ jobs:
               - 'src/**'
               - 'e2e/visual/**'
               - 'playwright.visual.config.ts'
+              - '.github/workflows/ci.yml'
+            a11y:
+              - 'src/**'
+              - 'e2e/a11y/**'
+              - 'e2e/support/**'
+              - 'playwright.a11y.config.ts'
               - '.github/workflows/ci.yml'
 
   frontend:
@@ -213,6 +220,32 @@ jobs:
       - name: Parse + validate mappings (credential-free)
         run: npm run code-connect:check
 
+  # Strict accessibility gate across the stable surfaces in BOTH themes, plus a
+  # theme-toggle interaction, a reduced-motion assertion, and a self-hosted-Inter
+  # font-load assertion (e2e/a11y). Unlike the lenient functional axe checks
+  # (critical/serious only), this fails on ANY non-allowlisted violation at any
+  # impact — the allowlist holds documented, pre-existing product issues (see
+  # e2e/a11y/a11y.spec.ts). Runs when product UI (src/**) or the a11y harness
+  # changes. Required (in the ci-required fan-in below).
+  a11y:
+    name: Accessibility (axe dark+light, motion, fonts)
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.a11y == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Strict axe (dark+light) + theme-toggle + reduced-motion + fonts
+        run: npm run test:a11y
+        env:
+          CI: true
+
   # Deterministic visual-regression check. ADVISORY — intentionally NOT part of
   # the ci-required fan-in below, so a legitimate rendering change on the
   # parallel component track can never block a merge; it exists to SIGNAL visual
@@ -283,6 +316,7 @@ jobs:
         tauri-versions,
         tokens,
         code-connect,
+        a11y,
       ]
     runs-on: ubuntu-latest
     steps:

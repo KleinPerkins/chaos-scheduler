@@ -21,6 +21,7 @@ export default defineConfig([
       "e2e/**/*.{ts,tsx}",
       "playwright.config.ts",
       "playwright.visual.config.ts",
+      "playwright.a11y.config.ts",
       "vitest.config.ts",
     ],
     languageOptions: {
