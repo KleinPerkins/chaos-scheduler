@@ -439,6 +439,7 @@ pub fn run() {
             commands::cleanup_retention,
             commands::get_workflow_history_buckets,
             commands::get_sla_violations,
+            commands::get_dashboard_kpi_summary,
             commands::query_resource_samples,
             commands::query_token_usage_rollup,
             commands::query_stale_assets,
