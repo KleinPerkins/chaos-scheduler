@@ -1,7 +1,7 @@
 use crate::db::{
-    DashboardKpiDelta, DashboardKpiSummary, DashboardQueueHealthSummary, DashboardStatusCount,
-    DashboardTrendSeries, DashboardWaitRuntimeTrend, DashboardWorkflowBaseline,
-    DashboardWorkflowFailureCount, Database, EmailConfig, EmailProfile,
+    DashboardBlockTaxonomy, DashboardKpiDelta, DashboardKpiSummary, DashboardQueueHealthSummary,
+    DashboardStatusCount, DashboardTrendSeries, DashboardWaitRuntimeTrend,
+    DashboardWorkflowBaseline, DashboardWorkflowFailureCount, Database, EmailConfig, EmailProfile,
     MissionControlNeedsAttentionItem, MissionControlPanelAvailability, MissionControlPreferences,
     MissionControlSnapshot, MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun,
     RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask, SchedulerAsset,
@@ -1131,6 +1131,27 @@ pub fn get_dashboard_workflow_baselines(
     state
         .db
         .dashboard_workflow_runtime_baselines(&environment_filter, &window_modifier)
+        .map_err(|e| e.to_string())
+}
+
+/// Blocked/waiting reason taxonomy for the status board: the currently-`queued`
+/// set classified into `{resource, event, host, workload, user, unknown}` with
+/// per-category counts + Σ current wait, the current-wait totals, the trailing
+/// (historical) admission-wait stats over the lookback, and the heaviest
+/// per-workflow blockers by Σ current wait. `lookback` scopes only the trailing
+/// stats; the current-blocked set is always "now".
+#[tauri::command]
+pub fn get_dashboard_block_taxonomy(
+    state: State<AppState>,
+    environment_filter: Option<String>,
+    lookback: Option<String>,
+) -> Result<DashboardBlockTaxonomy, String> {
+    let (window_modifier, _window_seconds) =
+        parse_lookback(Some(lookback.as_deref().unwrap_or("7d")))?;
+    let environment_filter = normalize_mission_environment_filter(environment_filter, "all");
+    state
+        .db
+        .dashboard_block_taxonomy(&environment_filter, &window_modifier)
         .map_err(|e| e.to_string())
 }
 

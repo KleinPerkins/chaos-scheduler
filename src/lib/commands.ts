@@ -464,6 +464,38 @@ export interface DashboardWorkflowBaseline {
   mean_runtime_seconds: number | null;
 }
 
+/** One reason-taxonomy slice of the currently-blocked set. Mirrors
+ * `db::DashboardBlockReasonCount`. `reason_category` is one of
+ * `resource | event | host | workload | user | unknown`. */
+export interface DashboardBlockReasonCount {
+  reason_category: string;
+  count: number;
+  current_wait_seconds_total: number;
+}
+
+/** A workflow that is a heavy source of current blocking. Mirrors
+ * `db::DashboardHeavyBlocker`. */
+export interface DashboardHeavyBlocker {
+  workflow_id: string;
+  workflow_name: string;
+  environment: string;
+  blocked_count: number;
+  sigma_wait_seconds: number;
+}
+
+/** Blocked/waiting reason taxonomy over (environment, lookback). Mirrors
+ * `db::DashboardBlockTaxonomy`. The current-blocked set is always "now";
+ * `lookback` scopes only the trailing admission-wait stats. */
+export interface DashboardBlockTaxonomy {
+  by_reason: DashboardBlockReasonCount[];
+  current_blocked_count: number;
+  current_wait_seconds_total: number;
+  current_wait_seconds_max: number;
+  trailing_wait_seconds_avg: number | null;
+  trailing_wait_seconds_max: number | null;
+  heavy_blockers: DashboardHeavyBlocker[];
+}
+
 export interface MissionControlNeedsAttentionItem {
   id: string;
   severity: string;
@@ -1012,6 +1044,20 @@ export function getDashboardKpiWow(
   lookback?: string,
 ): Promise<DashboardKpiDelta> {
   return invoke("get_dashboard_kpi_wow", { environmentFilter, lookback });
+}
+
+/** Blocked/waiting reason taxonomy: the currently-queued set classified into
+ * reason categories with Σ current wait, plus trailing admission-wait stats and
+ * the heaviest per-workflow blockers. `lookback` (default `7d`) scopes only the
+ * trailing stats; the current-blocked set is always "now". */
+export function getDashboardBlockTaxonomy(
+  environmentFilter?: string,
+  lookback?: string,
+): Promise<DashboardBlockTaxonomy> {
+  return invoke("get_dashboard_block_taxonomy", {
+    environmentFilter,
+    lookback,
+  });
 }
 
 export function getSchedulerStatus(): Promise<SchedulerStatus> {
