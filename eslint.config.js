@@ -17,7 +17,12 @@ export default defineConfig([
     "**/*.figma.tsx",
   ]),
   {
-    files: ["e2e/**/*.{ts,tsx}", "playwright.config.ts", "vitest.config.ts"],
+    files: [
+      "e2e/**/*.{ts,tsx}",
+      "playwright.config.ts",
+      "playwright.visual.config.ts",
+      "vitest.config.ts",
+    ],
     languageOptions: {
       ecmaVersion: 2020,
       globals: globals.node,
