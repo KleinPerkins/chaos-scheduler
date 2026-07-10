@@ -42,6 +42,11 @@ jobs:
       image: mcr.microsoft.com/playwright:v1.61.1-jammy
     steps:
       - uses: actions/checkout@v7
+      # The container runs as root while the checkout is owned by the runner
+      # user, so git refuses to operate ("dubious ownership") — which breaks the
+      # `lefthook install` in the `prepare` lifecycle during `npm ci`.
+      - name: Trust workspace (container runs as root)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
