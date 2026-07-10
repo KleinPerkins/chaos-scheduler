@@ -361,6 +361,23 @@ export interface DashboardKpiSummary {
   window_seconds: number;
 }
 
+/** Week-over-week KPI comparison: current vs prior equal window + deltas.
+ * Mirrors `db::DashboardKpiDelta`. Optional deltas are null when either side is
+ * absent. */
+export interface DashboardKpiDelta {
+  current: DashboardKpiSummary;
+  previous: DashboardKpiSummary;
+  total_runs_delta: number;
+  succeeded_delta: number;
+  failed_delta: number;
+  success_rate_delta: number | null;
+  throughput_per_hour_delta: number | null;
+  avg_runtime_seconds_delta: number | null;
+  max_runtime_seconds_delta: number | null;
+  median_wait_seconds_delta: number | null;
+  max_wait_seconds_delta: number | null;
+}
+
 /** One slice of the status donut. Mirrors `db::DashboardStatusCount`. The
  * `succeeded` alias is collapsed onto `success` (matching `statusKey`). */
 export interface DashboardStatusCount {
@@ -985,6 +1002,16 @@ export function getDashboardWorkflowBaselines(
     environmentFilter,
     lookback,
   });
+}
+
+/** Week-over-week KPI comparison (current vs prior equal window + deltas).
+ * `lookback` accepts the shared grammar but defaults to `7d` (true
+ * week-over-week); pass `1d` for day-over-day. */
+export function getDashboardKpiWow(
+  environmentFilter?: string,
+  lookback?: string,
+): Promise<DashboardKpiDelta> {
+  return invoke("get_dashboard_kpi_wow", { environmentFilter, lookback });
 }
 
 export function getSchedulerStatus(): Promise<SchedulerStatus> {
