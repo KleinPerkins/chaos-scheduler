@@ -1,10 +1,10 @@
 use crate::db::{
-    DashboardKpiSummary, Database, EmailConfig, EmailProfile, MissionControlNeedsAttentionItem,
-    MissionControlPanelAvailability, MissionControlPreferences, MissionControlSnapshot,
-    MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt,
-    RunMetric, RunRelationship, RunTask, SchedulerAsset, SchedulerDeadLetter, SchedulerStatus,
-    SlaViolation, Workflow, WorkflowHistoryBucket, WorkflowResourceSample,
-    WorkflowTokenUsageRollup,
+    DashboardKpiSummary, DashboardStatusCount, Database, EmailConfig, EmailProfile,
+    MissionControlNeedsAttentionItem, MissionControlPanelAvailability, MissionControlPreferences,
+    MissionControlSnapshot, MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun,
+    RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask, SchedulerAsset,
+    SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
+    WorkflowResourceSample, WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use crate::service::{SchedulerService, WorkflowDraft};
@@ -1000,6 +1000,22 @@ pub fn get_dashboard_kpi_summary(
     state
         .db
         .dashboard_kpi_summary(&environment_filter, &window_modifier, window_seconds)
+        .map_err(|e| e.to_string())
+}
+
+/// Per-status run counts for the v3 status donut, scoped to `(environmentFilter,
+/// lookback)`. `lookback` accepts the shared grammar; defaults to `1d`.
+#[tauri::command]
+pub fn get_dashboard_status_distribution(
+    state: State<AppState>,
+    environment_filter: Option<String>,
+    lookback: Option<String>,
+) -> Result<Vec<DashboardStatusCount>, String> {
+    let (window_modifier, _window_seconds) = parse_lookback(lookback.as_deref())?;
+    let environment_filter = normalize_mission_environment_filter(environment_filter, "all");
+    state
+        .db
+        .dashboard_status_distribution(&environment_filter, &window_modifier)
         .map_err(|e| e.to_string())
 }
 

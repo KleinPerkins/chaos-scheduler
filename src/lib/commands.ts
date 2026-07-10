@@ -361,6 +361,13 @@ export interface DashboardKpiSummary {
   window_seconds: number;
 }
 
+/** One slice of the status donut. Mirrors `db::DashboardStatusCount`. The
+ * `succeeded` alias is collapsed onto `success` (matching `statusKey`). */
+export interface DashboardStatusCount {
+  status: string;
+  count: number;
+}
+
 export interface MissionControlNeedsAttentionItem {
   id: string;
   severity: string;
@@ -827,6 +834,18 @@ export function getDashboardKpiSummary(
   lookback?: string,
 ): Promise<DashboardKpiSummary> {
   return invoke("get_dashboard_kpi_summary", { environmentFilter, lookback });
+}
+
+/** Per-status run counts for the v3 status donut, scoped to `(environment,
+ * lookback)`. `lookback` accepts the shared grammar; defaults to `1d`. */
+export function getDashboardStatusDistribution(
+  environmentFilter?: string,
+  lookback?: string,
+): Promise<DashboardStatusCount[]> {
+  return invoke("get_dashboard_status_distribution", {
+    environmentFilter,
+    lookback,
+  });
 }
 
 export function getSchedulerStatus(): Promise<SchedulerStatus> {

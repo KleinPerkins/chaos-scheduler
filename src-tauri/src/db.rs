@@ -482,6 +482,17 @@ pub struct DashboardKpiSummary {
     pub window_seconds: i64,
 }
 
+/// One slice of the dashboard status donut: a canonical run status and its
+/// count over the `(environment, lookback)` window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardStatusCount {
+    /// Canonical status key. The `succeeded` alias is collapsed onto `success`
+    /// to match the frontend `statusKey` helper; every other status passes
+    /// through unchanged.
+    pub status: String,
+    pub count: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionControlNeedsAttentionItem {
     pub id: String,
@@ -3659,6 +3670,38 @@ impl Database {
             max_wait_seconds,
             window_seconds,
         })
+    }
+
+    /// Per-status run counts for the v3 status donut, scoped to `(environment,
+    /// window)`. Uses the same window predicate as `dashboard_kpi_summary`
+    /// (a run counts if its `finished_at`, else `started_at`, is in the
+    /// window). The `succeeded` alias is collapsed onto `success` to match the
+    /// frontend `statusKey`; every other status passes through raw. Ordered by
+    /// count desc so the largest slice is first.
+    pub fn dashboard_status_distribution(
+        &self,
+        environment_filter: &str,
+        window_modifier: &str,
+    ) -> rusqlite::Result<Vec<DashboardStatusCount>> {
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT CASE WHEN r.status = 'succeeded' THEN 'success' ELSE r.status END AS status_key,
+                    COUNT(*) AS count
+             FROM runs r
+             JOIN workflows w ON w.id = r.workflow_id
+             WHERE datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?2)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
+             GROUP BY status_key
+             ORDER BY count DESC, status_key ASC",
+        )?;
+        let rows = stmt.query_map(params![environment_filter, window_modifier], |row| {
+            Ok(DashboardStatusCount {
+                status: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?;
+        rows.collect()
     }
 
     pub fn mission_control_recent_runs(
@@ -8519,6 +8562,91 @@ SUMMARY_JSON:{\"title\":\"current\"}
         // "all"-environment KPI sees the sandbox run too (total_runs = 4).
         let all = db.dashboard_kpi_summary("all", "-1 day", 86_400).unwrap();
         assert_eq!(all.total_runs, 4);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dashboard_status_distribution_collapses_success_alias_and_scopes() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let prod = db
+            .create_workflow(
+                "Prod WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let sandbox = db
+            .create_workflow(
+                "Sandbox WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 1 * * *",
+                false,
+                true,
+                "UTC",
+                "sandbox",
+                Some("card"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let now = chrono::Utc::now();
+        let at = |mins_ago: i64| (now - chrono::Duration::minutes(mins_ago)).to_rfc3339();
+        let conn = db.conn().unwrap();
+        let insert_run = |id: &str,
+                          wf: &str,
+                          started: String,
+                          finished: Option<String>,
+                          status: &str| {
+            conn.execute(
+                "INSERT INTO runs (id, workflow_id, started_at, finished_at, status) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, wf, started, finished, status],
+            )
+            .unwrap();
+        };
+        // Production, in window: success x2 + succeeded x1 (alias) => success=3,
+        // plus failed=1, running=1.
+        insert_run("p1", &prod.id, at(60), Some(at(60)), "success");
+        insert_run("p2", &prod.id, at(70), Some(at(70)), "success");
+        insert_run("p3", &prod.id, at(80), Some(at(80)), "succeeded");
+        insert_run("p4", &prod.id, at(90), Some(at(90)), "failed");
+        insert_run("p5", &prod.id, at(30), None, "running");
+        // Production, out of window (excluded).
+        insert_run("p6", &prod.id, at(40 * 60), Some(at(40 * 60)), "success");
+        // Sandbox, in window (excluded by production filter).
+        insert_run("s1", &sandbox.id, at(50), Some(at(50)), "failed");
+
+        let dist = db
+            .dashboard_status_distribution("production", "-1 day")
+            .unwrap();
+        let lookup: std::collections::HashMap<String, i64> = dist
+            .iter()
+            .map(|entry| (entry.status.clone(), entry.count))
+            .collect();
+        assert_eq!(lookup.get("success"), Some(&3), "success + succeeded alias");
+        assert_eq!(lookup.get("failed"), Some(&1));
+        assert_eq!(lookup.get("running"), Some(&1));
+        assert!(!lookup.contains_key("succeeded"), "alias collapsed");
+        assert_eq!(dist.len(), 3);
+        // Largest slice first.
+        assert_eq!(dist[0].status, "success");
+
+        // "all" pulls in the sandbox failure (failed => 2).
+        let all = db.dashboard_status_distribution("all", "-1 day").unwrap();
+        let all_failed = all.iter().find(|entry| entry.status == "failed").unwrap();
+        assert_eq!(all_failed.count, 2);
 
         let _ = std::fs::remove_dir_all(dir);
     }
