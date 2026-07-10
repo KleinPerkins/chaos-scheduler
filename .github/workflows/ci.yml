@@ -148,6 +148,28 @@ jobs:
       - name: Validate PR commit messages
         run: npx commitlint --from "${{ github.event.pull_request.base.sha }}" --to "${{ github.event.pull_request.head.sha }}" --verbose
 
+  # Design-token parity: tokens/*.json is the source of truth. This job (1)
+  # validates the shape of every token source and (2) regenerates the tracked
+  # artifacts (src/styles/tokens.css|ts, figma-tokens.json) and fails if they
+  # drift from what is committed — so a token change can never merge with stale
+  # generated output. It never changes token values or Style Dictionary config.
+  tokens:
+    name: Design tokens (schema + freshness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Validate token source shape (tokens/*.json)
+        run: npm run tokens:validate
+      - name: Unit tests (token validator)
+        run: npm run test:tokens
+      - name: Verify generated tokens are committed-fresh
+        run: npm run tokens:check
+
   # Pre-release guard: the Rust `tauri` crate and the JS `@tauri-apps/*` packages
   # must share a major.minor or `tauri build` aborts in the release job (root
   # cause of the 0.3.0 desktop build failure). Compile-free lockfile check.
@@ -168,7 +190,17 @@ jobs:
   ci-required:
     name: ci-required
     if: always()
-    needs: [changes, frontend, e2e, rust, packages, commitlint, tauri-versions]
+    needs:
+      [
+        changes,
+        frontend,
+        e2e,
+        rust,
+        packages,
+        commitlint,
+        tauri-versions,
+        tokens,
+      ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all required jobs passed
