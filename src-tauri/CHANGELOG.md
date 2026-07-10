@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v1.0.4...chaos-scheduler-tauri-v1.1.0) (2026-07-09)
+
+
+### Features
+
+* **brand:** add monochrome menu-bar tray glyph ([#148](https://github.com/KleinPerkins/chaos-scheduler/issues/148)) ([21e4b4e](https://github.com/KleinPerkins/chaos-scheduler/commit/21e4b4e66148d4b1db91f99eaa722c4f5a3cb840))
+* design-system token foundation + orbital-8 app icon ([#146](https://github.com/KleinPerkins/chaos-scheduler/issues/146)) ([b25ce59](https://github.com/KleinPerkins/chaos-scheduler/commit/b25ce594189594256ae120ce0c58e18ba4b9cce7))
+
 ## [1.0.4](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v1.0.3...chaos-scheduler-tauri-v1.0.4) (2026-07-07)
 
 
