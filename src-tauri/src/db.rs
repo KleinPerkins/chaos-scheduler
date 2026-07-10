@@ -547,6 +547,49 @@ pub struct DashboardWaitRuntimeTrend {
     pub runtime: Vec<DashboardMetricBucket>,
 }
 
+/// One workflow's in-window failure recurrence: how many of its runs failed
+/// (any non-success terminal status) over the `(environment, lookback)` window,
+/// out of how many ran. Only workflows with at least one failure are returned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardWorkflowFailureCount {
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub environment: String,
+    pub failure_count: i64,
+    pub total_runs: i64,
+}
+
+/// One queue's current health, classified against the shared thresholds (see
+/// [`DashboardQueueHealthSummary`]). `utilization` is `active_count / capacity`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardQueueHealth {
+    pub name: String,
+    pub environment: String,
+    pub capacity: i64,
+    pub max_queued: Option<i64>,
+    pub active_count: i64,
+    pub queued_count: i64,
+    pub utilization: f64,
+    /// `"healthy"`, `"warn"`, or `"degraded"`.
+    pub status: String,
+}
+
+/// Current queue-health summary over an environment: per-queue classification
+/// plus the healthy/warn/degraded tallies and the thresholds used (echoed so
+/// the UI can render them and the orchestrator can review the defaults).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardQueueHealthSummary {
+    pub queues: Vec<DashboardQueueHealth>,
+    pub healthy: i64,
+    pub warn: i64,
+    pub degraded: i64,
+    /// Utilization at/above which a queue is at least `warn` (default `0.9`).
+    pub warn_utilization: f64,
+    /// Backlog (queued) at/above which a saturated queue is `degraded`, and at
+    /// which an unsaturated queue is at least `warn` (default `1`).
+    pub degraded_backlog: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionControlNeedsAttentionItem {
     pub id: String,
@@ -3972,6 +4015,129 @@ impl Database {
                 }
             })
             .collect()
+    }
+
+    /// Per-workflow failure recurrence over `(environment, window)`: for every
+    /// workflow with at least one failed run in the window, its failure count
+    /// (any non-success terminal status) and total run count. Windowed on
+    /// `COALESCE(finished_at, started_at)` to match the KPI/status aggregates.
+    /// Ordered by failure count desc so the worst offenders lead; the consumer
+    /// can apply a recurrence threshold (e.g. `failure_count >= 2`).
+    pub fn dashboard_failure_recurrence(
+        &self,
+        environment_filter: &str,
+        window_modifier: &str,
+    ) -> rusqlite::Result<Vec<DashboardWorkflowFailureCount>> {
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT w.id,
+                    w.name,
+                    COALESCE(NULLIF(w.environment, ''), 'production') AS env,
+                    SUM(CASE WHEN r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered') THEN 1 ELSE 0 END) AS failures,
+                    COUNT(r.id) AS total
+             FROM workflows w
+             JOIN runs r ON r.workflow_id = w.id
+             WHERE datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?2)
+               AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
+             GROUP BY w.id
+             HAVING failures > 0
+             ORDER BY failures DESC, total DESC, w.name ASC",
+        )?;
+        let rows = stmt.query_map(params![environment_filter, window_modifier], |row| {
+            Ok(DashboardWorkflowFailureCount {
+                workflow_id: row.get(0)?,
+                workflow_name: row.get(1)?,
+                environment: row.get(2)?,
+                failure_count: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                total_runs: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Current queue-health summary for `environment_filter` (`"all"` for every
+    /// queue). Builds on [`Database::list_queues`] and classifies each queue
+    /// with [`Database::classify_queue_health`], then tallies healthy/warn/
+    /// degraded. Thresholds are fixed defaults (echoed for review), not stored.
+    pub fn dashboard_queue_health(
+        &self,
+        environment_filter: &str,
+    ) -> rusqlite::Result<DashboardQueueHealthSummary> {
+        // Defaults FLAGGED for orchestrator review.
+        const WARN_UTILIZATION: f64 = 0.9;
+        const DEGRADED_BACKLOG: i64 = 1;
+        let environment_filter = normalize_mission_environment_filter(environment_filter);
+        let (mut healthy, mut warn, mut degraded) = (0_i64, 0_i64, 0_i64);
+        let queues: Vec<DashboardQueueHealth> = self
+            .list_queues()?
+            .into_iter()
+            .filter(|q| {
+                environment_filter == "all"
+                    || normalize_mission_environment_filter(&q.environment) == environment_filter
+            })
+            .map(|q| {
+                let capacity = q.capacity.max(1);
+                let utilization = q.active_count as f64 / capacity as f64;
+                let status = Self::classify_queue_health(
+                    q.active_count,
+                    q.capacity,
+                    q.queued_count,
+                    q.max_queued,
+                    WARN_UTILIZATION,
+                    DEGRADED_BACKLOG,
+                );
+                match status {
+                    "degraded" => degraded += 1,
+                    "warn" => warn += 1,
+                    _ => healthy += 1,
+                }
+                DashboardQueueHealth {
+                    name: q.name,
+                    environment: q.environment,
+                    capacity: q.capacity,
+                    max_queued: q.max_queued,
+                    active_count: q.active_count,
+                    queued_count: q.queued_count,
+                    utilization,
+                    status: status.to_string(),
+                }
+            })
+            .collect();
+        Ok(DashboardQueueHealthSummary {
+            queues,
+            healthy,
+            warn,
+            degraded,
+            warn_utilization: WARN_UTILIZATION,
+            degraded_backlog: DEGRADED_BACKLOG,
+        })
+    }
+
+    /// Classify a queue's health from its live occupancy. `degraded` = saturated
+    /// (`active >= capacity`) with a backlog (`queued >= degraded_backlog`), or a
+    /// backlog at/over the hard `max_queued` cap. Otherwise `warn` when
+    /// utilization is at/over `warn_utilization` or any backlog is forming, else
+    /// `healthy`. Pure — unit-tested directly.
+    fn classify_queue_health(
+        active_count: i64,
+        capacity: i64,
+        queued_count: i64,
+        max_queued: Option<i64>,
+        warn_utilization: f64,
+        degraded_backlog: i64,
+    ) -> &'static str {
+        let capacity = capacity.max(1);
+        let utilization = active_count as f64 / capacity as f64;
+        let saturated = active_count >= capacity;
+        let at_hard_cap = max_queued.is_some_and(|cap| cap > 0 && queued_count >= cap);
+        if (saturated && queued_count >= degraded_backlog) || at_hard_cap {
+            "degraded"
+        } else if utilization >= warn_utilization || queued_count >= degraded_backlog {
+            "warn"
+        } else {
+            "healthy"
+        }
     }
 
     pub fn mission_control_recent_runs(
@@ -9225,6 +9391,220 @@ SUMMARY_JSON:{\"title\":\"current\"}
             .find(|bk| bk.bucket == hour_bucket(120))
             .unwrap();
         assert_eq!(all_recent.count, 3, "A + B + sandbox");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dashboard_failure_recurrence_counts_per_workflow_in_window() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let mk = |name: &str, env: &str, domain: &str| {
+            db.create_workflow(
+                name,
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                env,
+                Some(domain),
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let a = mk("WF A", "production", "scheduler");
+        let b = mk("WF B", "production", "card");
+        let c = mk("WF C", "production", "card");
+        let s = mk("WF S", "sandbox", "card");
+
+        let now = chrono::Utc::now();
+        let at = |mins_ago: i64| (now - chrono::Duration::minutes(mins_ago)).to_rfc3339();
+        let conn = db.conn().unwrap();
+        let insert = |id: &str, wf: &str, mins_ago: i64, status: &str| {
+            conn.execute(
+                "INSERT INTO runs (id, workflow_id, started_at, finished_at, status) VALUES (?1, ?2, ?3, ?3, ?4)",
+                params![id, wf, at(mins_ago), status],
+            )
+            .unwrap();
+        };
+        // A: 2 failed + 1 success in window; 1 failed OUTSIDE (40h) excluded.
+        insert("a1", &a.id, 120, "failed");
+        insert("a2", &a.id, 130, "dead_lettered");
+        insert("a3", &a.id, 140, "success");
+        insert("a4", &a.id, 40 * 60, "failed");
+        // B: 1 failed in window.
+        insert("b1", &b.id, 120, "cancelled");
+        // C: only successes -> excluded (no failures).
+        insert("c1", &c.id, 120, "success");
+        // S (sandbox): 3 failed -> excluded under production, included under all.
+        insert("s1", &s.id, 120, "failed");
+        insert("s2", &s.id, 130, "failed");
+        insert("s3", &s.id, 140, "failed");
+
+        let prod = db
+            .dashboard_failure_recurrence("production", "-1 day")
+            .unwrap();
+        assert_eq!(prod.len(), 2, "A and B (C has no failures, S is sandbox)");
+        assert_eq!(prod[0].workflow_id, a.id, "A leads: most failures");
+        assert_eq!(prod[0].failure_count, 2);
+        assert_eq!(prod[0].total_runs, 3, "2 failed + 1 success in window");
+        assert_eq!(prod[1].workflow_id, b.id);
+        assert_eq!(prod[1].failure_count, 1);
+
+        let all = db.dashboard_failure_recurrence("all", "-1 day").unwrap();
+        assert_eq!(all.len(), 3, "A, B, and sandbox S");
+        assert_eq!(all[0].workflow_id, s.id, "S leads with 3 failures");
+        assert_eq!(all[0].failure_count, 3);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn classify_queue_health_thresholds() {
+        // healthy: idle, no backlog.
+        assert_eq!(
+            Database::classify_queue_health(0, 4, 0, None, 0.9, 1),
+            "healthy"
+        );
+        // warn via utilization: saturated but no backlog.
+        assert_eq!(
+            Database::classify_queue_health(4, 4, 0, None, 0.9, 1),
+            "warn"
+        );
+        // warn via backlog: not saturated but queued forming.
+        assert_eq!(
+            Database::classify_queue_health(1, 4, 1, None, 0.9, 1),
+            "warn"
+        );
+        // degraded: saturated + backlog.
+        assert_eq!(
+            Database::classify_queue_health(4, 4, 1, None, 0.9, 1),
+            "degraded"
+        );
+        // degraded via hard max_queued cap even when not saturated.
+        assert_eq!(
+            Database::classify_queue_health(0, 4, 5, Some(5), 0.9, 1),
+            "degraded"
+        );
+        // capacity <= 0 is treated as 1: one active saturates it.
+        assert_eq!(
+            Database::classify_queue_health(1, 0, 0, None, 0.9, 1),
+            "warn"
+        );
+    }
+
+    #[test]
+    fn dashboard_queue_health_classifies_and_tallies() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        // Small capacities so a single running run saturates production-default.
+        db.upsert_queue("production-default", "production", 1, None, Some(3))
+            .unwrap();
+        db.upsert_queue("sandbox-default", "sandbox", 2, None, None)
+            .unwrap();
+        db.upsert_queue("batch", "production", 3, None, None)
+            .unwrap();
+
+        let prod = db
+            .create_workflow(
+                "Prod WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let sand = db
+            .create_workflow(
+                "Sandbox WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 1 * * *",
+                false,
+                true,
+                "UTC",
+                "sandbox",
+                Some("card"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = db.conn().unwrap();
+        // Running runs drive active_count (via queue identity = "<env>-default").
+        conn.execute(
+            "INSERT INTO runs (id, workflow_id, started_at, status) VALUES ('run-p', ?1, ?2, 'running')",
+            params![prod.id, now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runs (id, workflow_id, started_at, status) VALUES ('run-s', ?1, ?2, 'running')",
+            params![sand.id, now],
+        )
+        .unwrap();
+        // Queued backlog drives queued_count.
+        let queue = |id: &str, wf: &str, qn: &str| {
+            conn.execute(
+                "INSERT INTO queued_runs (id, workflow_id, queue_name, status, queued_at) VALUES (?1, ?2, ?3, 'queued', ?4)",
+                params![id, wf, qn, now],
+            )
+            .unwrap();
+        };
+        // production-default: active 1 == capacity 1 (saturated) + 2 queued -> degraded.
+        queue("q1", &prod.id, "production-default");
+        queue("q2", &prod.id, "production-default");
+        // sandbox-default: active 1 < capacity 2 + 1 queued -> warn.
+        queue("q3", &sand.id, "sandbox-default");
+
+        let prod_health = db.dashboard_queue_health("production").unwrap();
+        let pd = prod_health
+            .queues
+            .iter()
+            .find(|q| q.name == "production-default")
+            .unwrap();
+        assert_eq!(pd.active_count, 1);
+        assert_eq!(pd.queued_count, 2);
+        assert_eq!(pd.status, "degraded");
+        let batch = prod_health
+            .queues
+            .iter()
+            .find(|q| q.name == "batch")
+            .unwrap();
+        assert_eq!(batch.status, "healthy", "idle, no backlog");
+        assert_eq!(prod_health.degraded, 1);
+        assert_eq!(prod_health.healthy, 1);
+        assert_eq!(prod_health.warn, 0, "no production queue is warn");
+        assert_eq!(prod_health.warn_utilization, 0.9);
+        assert_eq!(prod_health.degraded_backlog, 1);
+        assert!(
+            prod_health
+                .queues
+                .iter()
+                .all(|q| q.environment == "production"),
+            "production filter excludes sandbox queues"
+        );
+
+        let all = db.dashboard_queue_health("all").unwrap();
+        let sd = all
+            .queues
+            .iter()
+            .find(|q| q.name == "sandbox-default")
+            .unwrap();
+        assert_eq!(sd.status, "warn", "active 1 < cap 2 with 1 queued");
+        assert_eq!(all.degraded, 1);
+        assert_eq!(all.warn, 1);
 
         let _ = std::fs::remove_dir_all(dir);
     }

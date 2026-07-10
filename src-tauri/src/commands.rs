@@ -1,11 +1,11 @@
 use crate::db::{
-    DashboardKpiSummary, DashboardStatusCount, DashboardTrendSeries, DashboardWaitRuntimeTrend,
-    Database, EmailConfig, EmailProfile, MissionControlNeedsAttentionItem,
-    MissionControlPanelAvailability, MissionControlPreferences, MissionControlSnapshot,
-    MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt,
-    RunMetric, RunRelationship, RunTask, SchedulerAsset, SchedulerDeadLetter, SchedulerStatus,
-    SlaViolation, Workflow, WorkflowHistoryBucket, WorkflowResourceSample,
-    WorkflowTokenUsageRollup,
+    DashboardKpiSummary, DashboardQueueHealthSummary, DashboardStatusCount, DashboardTrendSeries,
+    DashboardWaitRuntimeTrend, DashboardWorkflowFailureCount, Database, EmailConfig, EmailProfile,
+    MissionControlNeedsAttentionItem, MissionControlPanelAvailability, MissionControlPreferences,
+    MissionControlSnapshot, MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun,
+    RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask, SchedulerAsset,
+    SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
+    WorkflowResourceSample, WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use crate::service::{SchedulerService, WorkflowDraft};
@@ -1059,6 +1059,39 @@ pub fn get_dashboard_wait_runtime_trend(
     state
         .db
         .dashboard_wait_runtime_trend(&environment_filter, &window_modifier, grain)
+        .map_err(|e| e.to_string())
+}
+
+/// Per-workflow failure recurrence for the v3 dashboard, scoped to
+/// `(environmentFilter, lookback)`. Only workflows with at least one failure in
+/// the window are returned, worst first. `lookback` accepts the shared grammar;
+/// defaults to `1d`.
+#[tauri::command]
+pub fn get_dashboard_failure_recurrence(
+    state: State<AppState>,
+    environment_filter: Option<String>,
+    lookback: Option<String>,
+) -> Result<Vec<DashboardWorkflowFailureCount>, String> {
+    let (window_modifier, _window_seconds) = parse_lookback(lookback.as_deref())?;
+    let environment_filter = normalize_mission_environment_filter(environment_filter, "all");
+    state
+        .db
+        .dashboard_failure_recurrence(&environment_filter, &window_modifier)
+        .map_err(|e| e.to_string())
+}
+
+/// Current queue-health summary for the v3 dashboard, scoped to
+/// `environmentFilter` (`all` for every queue). Reflects live occupancy, so it
+/// takes no lookback.
+#[tauri::command]
+pub fn get_dashboard_queue_health(
+    state: State<AppState>,
+    environment_filter: Option<String>,
+) -> Result<DashboardQueueHealthSummary, String> {
+    let environment_filter = normalize_mission_environment_filter(environment_filter, "all");
+    state
+        .db
+        .dashboard_queue_health(&environment_filter)
         .map_err(|e| e.to_string())
 }
 
