@@ -6,6 +6,7 @@ import type {
   DashboardKpiDelta,
   DashboardKpiSummary,
   DashboardQueueHealthSummary,
+  DashboardQueueUtilizationHistory,
   DashboardStatusCount,
   DashboardTrendSeries,
   DashboardWaitRuntimeTrend,
@@ -451,6 +452,99 @@ export const sampleDashboardExecutionSlots: DashboardExecutionSlots = {
   global_available: 9,
   global_utilization: 0.25,
 };
+
+/** Queue-utilization history (hourly) climbing from healthy into the warn and
+ * degraded bands mid-window, so the threshold-zone chart shows a meaningful
+ * crossing. Utilizations are fractions (0–1); thresholds mirror queue health
+ * (warn 0.7, degraded 0.9). Window aligns with the wait/runtime trend. */
+export const sampleDashboardQueueUtilizationHistory: DashboardQueueUtilizationHistory =
+  {
+    grain: "hour",
+    warn_utilization: 0.7,
+    degraded_utilization: 0.9,
+    buckets: [
+      {
+        bucket: "2026-07-04T05:00:00.000Z",
+        avg_running: 6.2,
+        max_running: 8,
+        avg_queued: 2.1,
+        max_queued: 5,
+        avg_utilization: 0.52,
+        max_utilization: 0.7,
+        sample_count: 12,
+      },
+      {
+        bucket: "2026-07-04T06:00:00.000Z",
+        avg_running: 6.9,
+        max_running: 9,
+        avg_queued: 2.8,
+        max_queued: 6,
+        avg_utilization: 0.58,
+        max_utilization: 0.78,
+        sample_count: 12,
+      },
+      {
+        bucket: "2026-07-04T07:00:00.000Z",
+        avg_running: 7.5,
+        max_running: 10,
+        avg_queued: 3.4,
+        max_queued: 7,
+        avg_utilization: 0.63,
+        max_utilization: 0.83,
+        sample_count: 12,
+      },
+      {
+        bucket: "2026-07-04T08:00:00.000Z",
+        avg_running: 8.5,
+        max_running: 11,
+        avg_queued: 4.6,
+        max_queued: 9,
+        avg_utilization: 0.71,
+        max_utilization: 0.92,
+        sample_count: 12,
+      },
+      {
+        bucket: "2026-07-04T09:00:00.000Z",
+        avg_running: 8.1,
+        max_running: 11,
+        avg_queued: 4.0,
+        max_queued: 8,
+        avg_utilization: 0.68,
+        max_utilization: 0.88,
+        sample_count: 12,
+      },
+      {
+        bucket: "2026-07-04T10:00:00.000Z",
+        avg_running: 9.4,
+        max_running: 12,
+        avg_queued: 5.8,
+        max_queued: 11,
+        avg_utilization: 0.79,
+        max_utilization: 0.97,
+        sample_count: 12,
+      },
+      {
+        bucket: "2026-07-04T11:00:00.000Z",
+        avg_running: 8.9,
+        max_running: 11,
+        avg_queued: 5.1,
+        max_queued: 10,
+        avg_utilization: 0.74,
+        max_utilization: 0.91,
+        sample_count: 12,
+      },
+      {
+        bucket: "2026-07-04T12:00:00.000Z",
+        avg_running: 7.9,
+        max_running: 10,
+        avg_queued: 3.9,
+        max_queued: 8,
+        avg_utilization: 0.66,
+        max_utilization: 0.85,
+        sample_count: 12,
+      },
+    ],
+  };
 
 /** Blocked/waiting reason taxonomy + heaviest blockers for the Needs Attention
  * drill-down. 9 jobs waiting across three reason categories. */

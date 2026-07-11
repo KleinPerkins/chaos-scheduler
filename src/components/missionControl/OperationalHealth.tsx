@@ -1,7 +1,7 @@
 import { useId, useState } from "react";
 import DualAxisLine from "../charts/DualAxisLine";
 import InfoTip from "../InfoTip";
-import { GroupMetric, ToneChip } from "./groupCard";
+import { ChartLegend, GroupMetric, ToneChip } from "./groupCard";
 import { trendToChart } from "../overview/overviewData";
 import {
   aggregateStats,
@@ -19,30 +19,6 @@ import "./surfaces.css";
 const GROUP_TITLE = "Operational Health";
 const GROUP_INFO_DEF =
   "Success rate, throughput, and wait/runtime duration trends over the selected window.";
-
-/** A small solid/dashed swatch legend row for a trend chart. */
-function ChartLegend({
-  items,
-}: {
-  items: { label: string; color: string; dashed?: boolean }[];
-}) {
-  return (
-    <ul className="mc-chart-legend" aria-hidden="true">
-      {items.map((it) => (
-        <li key={it.label} className="mc-chart-legend__item">
-          <span
-            className={`mc-chart-legend__swatch${it.dashed ? " mc-chart-legend__swatch--dashed" : ""}`}
-            style={{
-              background: it.dashed ? "transparent" : it.color,
-              borderColor: it.color,
-            }}
-          />
-          <span className="mc-chart-legend__label">{it.label}</span>
-        </li>
-      ))}
-    </ul>
-  );
-}
 
 /**
  * One wait/runtime dual-axis duration card: the average (left scale, solid) and
