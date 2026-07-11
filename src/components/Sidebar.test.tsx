@@ -127,4 +127,36 @@ describe("Sidebar", () => {
     fireEvent.click(darkOption as HTMLElement);
     expect(onThemeChange).toHaveBeenCalledWith("dark");
   });
+
+  it("toggles between expanded and collapsed layouts without hiding navigation names", () => {
+    const { container, getByRole } = renderSidebar();
+    const aside = sidebarOf(container);
+    const toggle = getByRole("button", { name: "Collapse sidebar" });
+
+    expect(aside).not.toHaveClass("is-collapsed");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(toggle);
+
+    expect(aside).toHaveClass("is-collapsed");
+    expect(getByRole("button", { name: "Expand sidebar" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(getByRole("button", { name: "Home" })).toBeInTheDocument();
+    expect(getByRole("button", { name: "Workflows" })).toBeInTheDocument();
+  });
+
+  it("supports a controlled collapsed layout and reports toggle intent", () => {
+    const onCollapsedChange = vi.fn();
+    const { container, getByRole } = renderSidebar({
+      collapsed: true,
+      onCollapsedChange,
+    });
+
+    expect(sidebarOf(container)).toHaveClass("is-collapsed");
+    fireEvent.click(getByRole("button", { name: "Expand sidebar" }));
+    expect(onCollapsedChange).toHaveBeenCalledWith(false);
+    expect(sidebarOf(container)).toHaveClass("is-collapsed");
+  });
 });
