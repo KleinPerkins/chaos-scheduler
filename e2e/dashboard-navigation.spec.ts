@@ -30,7 +30,7 @@ test.describe("Dashboard navigation", () => {
       page.getByRole("heading", { name: "Workflows" }),
     ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "+ Add Workflow" }),
+      page.getByRole("button", { name: "Add workflow" }),
     ).toBeVisible();
 
     await nav.getByRole("button", { name: "History" }).click();
