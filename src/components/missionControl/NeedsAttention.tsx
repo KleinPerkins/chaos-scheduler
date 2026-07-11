@@ -2,6 +2,7 @@ import { useId, useState } from "react";
 import ImpactBars from "../charts/ImpactBars";
 import InfoTip from "../InfoTip";
 import { formatDuration } from "../../lib/duration";
+import { GroupMetric, ToneChip } from "./groupCard";
 import {
   blastRadiusBars,
   blockReasonBars,
@@ -9,7 +10,6 @@ import {
   formatFailureRate,
   heavyBlockerBars,
   needsAttentionSummary,
-  type AttentionTone,
 } from "./needsAttentionData";
 import type { NeedsAttentionState } from "./useNeedsAttention";
 import "./surfaces.css";
@@ -17,21 +17,6 @@ import "./surfaces.css";
 const GROUP_TITLE = "Critical / Needs Attention";
 const GROUP_INFO_DEF =
   "Blocked/waiting work, heavy blockers, long-running blast radius, and recent failures over the selected window.";
-
-function ToneChip({ tone }: { tone: AttentionTone }) {
-  const label =
-    tone === "critical" ? "Critical" : tone === "warn" ? "Warning" : "Clear";
-  return <span className={`mc-grp__tone mc-grp__tone--${tone}`}>{label}</span>;
-}
-
-function Metric({ value, label }: { value: string; label: string }) {
-  return (
-    <div className="mc-grp__metric">
-      <span className="mc-grp__metric-value">{value}</span>
-      <span className="mc-grp__metric-label">{label}</span>
-    </div>
-  );
-}
 
 /**
  * At-a-glance "Critical / Needs Attention" group card for the two-group IA. It
@@ -82,15 +67,15 @@ export function NeedsAttentionSummary({
         <>
           <p className="mc-grp__headline">{summary.headline}</p>
           <div className="mc-grp__metrics">
-            <Metric
+            <GroupMetric
               value={summary.blockedCount.toLocaleString()}
               label="Waiting now"
             />
-            <Metric
+            <GroupMetric
               value={summary.totalFailures.toLocaleString()}
               label={`Failures · ${summary.failingWorkflowCount} wf`}
             />
-            <Metric
+            <GroupMetric
               value={
                 summary.topBlastRadius
                   ? summary.topBlastRadius.downstream.toLocaleString()
@@ -143,6 +128,7 @@ export function NeedsAttentionSummary({
             <button
               type="button"
               className="mc-grp__btn mc-grp__btn--primary"
+              aria-label="View Needs Attention details"
               onClick={onViewDetails}
             >
               View details →
@@ -151,15 +137,6 @@ export function NeedsAttentionSummary({
         </>
       ) : null}
     </section>
-  );
-}
-
-function StatCell({ value, label }: { value: string; label: string }) {
-  return (
-    <div className="mc-grp__metric">
-      <span className="mc-grp__metric-value">{value}</span>
-      <span className="mc-grp__metric-label">{label}</span>
-    </div>
   );
 }
 
@@ -252,19 +229,19 @@ export function NeedsAttentionPage({
                 </span>
               </div>
               <div className="mc-grp__metrics">
-                <StatCell
+                <GroupMetric
                   value={summary.blockedCount.toLocaleString()}
                   label="Jobs waiting"
                 />
-                <StatCell
+                <GroupMetric
                   value={formatDuration(summary.blockedWaitTotalSeconds * 1000)}
                   label="Σ current wait"
                 />
-                <StatCell
+                <GroupMetric
                   value={formatDuration(summary.blockedWaitMaxSeconds * 1000)}
                   label="Longest wait"
                 />
-                <StatCell
+                <GroupMetric
                   value={
                     data.taxonomy.trailing_wait_seconds_avg == null
                       ? "—"

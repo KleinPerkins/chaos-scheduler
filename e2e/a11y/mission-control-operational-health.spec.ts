@@ -9,9 +9,9 @@ import {
 
 /**
  * Strict, required accessibility + keyboard gate for the Mission Control
- * "Needs Attention" drill-down (F04) in BOTH themes. `expectAxeClean` fails on
- * ANY non-allowlisted violation at any impact. Covers the at-a-glance summary
- * card (its expand toggle) and the full-detail drill-down subpage.
+ * "Operational Health" drill-down (F03) in BOTH themes. `expectAxeClean` fails
+ * on ANY non-allowlisted violation at any impact. Covers the at-a-glance summary
+ * card (its trend expand toggle) and the full-detail drill-down subpage.
  */
 
 const THEMES: readonly ThemeName[] = ["dark", "light"];
@@ -20,44 +20,49 @@ const THEMES: readonly ThemeName[] = ["dark", "light"];
 // allowlisted suite-wide; every other violation still fails.
 const CONTRAST_ALLOW: readonly string[] = ["color-contrast"];
 
-async function openNeedsAttention(page: Page): Promise<void> {
+async function openOperationalHealth(page: Page): Promise<void> {
   await gotoDashboard(page);
   await page
-    .getByRole("button", { name: "View Needs Attention details" })
+    .getByRole("button", { name: "View Operational Health details" })
     .click();
-  await expect(page.locator('[data-drill="needs-attention"]')).toBeVisible();
+  const drill = page.locator('[data-drill="operational-health"]');
+  await expect(drill).toBeVisible();
+  await expect(drill).toHaveAttribute("data-drill-ready", "true");
   await expect(
-    page.getByRole("heading", { name: "Blocked & waiting" }),
+    page.getByRole("heading", { name: "Aggregate KPIs" }),
   ).toBeVisible();
   await waitForFonts(page);
 }
 
 for (const theme of THEMES) {
-  test.describe(`accessibility — Needs Attention (${theme})`, () => {
+  test.describe(`accessibility — Operational Health (${theme})`, () => {
     test.beforeEach(async ({ page }) => {
       await seedTheme(page, theme);
     });
 
     test("drill-down passes strict axe", async ({ page }) => {
-      await openNeedsAttention(page);
+      await openOperationalHealth(page);
       await expect(page.locator(`html[data-theme="${theme}"]`)).toHaveCount(1);
       await expectAxeClean(page, {
-        context: `needs-attention/${theme}`,
+        context: `operational-health/${theme}`,
         allow: CONTRAST_ALLOW,
       });
     });
   });
 }
 
-test.describe("Mission Control — Needs Attention keyboard", () => {
-  test("summary expand toggle is keyboard operable and drives aria-expanded", async ({
+test.describe("Mission Control — Operational Health keyboard", () => {
+  test("summary trend toggle is keyboard operable and drives aria-expanded", async ({
     page,
   }) => {
     await gotoDashboard(page);
 
-    // The summary card ships an in-place medium-detail expansion; the toggle
-    // must be operable by keyboard alone and reflect state via aria-expanded.
-    const toggle = page.getByRole("button", { name: /breakdown/ });
+    // The summary card ships an in-place medium-detail expansion (the
+    // success/failure trend); the toggle must be operable by keyboard alone and
+    // reflect state via aria-expanded. The name regex tolerates both toggle
+    // states (Show/Hide trend) while excluding the Overview's "Success /
+    // failure trend" InfoTip.
+    const toggle = page.getByRole("button", { name: /(Show|Hide) trend/ });
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await toggle.focus();
     await expect(toggle).toBeFocused();
@@ -69,9 +74,9 @@ test.describe("Mission Control — Needs Attention keyboard", () => {
   test("drill-down InfoTips are focusable and Esc-dismissable without losing focus", async ({
     page,
   }) => {
-    await openNeedsAttention(page);
+    await openOperationalHealth(page);
     const infoTip = page
-      .getByRole("button", { name: /Blocked & waiting/i })
+      .getByRole("button", { name: /Aggregate KPIs/i })
       .first();
     await infoTip.focus();
     await expect(infoTip).toBeFocused();
@@ -81,7 +86,7 @@ test.describe("Mission Control — Needs Attention keyboard", () => {
     // Back affordance returns to the two-group summary.
     await page.getByRole("button", { name: /Back to overview/ }).click();
     await expect(
-      page.getByRole("button", { name: "View Needs Attention details" }),
+      page.getByRole("button", { name: "View Operational Health details" }),
     ).toBeVisible();
   });
 });

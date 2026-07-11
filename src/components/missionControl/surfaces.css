@@ -355,6 +355,33 @@
   font-size: var(--font-size-xs);
 }
 
+/* --- trend chart legend (Operational Health) --- */
+.mc-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.mc-chart-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.mc-chart-legend__swatch {
+  width: 14px;
+  height: 0;
+  border-top: 2px solid transparent;
+  border-radius: 2px;
+}
+
+.mc-chart-legend__swatch--dashed {
+  border-top-style: dashed;
+}
+
 /* responsive: collapse to a single column at the native 960 width & below */
 @media (max-width: 1000px) {
   .mc-groups,
