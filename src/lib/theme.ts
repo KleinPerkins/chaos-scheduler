@@ -3,6 +3,7 @@ export type ResolvedTheme = "dark" | "light";
 
 const STORAGE_KEY = "chaos-theme";
 const LIGHT_QUERY = "(prefers-color-scheme: light)";
+const SWITCHING_CLASS = "theme-switching";
 
 export function getStoredPreference(): ThemePreference {
   try {
@@ -28,7 +29,14 @@ export function resolveTheme(pref: ThemePreference): ResolvedTheme {
 
 export function applyTheme(pref: ThemePreference): void {
   if (typeof document === "undefined") return;
-  document.documentElement.setAttribute("data-theme", resolveTheme(pref));
+  const root = document.documentElement;
+  root.classList.add(SWITCHING_CLASS);
+  root.setAttribute("data-theme", resolveTheme(pref));
+  // Commit the token swap while transitions are disabled. Removing the class
+  // after this synchronous style flush cannot interpolate through low-contrast
+  // colors because every themed property is already at its final value.
+  void root.offsetWidth;
+  root.classList.remove(SWITCHING_CLASS);
 }
 
 export function setThemePreference(pref: ThemePreference): void {
