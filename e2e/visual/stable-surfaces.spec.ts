@@ -1,5 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
-import { gotoDashboard, openSidebar } from "../support/nav";
+import {
+  gotoDashboard,
+  openSidebar,
+  openWorkflowRunHistory,
+} from "../support/nav";
 
 /**
  * Visual baselines for currently-shipped, stable surfaces at their native
@@ -69,6 +73,31 @@ test.describe("stable surfaces — main window (960x680)", () => {
     await page.getByRole("button", { name: "Light theme" }).click();
     await expect(page.locator('html[data-theme="light"]')).toHaveCount(1);
     await expect(page).toHaveScreenshot("global-history-light.png");
+  });
+
+  test("workflow-history dark and light", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__CHAOS_IPC_OVERRIDES__ = {
+        ...(window.__CHAOS_IPC_OVERRIDES__ ?? {}),
+        get_workflow_history_buckets: () =>
+          Array.from({ length: 30 }, (_, index) => {
+            const failed = index === 6 || index === 18 ? 1 : 0;
+            return {
+              day: `2026-06-${String(index + 1).padStart(2, "0")}`,
+              total: 1,
+              failed,
+              succeeded: 1 - failed,
+            };
+          }),
+      };
+    });
+    await openWorkflowRunHistory(page);
+    await waitForFonts(page);
+    await expect(page).toHaveScreenshot("workflow-history-dark.png");
+
+    await page.getByRole("button", { name: "Light theme" }).click();
+    await expect(page.locator('html[data-theme="light"]')).toHaveCount(1);
+    await expect(page).toHaveScreenshot("workflow-history-light.png");
   });
 
   test("workflow-detail dark and light", async ({ page }) => {
