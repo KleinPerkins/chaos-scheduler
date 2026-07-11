@@ -20,11 +20,15 @@ import {
 } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
 import { formatDuration } from "../lib/duration";
-import { DEFAULT_LOOKBACK, type Lookback } from "../lib/lookback";
+import {
+  DEFAULT_LOOKBACK,
+  lookbackToParam,
+  type Lookback,
+} from "../lib/lookback";
 import { formatRunStatusLabel, statusKey } from "../lib/runStatus";
 import FilterBar, { type CustomRange } from "./FilterBar";
+import Overview from "./overview/Overview";
 import Select from "./Select";
-import StatCard from "./StatCard";
 import StatusBadge from "./StatusBadge";
 import StatusDot from "./StatusDot";
 import "./MissionControl.css";
@@ -114,16 +118,10 @@ function EmptyPanel({ children }: { children: string }) {
   return <div className="mc-empty">{children}</div>;
 }
 
-function HeaderStatus({ snapshot }: { snapshot: MissionControlSnapshot }) {
+function HeaderStatus() {
   const { environmentFilter, domain } = useMissionControlFilters();
-  const cards = [
-    ["Active workflows", snapshot.header.active_workflows],
-    ["Running now", snapshot.header.running_count],
-    ["Queued / admitted", snapshot.header.queued_count],
-    ["24h failures", snapshot.header.recent_failures],
-  ];
   return (
-    <section className="mc-hero-panel">
+    <section className="mc-hero-panel mc-hero-panel--slim">
       <div>
         <p className="mc-kicker">Mission Control</p>
         <h1>Scheduler operations by environment and owner</h1>
@@ -131,11 +129,6 @@ function HeaderStatus({ snapshot }: { snapshot: MissionControlSnapshot }) {
           Durable scheduler.db state only. Filtered by {environmentFilter} /{" "}
           {domain === "__unowned__" ? "Unowned" : domain}.
         </p>
-      </div>
-      <div className="mc-stat-grid">
-        {cards.map(([label, value]) => (
-          <StatCard key={label} value={value} label={label} />
-        ))}
       </div>
     </section>
   );
@@ -576,6 +569,36 @@ export default function MissionControl({
     [tab, environmentFilter, domain],
   );
 
+  // Running jobs for the Overview race hero come from the snapshot Mission
+  // Control already loads (live_activity), filtered to the running status.
+  const runningJobs = useMemo(
+    () =>
+      snapshot
+        ? snapshot.live_activity.filter(
+            (item) => statusKey(item.status) === "running",
+          )
+        : [],
+    [snapshot],
+  );
+
+  // Serialize the shared (environment, lookback) selection to the backend
+  // grammar the Overview's get_dashboard_* queries consume. A `custom` window
+  // with no (or invalid) range falls back to the default rather than throwing.
+  const lookbackParam = useMemo(() => {
+    try {
+      if (lookback === "custom") {
+        if (!customRange?.start || !customRange?.end) return DEFAULT_LOOKBACK;
+        return lookbackToParam("custom", {
+          customStart: new Date(customRange.start),
+          customEnd: new Date(customRange.end),
+        });
+      }
+      return lookbackToParam(lookback);
+    } catch {
+      return DEFAULT_LOOKBACK;
+    }
+  }, [lookback, customRange]);
+
   const handleEnvironmentChange = useCallback(
     (next: string) => {
       void loadSnapshot(next, domain, true);
@@ -680,30 +703,40 @@ export default function MissionControl({
             role="tabpanel"
             aria-labelledby="mc-tab-overview"
             tabIndex={0}
-            className="mc-grid"
+            className="mc-overview-panel"
           >
-            <HeaderStatus snapshot={snapshot} />
-            <SlaStrip
-              snapshot={snapshot}
-              onOpenQueues={() => onOpenQueues(returnState)}
+            <HeaderStatus />
+            <Overview
+              environmentFilter={environmentFilter}
+              lookbackParam={lookbackParam}
+              lookbackLabel={lookback}
+              runningJobs={runningJobs}
             />
-            <NeedsAttention
-              snapshot={snapshot}
-              onOpenRun={(runId, workflowId) =>
-                onOpenRun(runId, workflowId, returnState)
-              }
-              onOpenQueues={() => onOpenQueues(returnState)}
-              onOpenHistory={(workflowId) =>
-                onOpenHistory(workflowId, returnState)
-              }
-            />
-            <UpcomingRuns snapshot={snapshot} />
-            <RecentRuns
-              runs={snapshot.recent_runs}
-              onOpenRun={(runId, workflowId) =>
-                onOpenRun(runId, workflowId, returnState)
-              }
-            />
+            {/* Existing surfaces kept reachable (G06) until their gated
+                two-group drill-downs land. */}
+            <div className="mc-grid">
+              <SlaStrip
+                snapshot={snapshot}
+                onOpenQueues={() => onOpenQueues(returnState)}
+              />
+              <NeedsAttention
+                snapshot={snapshot}
+                onOpenRun={(runId, workflowId) =>
+                  onOpenRun(runId, workflowId, returnState)
+                }
+                onOpenQueues={() => onOpenQueues(returnState)}
+                onOpenHistory={(workflowId) =>
+                  onOpenHistory(workflowId, returnState)
+                }
+              />
+              <UpcomingRuns snapshot={snapshot} />
+              <RecentRuns
+                runs={snapshot.recent_runs}
+                onOpenRun={(runId, workflowId) =>
+                  onOpenRun(runId, workflowId, returnState)
+                }
+              />
+            </div>
           </div>
         )}
 

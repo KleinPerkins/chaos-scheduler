@@ -56,6 +56,48 @@
   gap: 16px;
 }
 
+.mc-overview-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Slim hero: a compact page-title block. The 6-KPI strip + charts below now
+ * carry the metrics the old header stat cards showed, so this drops the hero
+ * card chrome and uses a smaller title — keeping the front-and-center race hero
+ * (D08) high in the 960x680 view rather than pushed below the fold. The <h1>
+ * text is preserved (dashboard-navigation / accessibility / update-ux specs
+ * assert it) and remains the page's single top-level heading. */
+.mc-hero-panel.mc-hero-panel--slim {
+  display: block;
+  grid-template-columns: none;
+  padding: 0;
+  background: none;
+  border: 0;
+  box-shadow: none;
+}
+
+.mc-hero-panel.mc-hero-panel--slim h1 {
+  max-width: none;
+  font-size: 20px;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.mc-hero-panel--slim .mc-kicker {
+  margin-bottom: 4px;
+  /* On the plain (backgroundless) title block the accent indigo cannot reach
+   * WCAG AA on the page background at this small bold size; a secondary-text
+   * eyebrow stays legible in both themes. */
+  color: var(--text-secondary);
+}
+
+.mc-hero-panel--slim .mc-hero-copy {
+  max-width: none;
+  margin-top: 4px;
+  font-size: var(--font-size-sm);
+}
+
 .mc-hero-panel,
 .mc-panel {
   background:

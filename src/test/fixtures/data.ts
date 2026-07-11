@@ -1,8 +1,16 @@
 import type {
   ApiKey,
+  DashboardExecutionSlots,
+  DashboardKpiDelta,
+  DashboardKpiSummary,
+  DashboardQueueHealthSummary,
+  DashboardStatusCount,
+  DashboardTrendSeries,
+  DashboardWorkflowBaseline,
   EmailConfig,
   Environment,
   McpIntegrationStatus,
+  MissionControlActivityItem,
   MissionControlPreferences,
   MissionControlSnapshot,
   QueueInfo,
@@ -111,6 +119,209 @@ export const emptyMissionControlSnapshot: MissionControlSnapshot = {
   recent_runs: [sampleRun],
   workflow_telemetry: [],
   availability: [],
+};
+
+/** Three running jobs for the Overview race hero (elapsed = NOW − started_at):
+ * ~20m, ~44m, and ~78m in, joined to the baselines below by workflow_id. */
+export const runningActivity: MissionControlActivityItem[] = [
+  {
+    id: "act-nightly",
+    workflow_id: "wf-nightly-sync",
+    workflow_name: "Nightly sync",
+    environment: "production",
+    domain: "ops",
+    status: "running",
+    started_at: "2026-07-04T11:40:00.000Z",
+    finished_at: null,
+    run_id: "run-live-nightly",
+  },
+  {
+    id: "act-etl",
+    workflow_id: "wf-etl-rollup",
+    workflow_name: "ETL rollup",
+    environment: "production",
+    domain: "data",
+    status: "running",
+    started_at: "2026-07-04T11:16:00.000Z",
+    finished_at: null,
+    run_id: "run-live-etl",
+  },
+  {
+    id: "act-ml",
+    workflow_id: "wf-ml-scoring",
+    workflow_name: "ML scoring",
+    environment: "sandbox",
+    domain: "ml",
+    status: "running",
+    started_at: "2026-07-04T10:42:00.000Z",
+    finished_at: null,
+    run_id: "run-live-ml",
+  },
+];
+
+/** Populated Mission Control snapshot used as the default IPC fixture: the
+ * empty snapshot plus the running jobs (so the Overview race hero renders). */
+export const dashboardMissionControlSnapshot: MissionControlSnapshot = {
+  ...emptyMissionControlSnapshot,
+  header: { ...emptyMissionControlSnapshot.header, running_count: 3 },
+  live_activity: runningActivity,
+};
+
+/** Per-workflow runtime baselines feeding the race-hero finish lines (p50 =
+ * expected). Keyed to `runningActivity` by workflow_id. */
+export const sampleDashboardWorkflowBaselines: DashboardWorkflowBaseline[] = [
+  {
+    workflow_id: "wf-nightly-sync",
+    workflow_name: "Nightly sync",
+    environment: "production",
+    sample_count: 42,
+    p50_runtime_seconds: 1800, // 30m → 20m elapsed ≈ 67%
+    mean_runtime_seconds: 1920,
+  },
+  {
+    workflow_id: "wf-etl-rollup",
+    workflow_name: "ETL rollup",
+    environment: "production",
+    sample_count: 30,
+    p50_runtime_seconds: 3600, // 60m → 44m elapsed ≈ 73%
+    mean_runtime_seconds: 3720,
+  },
+  {
+    workflow_id: "wf-ml-scoring",
+    workflow_name: "ML scoring",
+    environment: "sandbox",
+    sample_count: 18,
+    p50_runtime_seconds: 3600, // 60m → 78m elapsed = 130% (overrunning)
+    mean_runtime_seconds: 3400,
+  },
+];
+
+/** Windowed KPI roll-up (1d) for the Overview KPI strip. */
+export const sampleDashboardKpiSummary: DashboardKpiSummary = {
+  total_runs: 128,
+  succeeded: 120,
+  failed: 8,
+  success_rate: 0.9375,
+  throughput_per_hour: 5.3,
+  avg_runtime_seconds: 372,
+  max_runtime_seconds: 5400,
+  median_wait_seconds: 42,
+  max_wait_seconds: 318,
+  window_seconds: 86400,
+};
+
+/** Week-over-window KPI deltas (current vs prior equal window). */
+export const sampleDashboardKpiWow: DashboardKpiDelta = {
+  current: sampleDashboardKpiSummary,
+  previous: {
+    ...sampleDashboardKpiSummary,
+    succeeded: 112,
+    failed: 10,
+    success_rate: 0.9167,
+    throughput_per_hour: 4.9,
+    avg_runtime_seconds: 390,
+    max_wait_seconds: 292,
+  },
+  total_runs_delta: 6,
+  succeeded_delta: 8,
+  failed_delta: -2,
+  success_rate_delta: 0.0208,
+  throughput_per_hour_delta: 0.4,
+  avg_runtime_seconds_delta: -18,
+  max_runtime_seconds_delta: 120,
+  median_wait_seconds_delta: -3,
+  max_wait_seconds_delta: 26,
+};
+
+/** Per-status run counts for the status-distribution donut. */
+export const sampleDashboardStatusDistribution: DashboardStatusCount[] = [
+  { status: "succeeded", count: 120 },
+  { status: "failed", count: 8 },
+  { status: "running", count: 3 },
+  { status: "cancelled", count: 2 },
+];
+
+/** Hourly success/fail trend (eight buckets ending at NOW). */
+export const sampleDashboardSuccessFailTrend: DashboardTrendSeries = {
+  grain: "hour",
+  buckets: [
+    { bucket: "2026-07-04T05:00:00.000Z", total: 14, failed: 1, succeeded: 13 },
+    { bucket: "2026-07-04T06:00:00.000Z", total: 16, failed: 0, succeeded: 16 },
+    { bucket: "2026-07-04T07:00:00.000Z", total: 15, failed: 2, succeeded: 13 },
+    { bucket: "2026-07-04T08:00:00.000Z", total: 18, failed: 1, succeeded: 17 },
+    { bucket: "2026-07-04T09:00:00.000Z", total: 17, failed: 0, succeeded: 17 },
+    { bucket: "2026-07-04T10:00:00.000Z", total: 19, failed: 3, succeeded: 16 },
+    { bucket: "2026-07-04T11:00:00.000Z", total: 16, failed: 1, succeeded: 15 },
+    { bucket: "2026-07-04T12:00:00.000Z", total: 13, failed: 0, succeeded: 13 },
+  ],
+};
+
+/** Live queue health with one degraded + one warn queue (so the SLA banner
+ * renders); queue depth (waiting) sums to 14. */
+export const sampleDashboardQueueHealth: DashboardQueueHealthSummary = {
+  queues: [
+    {
+      name: "default",
+      environment: "production",
+      capacity: 4,
+      max_queued: null,
+      active_count: 3,
+      queued_count: 5,
+      utilization: 0.75,
+      status: "warn",
+    },
+    {
+      name: "ml",
+      environment: "sandbox",
+      capacity: 2,
+      max_queued: null,
+      active_count: 2,
+      queued_count: 9,
+      utilization: 1,
+      status: "degraded",
+    },
+    {
+      name: "batch",
+      environment: "production",
+      capacity: 6,
+      max_queued: null,
+      active_count: 1,
+      queued_count: 0,
+      utilization: 0.17,
+      status: "healthy",
+    },
+  ],
+  healthy: 1,
+  warn: 1,
+  degraded: 1,
+  warn_utilization: 0.7,
+  degraded_backlog: 8,
+};
+
+/** Execution-slot occupancy: three running (matches `runningActivity`). */
+export const sampleDashboardExecutionSlots: DashboardExecutionSlots = {
+  queues: [
+    {
+      name: "default",
+      environment: "production",
+      running: 2,
+      capacity: 4,
+      available: 2,
+      utilization: 0.5,
+    },
+    {
+      name: "ml",
+      environment: "sandbox",
+      running: 1,
+      capacity: 2,
+      available: 1,
+      utilization: 0.5,
+    },
+  ],
+  global_running: 3,
+  global_capacity: 12,
+  global_available: 9,
+  global_utilization: 0.25,
 };
 
 export const emptySchedulerStatus: SchedulerStatus = {
