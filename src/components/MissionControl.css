@@ -86,6 +86,10 @@
 
 .mc-hero-panel--slim .mc-kicker {
   margin-bottom: 4px;
+  /* On the plain (backgroundless) title block the accent indigo cannot reach
+   * WCAG AA on the page background at this small bold size; a secondary-text
+   * eyebrow stays legible in both themes. */
+  color: var(--text-secondary);
 }
 
 .mc-hero-panel--slim .mc-hero-copy {
