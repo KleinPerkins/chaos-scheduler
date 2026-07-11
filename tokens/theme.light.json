@@ -30,17 +30,17 @@
         "success": {
           "solid": { "value": "{palette.success.light}" },
           "tint": { "value": "{palette.success.light}" },
-          "text": { "value": "#1f7a46" }
+          "text": { "value": "#17653a" }
         },
         "error": {
           "solid": { "value": "{palette.error.light}" },
           "tint": { "value": "{palette.error.light-tint}" },
-          "text": { "value": "#a93232" }
+          "text": { "value": "#9b2929" }
         },
         "warning": {
           "solid": { "value": "{palette.warning.light}" },
           "tint": { "value": "{palette.warning.light}" },
-          "text": { "value": "#8a5a12" }
+          "text": { "value": "#74480c" }
         },
         "running": {
           "solid": { "value": "{palette.running.light}" },

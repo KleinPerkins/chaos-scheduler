@@ -119,6 +119,46 @@ function parseShadowColor(shadow: string): ColorValue {
   return { hex, alpha };
 }
 
+type Rgb = readonly [number, number, number];
+
+function parseHex(hex: string): Rgb {
+  return [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)) as [
+    number,
+    number,
+    number,
+  ];
+}
+
+function parseTriplet(value: string): Rgb {
+  return value.split(",").map(Number) as [number, number, number];
+}
+
+function composite(foreground: Rgb, background: Rgb, alpha: number): Rgb {
+  return foreground.map((channel, i) =>
+    Math.round(channel * alpha + background[i] * (1 - alpha)),
+  ) as [number, number, number];
+}
+
+function relativeLuminance(color: Rgb): number {
+  const [r, g, b] = color.map((channel) => {
+    const value = channel / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrastRatio(foreground: Rgb, background: Rgb): number {
+  const lighter = Math.max(
+    relativeLuminance(foreground),
+    relativeLuminance(background),
+  );
+  const darker = Math.min(
+    relativeLuminance(foreground),
+    relativeLuminance(background),
+  );
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
 function colorVarByCss(name: string): FigmaVariable {
   const found = collection("cs.color").variables.find(
     (v) => cssName(v) === name,
@@ -171,6 +211,31 @@ describe("figma-tokens manifest", () => {
           expect(hexToTriplet(mv.hex), `${v.name} @ ${mode}`).toBe(scope[name]);
         } else {
           expect(mv.hex, `${v.name} @ ${mode}`).toBe(scope[name].toLowerCase());
+        }
+      }
+    }
+  });
+
+  it("status text keeps WCAG AA contrast over tinted badge surfaces", () => {
+    const statuses = ["success", "error", "warning", "running"] as const;
+    const surfaces = [
+      "bg-primary",
+      "bg-secondary",
+      "bg-tertiary",
+      "bg-hover",
+      "bg-elevated",
+    ] as const;
+
+    for (const [mode, scope] of themeScopes) {
+      for (const status of statuses) {
+        const text = parseHex(scope[`${status}-text`]);
+        const tint = parseTriplet(scope[`${status}-rgb`]);
+        for (const surface of surfaces) {
+          const badge = composite(tint, parseHex(scope[surface]), 0.22);
+          expect(
+            contrastRatio(text, badge),
+            `${status}-text on 22% ${status} tint over ${surface} @ ${mode}`,
+          ).toBeGreaterThanOrEqual(4.5);
         }
       }
     }
