@@ -57,14 +57,26 @@ const themeScopes = [
   ["Light", light],
 ] as const;
 
-/** The two `*-rgb` CSS companions that are intentionally NOT separate variables. */
+/**
+ * The `*-rgb` CSS companions that are intentionally NOT separate variables:
+ * they mirror a base color's hex as a triplet for `rgba(var(--x-rgb), α)`. The
+ * two surface/brand companions plus the eight categorical data-viz series.
+ */
 const RGB_COMPANIONS: ReadonlyArray<readonly [string, string]> = [
   ["bg-primary", "bg-primary-rgb"],
   ["accent", "accent-rgb"],
+  ["chart-1", "chart-1-rgb"],
+  ["chart-2", "chart-2-rgb"],
+  ["chart-3", "chart-3-rgb"],
+  ["chart-4", "chart-4-rgb"],
+  ["chart-5", "chart-5-rgb"],
+  ["chart-6", "chart-6-rgb"],
+  ["chart-7", "chart-7-rgb"],
+  ["chart-8", "chart-8-rgb"],
 ];
 
 const EXPECTED_COUNTS: Record<string, number> = {
-  "cs.color": 29,
+  "cs.color": 37,
   "cs.space": 7,
   "cs.radius": 2,
   "cs.type": 10,
@@ -128,7 +140,7 @@ describe("figma-tokens manifest", () => {
       (n, c) => n + c.variables.length,
       0,
     );
-    expect(total).toBe(54);
+    expect(total).toBe(62);
   });
 
   it("every variable is well-formed (type, scopes, WEB code syntax, per-mode values)", () => {

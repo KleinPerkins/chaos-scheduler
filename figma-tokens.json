@@ -480,6 +480,158 @@
           }
         },
         {
+          "name": "chart/1",
+          "type": "COLOR",
+          "scopes": ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+          "codeSyntax": {
+            "WEB": "var(--chart-1)"
+          },
+          "values": {
+            "Light": {
+              "hex": "#6d28d9",
+              "alpha": 1
+            },
+            "Dark": {
+              "hex": "#a78bfa",
+              "alpha": 1
+            }
+          },
+          "description": "Categorical data-viz series 1 (violet, brand-harmonized). Solid mark/line/fill; use rgba(var(--chart-1-rgb), α) for translucent area fills."
+        },
+        {
+          "name": "chart/2",
+          "type": "COLOR",
+          "scopes": ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+          "codeSyntax": {
+            "WEB": "var(--chart-2)"
+          },
+          "values": {
+            "Light": {
+              "hex": "#dc5a10",
+              "alpha": 1
+            },
+            "Dark": {
+              "hex": "#fb923c",
+              "alpha": 1
+            }
+          },
+          "description": "Categorical data-viz series 2 (orange). Solid mark/line/fill; use rgba(var(--chart-2-rgb), α) for translucent area fills."
+        },
+        {
+          "name": "chart/3",
+          "type": "COLOR",
+          "scopes": ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+          "codeSyntax": {
+            "WEB": "var(--chart-3)"
+          },
+          "values": {
+            "Light": {
+              "hex": "#0f766e",
+              "alpha": 1
+            },
+            "Dark": {
+              "hex": "#2dd4bf",
+              "alpha": 1
+            }
+          },
+          "description": "Categorical data-viz series 3 (teal). Solid mark/line/fill; use rgba(var(--chart-3-rgb), α) for translucent area fills."
+        },
+        {
+          "name": "chart/4",
+          "type": "COLOR",
+          "scopes": ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+          "codeSyntax": {
+            "WEB": "var(--chart-4)"
+          },
+          "values": {
+            "Light": {
+              "hex": "#be185d",
+              "alpha": 1
+            },
+            "Dark": {
+              "hex": "#f472b6",
+              "alpha": 1
+            }
+          },
+          "description": "Categorical data-viz series 4 (pink). Solid mark/line/fill; use rgba(var(--chart-4-rgb), α) for translucent area fills."
+        },
+        {
+          "name": "chart/5",
+          "type": "COLOR",
+          "scopes": ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+          "codeSyntax": {
+            "WEB": "var(--chart-5)"
+          },
+          "values": {
+            "Light": {
+              "hex": "#475569",
+              "alpha": 1
+            },
+            "Dark": {
+              "hex": "#94a3b8",
+              "alpha": 1
+            }
+          },
+          "description": "Categorical data-viz series 5 (slate). Solid mark/line/fill; use rgba(var(--chart-5-rgb), α) for translucent area fills."
+        },
+        {
+          "name": "chart/6",
+          "type": "COLOR",
+          "scopes": ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+          "codeSyntax": {
+            "WEB": "var(--chart-6)"
+          },
+          "values": {
+            "Light": {
+              "hex": "#a21caf",
+              "alpha": 1
+            },
+            "Dark": {
+              "hex": "#e879f9",
+              "alpha": 1
+            }
+          },
+          "description": "Categorical data-viz series 6 (fuchsia). Solid mark/line/fill; use rgba(var(--chart-6-rgb), α) for translucent area fills."
+        },
+        {
+          "name": "chart/7",
+          "type": "COLOR",
+          "scopes": ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+          "codeSyntax": {
+            "WEB": "var(--chart-7)"
+          },
+          "values": {
+            "Light": {
+              "hex": "#4d7c0f",
+              "alpha": 1
+            },
+            "Dark": {
+              "hex": "#84cc16",
+              "alpha": 1
+            }
+          },
+          "description": "Categorical data-viz series 7 (lime). Solid mark/line/fill; use rgba(var(--chart-7-rgb), α) for translucent area fills."
+        },
+        {
+          "name": "chart/8",
+          "type": "COLOR",
+          "scopes": ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+          "codeSyntax": {
+            "WEB": "var(--chart-8)"
+          },
+          "values": {
+            "Light": {
+              "hex": "#78350f",
+              "alpha": 1
+            },
+            "Dark": {
+              "hex": "#b08968",
+              "alpha": 1
+            }
+          },
+          "description": "Categorical data-viz series 8 (brown). Solid mark/line/fill; use rgba(var(--chart-8-rgb), α) for translucent area fills."
+        },
+        {
           "name": "overlay/elevate",
           "type": "COLOR",
           "scopes": ["FRAME_FILL", "SHAPE_FILL"],

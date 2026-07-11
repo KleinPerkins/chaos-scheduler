@@ -48,6 +48,16 @@
           "text": { "value": "#23508f" }
         }
       },
+      "chart": {
+        "1": { "value": "{palette.chart.1.light}" },
+        "2": { "value": "{palette.chart.2.light}" },
+        "3": { "value": "{palette.chart.3.light}" },
+        "4": { "value": "{palette.chart.4.light}" },
+        "5": { "value": "{palette.chart.5.light}" },
+        "6": { "value": "{palette.chart.6.light}" },
+        "7": { "value": "{palette.chart.7.light}" },
+        "8": { "value": "{palette.chart.8.light}" }
+      },
       "overlay": {
         "elevate": {
           "value": "#0f1117",
