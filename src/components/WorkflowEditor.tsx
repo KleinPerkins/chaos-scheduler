@@ -242,7 +242,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           asyncMode: isManaged ? workflow.async_mode : asyncMode,
           emailOnFailure,
           timezone: LOCAL_TZ,
-          environment: workflow.environment,
+          environment: isManaged ? workflow.environment : environment,
           domain: workflow.domain,
           triggerConfig: isManaged
             ? workflow.trigger_config || undefined
@@ -260,8 +260,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           asyncMode,
           emailOnFailure,
           timezone: LOCAL_TZ,
-          // New UI workflows default to production unless the spec sets another environment.
-          environment: "production",
+          environment,
           triggerConfig: triggerConfig || undefined,
           queueConfig: queueConfig || undefined,
         });
