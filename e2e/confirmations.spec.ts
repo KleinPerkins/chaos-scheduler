@@ -33,7 +33,9 @@ test.describe("Destructive confirmations", () => {
   }) => {
     await gotoDashboard(page);
     await openSidebar(page, "Workflows");
-    await workflowCard(page).getByRole("button", { name: "History" }).click();
+    const card = workflowCard(page);
+    await card.locator("summary").click();
+    await card.getByRole("button", { name: "View history" }).click();
 
     await expect(
       page.getByRole("heading", { name: "Nightly sync" }),

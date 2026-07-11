@@ -15,5 +15,5 @@ export async function openSidebar(page: Page, label: string): Promise<void> {
 }
 
 export function workflowCard(page: Page, name = "Nightly sync") {
-  return page.locator(".wf-card", { hasText: name });
+  return page.getByRole("article", { name });
 }
