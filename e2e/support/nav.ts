@@ -32,3 +32,17 @@ export async function openWorkflowRunHistory(
     .getByRole("heading", { name: `${name} run history` })
     .waitFor({ state: "visible" });
 }
+
+export async function openRunDetail(
+  page: Page,
+  name = "Nightly sync",
+): Promise<void> {
+  await openWorkflowRunHistory(page, name);
+  await page
+    .getByRole("button", { name: /View details for .* run started/i })
+    .first()
+    .click();
+  await page
+    .getByRole("region", { name: `${name} run detail` })
+    .waitFor({ state: "visible" });
+}
