@@ -58,7 +58,7 @@ export default function GlobalHistory({ onViewRun }: Props) {
 
       <div className="rh-heatmap" style={{ marginBottom: 16 }}>
         <div className="rh-heatmap-header">
-          <h3>Filters</h3>
+          <h2>Filters</h2>
           <span>{runs.length} run(s)</span>
         </div>
         <div className="queue-fields">

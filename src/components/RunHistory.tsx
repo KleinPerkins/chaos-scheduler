@@ -110,7 +110,7 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
         <>
           <div className="rh-heatmap">
             <div className="rh-heatmap-header">
-              <h3>30-day failure heatmap</h3>
+              <h2>30-day failure heatmap</h2>
               <span>
                 {buckets.reduce((sum, b) => sum + b.failed, 0)} failed runs
               </span>
@@ -143,7 +143,9 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
                 <th>Exit Code</th>
                 <th>Trigger</th>
                 <th>Result</th>
-                <th></th>
+                <th>
+                  <span className="sr-only">Actions</span>
+                </th>
               </tr>
             </thead>
             <tbody>

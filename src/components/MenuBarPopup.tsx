@@ -121,18 +121,23 @@ export default function MenuBarPopup() {
 
   if (!status) {
     return (
-      <div className="popup">
+      <main className="popup" aria-labelledby="popup-title">
+        <h1 id="popup-title" className="sr-only">
+          {PRODUCT_SHORT_NAME}
+        </h1>
         <div className={error ? "popup-loading popup-error" : "popup-loading"}>
           {error ? `Status failed to load: ${error}` : "Loading..."}
         </div>
-      </div>
+      </main>
     );
   }
 
   return (
-    <div className="popup">
+    <main className="popup" aria-labelledby="popup-title">
       <div className="popup-header">
-        <span className="popup-title">{PRODUCT_SHORT_NAME}</span>
+        <h1 id="popup-title" className="popup-title">
+          {PRODUCT_SHORT_NAME}
+        </h1>
         <span className="popup-meta">
           {status.active_workflows} active
           {status.running_count > 0 && (
@@ -259,6 +264,6 @@ export default function MenuBarPopup() {
           Quit
         </Button>
       </div>
-    </div>
+    </main>
   );
 }

@@ -48,6 +48,20 @@ describe("MenuBarPopup update row", () => {
     expect(screen.queryByText(/Update available/)).not.toBeInTheDocument();
   });
 
+  it("labels its main landmark with the product heading", async () => {
+    installStrictIpcMocks();
+
+    render(<MenuBarPopup />);
+
+    await screen.findByRole("heading", {
+      level: 1,
+      name: "Chaos Scheduler",
+    });
+    expect(
+      screen.getByRole("main", { name: "Chaos Scheduler" }),
+    ).toBeInTheDocument();
+  });
+
   it("shows an Update button when an update is available", async () => {
     installStrictIpcMocks();
     window.__CHAOS_IPC_OVERRIDES__ = {
