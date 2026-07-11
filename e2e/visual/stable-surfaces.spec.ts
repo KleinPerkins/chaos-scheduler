@@ -3,8 +3,9 @@ import { gotoDashboard, openSidebar } from "../support/nav";
 
 /**
  * Visual baselines for currently-shipped, stable surfaces at their native
- * window sizes. Mission Control ("Home") is intentionally EXCLUDED — it is under
- * an active design-approval phase, so its baselines are captured later.
+ * window sizes. The Mission Control ("Home") Overview has its own baselines in
+ * mission-control-overview.spec.ts; its not-yet-redesigned drill-down tabs stay
+ * out of the visual harness until their gated follow-ups.
  *
  * Determinism: the clock is pinned to the fixture "now" so any relative
  * timestamps render identically across runs; fixture data is the fixed mockIPC

@@ -15,11 +15,11 @@ import {
  * theme-toggle interaction, a reduced-motion assertion, and a self-hosted-Inter
  * font-load assertion.
  *
- * Mission Control ("Home") is intentionally EXCLUDED from this required gate
- * while it is under active redesign (consistent with the visual harness);
- * lenient critical/serious axe coverage of Home remains in the functional suite
- * (e2e/accessibility.spec.ts). The whole suite runs under reduced-motion
- * emulation (see playwright.a11y.config.ts).
+ * The Mission Control ("Home") Overview has its own strict gate in
+ * mission-control-overview.spec.ts; only its not-yet-redesigned drill-down tabs
+ * remain outside the strict gate (lenient critical/serious axe coverage of Home
+ * stays in the functional suite, e2e/accessibility.spec.ts). The whole suite
+ * runs under reduced-motion emulation (see playwright.a11y.config.ts).
  *
  * `expectAxeClean` fails on ANY non-allowlisted violation at ANY impact
  * (including moderate/minor). Allowlists below are empty unless a real,
