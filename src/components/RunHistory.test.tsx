@@ -103,7 +103,7 @@ describe("RunHistory (workflow-scoped)", () => {
       }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: "30-day failure history" }),
+      await screen.findByRole("heading", { name: "30-day failure history" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("listitem", {
