@@ -1,5 +1,7 @@
 import type {
   ApiKey,
+  DashboardBlastRadius,
+  DashboardBlockTaxonomy,
   DashboardExecutionSlots,
   DashboardKpiDelta,
   DashboardKpiSummary,
@@ -7,6 +9,7 @@ import type {
   DashboardStatusCount,
   DashboardTrendSeries,
   DashboardWorkflowBaseline,
+  DashboardWorkflowFailureCount,
   EmailConfig,
   Environment,
   McpIntegrationStatus,
@@ -323,6 +326,112 @@ export const sampleDashboardExecutionSlots: DashboardExecutionSlots = {
   global_available: 9,
   global_utilization: 0.25,
 };
+
+/** Blocked/waiting reason taxonomy + heaviest blockers for the Needs Attention
+ * drill-down. 9 jobs waiting across three reason categories. */
+export const sampleDashboardBlockTaxonomy: DashboardBlockTaxonomy = {
+  by_reason: [
+    { reason_category: "resource", count: 5, current_wait_seconds_total: 9720 },
+    { reason_category: "event", count: 3, current_wait_seconds_total: 4800 },
+    { reason_category: "host", count: 1, current_wait_seconds_total: 720 },
+  ],
+  current_blocked_count: 9,
+  current_wait_seconds_total: 15240,
+  current_wait_seconds_max: 3600,
+  trailing_wait_seconds_avg: 420,
+  trailing_wait_seconds_max: 1800,
+  heavy_blockers: [
+    {
+      workflow_id: "wf-etl-rollup",
+      workflow_name: "ETL rollup",
+      environment: "production",
+      blocked_count: 4,
+      sigma_wait_seconds: 8100,
+    },
+    {
+      workflow_id: "wf-nightly-sync",
+      workflow_name: "Nightly sync",
+      environment: "production",
+      blocked_count: 3,
+      sigma_wait_seconds: 5400,
+    },
+    {
+      workflow_id: "wf-ml-scoring",
+      workflow_name: "ML scoring",
+      environment: "sandbox",
+      blocked_count: 2,
+      sigma_wait_seconds: 1740,
+    },
+  ],
+};
+
+/** Downstream blast-radius rollup for the Needs Attention outliers. One row has
+ * zero downstream reach (exercises the "not an outlier" filter). */
+export const sampleDashboardBlastRadius: DashboardBlastRadius[] = [
+  {
+    workflow_id: "wf-ingest",
+    workflow_name: "Ingest fan-out",
+    environment: "production",
+    runs_considered: 12,
+    max_downstream_count: 9,
+    avg_downstream_count: 4.2,
+    max_depth: 4,
+  },
+  {
+    workflow_id: "wf-etl-rollup",
+    workflow_name: "ETL rollup",
+    environment: "production",
+    runs_considered: 8,
+    max_downstream_count: 5,
+    avg_downstream_count: 3,
+    max_depth: 3,
+  },
+  {
+    workflow_id: "wf-nightly-sync",
+    workflow_name: "Nightly sync",
+    environment: "production",
+    runs_considered: 20,
+    max_downstream_count: 2,
+    avg_downstream_count: 1,
+    max_depth: 1,
+  },
+  {
+    workflow_id: "wf-standalone-check",
+    workflow_name: "Standalone check",
+    environment: "production",
+    runs_considered: 6,
+    max_downstream_count: 0,
+    avg_downstream_count: 0,
+    max_depth: 0,
+  },
+];
+
+/** Per-workflow failure recurrence (worst first) for the Needs Attention table:
+ * 10 failures across three workflows. */
+export const sampleDashboardFailureRecurrence: DashboardWorkflowFailureCount[] =
+  [
+    {
+      workflow_id: "wf-etl-rollup",
+      workflow_name: "ETL rollup",
+      environment: "production",
+      failure_count: 6,
+      total_runs: 30,
+    },
+    {
+      workflow_id: "wf-ml-scoring",
+      workflow_name: "ML scoring",
+      environment: "sandbox",
+      failure_count: 3,
+      total_runs: 18,
+    },
+    {
+      workflow_id: "wf-nightly-sync",
+      workflow_name: "Nightly sync",
+      environment: "production",
+      failure_count: 1,
+      total_runs: 42,
+    },
+  ];
 
 export const emptySchedulerStatus: SchedulerStatus = {
   active_workflows: 1,

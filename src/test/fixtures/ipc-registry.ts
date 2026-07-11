@@ -13,7 +13,10 @@ import {
   emptyApiKeys,
   emptySchedulerStatus,
   idleUpdateSnapshot,
+  sampleDashboardBlastRadius,
+  sampleDashboardBlockTaxonomy,
   sampleDashboardExecutionSlots,
+  sampleDashboardFailureRecurrence,
   sampleDashboardKpiSummary,
   sampleDashboardKpiWow,
   sampleDashboardQueueHealth,
@@ -80,6 +83,9 @@ export type IpcCommand =
   | "get_dashboard_queue_health"
   | "get_dashboard_workflow_baselines"
   | "get_dashboard_execution_slots"
+  | "get_dashboard_block_taxonomy"
+  | "get_dashboard_blast_radius"
+  | "get_dashboard_failure_recurrence"
   | "get_scheduler_status"
   | "list_queues"
   | "update_queue"
@@ -338,6 +344,17 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       ...sampleDashboardExecutionSlots,
       queues: sampleDashboardExecutionSlots.queues.map((q) => ({ ...q })),
     }),
+    get_dashboard_block_taxonomy: () => ({
+      ...sampleDashboardBlockTaxonomy,
+      by_reason: sampleDashboardBlockTaxonomy.by_reason.map((r) => ({ ...r })),
+      heavy_blockers: sampleDashboardBlockTaxonomy.heavy_blockers.map((b) => ({
+        ...b,
+      })),
+    }),
+    get_dashboard_blast_radius: () =>
+      sampleDashboardBlastRadius.map((r) => ({ ...r })),
+    get_dashboard_failure_recurrence: () =>
+      sampleDashboardFailureRecurrence.map((r) => ({ ...r })),
     get_scheduler_status: () => emptySchedulerStatus,
     list_queues: () => defaultQueues,
     update_queue: (args) => ({
