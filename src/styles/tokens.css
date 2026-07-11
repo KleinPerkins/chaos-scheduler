@@ -155,9 +155,9 @@
   --running-rgb: 47, 111, 237;
 
   /* Status — accessible text over soft tints */
-  --success-text: #1f7a46;
-  --error-text: #a93232;
-  --warning-text: #8a5a12;
+  --success-text: #17653a;
+  --error-text: #9b2929;
+  --warning-text: #74480c;
   --running-text: #23508f;
 
   /* Data-viz — categorical series (qualitative; solid + rgb triplet for fills) */

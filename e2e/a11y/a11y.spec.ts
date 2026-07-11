@@ -38,25 +38,6 @@ const SURFACES: ReadonlyArray<readonly [string, string]> = [
 
 const THEMES: readonly ThemeName[] = ["dark", "light"];
 
-/*
- * FLAG (for the component/design track): the entries below are REAL,
- * pre-existing product accessibility violations. This harness track cannot fix
- * them — src/components is owned by the component track, and color-contrast is a
- * design-token decision. They are allowlisted so the gate is GREEN on main
- * today; every OTHER violation (any impact, incl. moderate/minor) still fails,
- * and these should be removed from the allowlist as they are remediated.
- *
- * `color-contrast` is allowlisted SUITE-WIDE: it is a design-token-level issue
- * that surfaces on multiple screens/themes (e.g. muted sidebar links in dark,
- * light-theme History/popup text) and is additionally prone to axe sampling
- * variance, so scoping it per-surface would make the required gate flaky.
- */
-const CONTRAST_ALLOW: readonly string[] = ["color-contrast"];
-
-function allowFor(): string[] {
-  return [...CONTRAST_ALLOW];
-}
-
 async function gotoSurface(page: Page, label: string): Promise<void> {
   await gotoDashboard(page);
   await openSidebar(page, label);
@@ -82,7 +63,6 @@ for (const theme of THEMES) {
         );
         await expectAxeClean(page, {
           context: `${slug}/${theme}`,
-          allow: allowFor(),
         });
       });
     }
@@ -94,7 +74,6 @@ for (const theme of THEMES) {
       await expect(page.locator(`html[data-theme="${theme}"]`)).toHaveCount(1);
       await expectAxeClean(page, {
         context: `popup/${theme}`,
-        allow: allowFor(),
       });
     });
   });
@@ -114,7 +93,6 @@ test.describe("accessibility — interactions & assets", () => {
     await waitForFonts(page);
     await expectAxeClean(page, {
       context: "after toggle to light",
-      allow: CONTRAST_ALLOW,
     });
 
     await themeGroup.getByRole("button", { name: "Dark" }).click();
@@ -122,7 +100,6 @@ test.describe("accessibility — interactions & assets", () => {
     await waitForFonts(page);
     await expectAxeClean(page, {
       context: "after toggle to dark",
-      allow: CONTRAST_ALLOW,
     });
   });
 
