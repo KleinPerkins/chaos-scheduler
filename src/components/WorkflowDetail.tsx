@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { Play, Pencil, History as HistoryIcon, RefreshCw } from "lucide-react";
+import { Pencil, History as HistoryIcon, RefreshCw } from "lucide-react";
 import {
   getWorkflow,
   getRunHistory,
   getWorkflowHistoryBuckets,
-  triggerWorkflow,
-  enqueueWorkflow,
   environmentOf,
 } from "../lib/commands";
 import type { Run, Workflow, WorkflowHistoryBucket } from "../lib/commands";
@@ -16,6 +14,11 @@ import EnvironmentBadge from "./EnvironmentBadge";
 import Notice from "./ui/Notice";
 import Button from "./Button";
 import StatusBadge from "./StatusBadge";
+import {
+  formatWorkflowQueueError,
+  formatWorkflowQueueOutcome,
+  queueWorkflowRun,
+} from "../lib/workflowEnqueue";
 import "./WorkflowDetail.css";
 
 interface Props {
@@ -61,7 +64,7 @@ export default function WorkflowDetail({
   const [buckets, setBuckets] = useState<WorkflowHistoryBucket[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<null | "run" | "enqueue">(null);
+  const [busy, setBusy] = useState<null | "enqueue">(null);
   const [notice, setNotice] = useState<{
     text: string;
     type: "success" | "error";
@@ -91,32 +94,21 @@ export default function WorkflowDetail({
   const failedCount = buckets.reduce((sum, b) => sum + b.failed, 0);
   const totalRuns = buckets.reduce((sum, b) => sum + b.total, 0);
 
-  const handleRun = async () => {
-    setBusy("run");
-    setNotice(null);
-    try {
-      await triggerWorkflow(workflow.id);
-      setNotice({ text: `Triggered "${workflow.name}".`, type: "success" });
-      await refresh();
-    } catch (e) {
-      setNotice({ text: `Run failed: ${e}`, type: "error" });
-    } finally {
-      setBusy(null);
-    }
-  };
-
   const handleEnqueue = async () => {
     setBusy("enqueue");
     setNotice(null);
     try {
-      const outcome = await enqueueWorkflow(workflow.id);
+      const outcome = await queueWorkflowRun(workflow.id);
       setNotice({
-        text: `Enqueued "${workflow.name}" (run ${outcome.run_id}).`,
+        text: formatWorkflowQueueOutcome(workflow.name, outcome),
         type: "success",
       });
       await refresh();
     } catch (e) {
-      setNotice({ text: `Enqueue failed: ${e}`, type: "error" });
+      setNotice({
+        text: formatWorkflowQueueError(workflow.name, e),
+        type: "error",
+      });
     } finally {
       setBusy(null);
     }
@@ -182,19 +174,11 @@ export default function WorkflowDetail({
           <Button
             variant="ghost"
             size="sm"
-            onClick={handleRun}
-            disabled={busy !== null}
-          >
-            <Play size={14} strokeWidth={2.5} />
-            {busy === "run" ? "Running…" : "Run"}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
             onClick={handleEnqueue}
             disabled={busy !== null}
+            title="Queue through scheduler admission control"
           >
-            {busy === "enqueue" ? "Enqueueing…" : "Enqueue"}
+            {busy === "enqueue" ? "Submitting…" : "Queue run"}
           </Button>
           <Button
             variant="ghost"

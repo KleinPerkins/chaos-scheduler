@@ -1,21 +1,19 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
-import { Play, Clock } from "lucide-react";
+import { Clock } from "lucide-react";
 import { useWorkflows } from "../hooks/useWorkflows";
 import { useEnvironments } from "../hooks/useEnvironments";
-import {
-  triggerWorkflow,
-  enqueueWorkflow,
-  updateWorkflow,
-  deleteWorkflow,
-  environmentOf,
-} from "../lib/commands";
+import { updateWorkflow, deleteWorkflow, environmentOf } from "../lib/commands";
 import type { Workflow } from "../lib/commands";
 import { cronToHuman } from "./ScheduleBuilder";
 import EnvironmentBadge from "./EnvironmentBadge";
 import NoticeBanner from "./NoticeBanner";
 import Button from "./Button";
 import PageHeader from "./PageHeader";
-import { buildEnqueueIdempotencyKey } from "../lib/workflowValidation";
+import {
+  formatWorkflowQueueError,
+  formatWorkflowQueueOutcome,
+  queueWorkflowRun,
+} from "../lib/workflowEnqueue";
 import "./WorkflowList.css";
 
 interface Props {
@@ -128,12 +126,11 @@ export default function WorkflowList({
   const [expandedDescId, setExpandedDescId] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<{
     id: string;
-    kind: "run" | "toggle" | "delete";
+    kind: "toggle" | "delete";
   } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [runNotice, setRunNotice] = useState<string | null>(null);
   const [pendingEnqueueId, setPendingEnqueueId] = useState<string | null>(null);
-  const enqueueKeysRef = useRef<Record<string, string>>({});
   const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
@@ -154,10 +151,8 @@ export default function WorkflowList({
     noticeTimerRef.current = setTimeout(() => setRunNotice(null), 5000);
   };
 
-  const isPending = (
-    w: Workflow,
-    kind: "run" | "toggle" | "delete" | "enqueue",
-  ) => pendingAction?.id === w.id && pendingAction.kind === kind;
+  const isPending = (w: Workflow, kind: "toggle" | "delete") =>
+    pendingAction?.id === w.id && pendingAction.kind === kind;
 
   // Environment options are sourced from the environments backend and unioned
   // with any environments observed on the current workflows (so a workflow in
@@ -246,41 +241,15 @@ export default function WorkflowList({
     }
   };
 
-  const handleRun = async (w: Workflow) => {
-    setActionError(null);
-    setPendingAction({ id: w.id, kind: "run" });
-    try {
-      const runId = await triggerWorkflow(w.id);
-      showRunNotice(
-        `Started run for ${w.name}${runId ? ` (${runId.slice(0, 8)}…)` : ""}.`,
-      );
-      await refresh();
-    } catch (e) {
-      setActionError(`Failed to run ${w.name}: ${e}`);
-    } finally {
-      setPendingAction(null);
-    }
-  };
-
   const handleEnqueue = async (w: Workflow) => {
     setActionError(null);
     setPendingEnqueueId(w.id);
-    const key =
-      enqueueKeysRef.current[w.id] ?? buildEnqueueIdempotencyKey(w.id);
-    enqueueKeysRef.current[w.id] = key;
     try {
-      const outcome = await enqueueWorkflow(w.id, key);
-      delete enqueueKeysRef.current[w.id];
-      showRunNotice(
-        outcome.status === "queued"
-          ? `Queued ${w.name}${outcome.queued_run_id ? ` (${outcome.queued_run_id.slice(0, 8)}…)` : ""}.`
-          : outcome.status === "duplicate"
-            ? `Duplicate enqueue for ${w.name}.`
-            : `Enqueued ${w.name} — ${outcome.status}${outcome.run_id ? ` (${outcome.run_id.slice(0, 8)}…)` : ""}.`,
-      );
+      const outcome = await queueWorkflowRun(w.id);
+      showRunNotice(formatWorkflowQueueOutcome(w.name, outcome));
       await refresh();
     } catch (e) {
-      setActionError(`Failed to enqueue ${w.name}: ${e}`);
+      setActionError(formatWorkflowQueueError(w.name, e));
     } finally {
       setPendingEnqueueId(null);
     }
@@ -371,40 +340,16 @@ export default function WorkflowList({
           type="button"
           variant="ghost"
           size="sm"
-          onClick={() => void handleRun(w)}
-          disabled={
-            isPending(w, "run") ||
-            isPending(w, "toggle") ||
-            isPending(w, "delete") ||
-            pendingEnqueueId === w.id
-          }
-          title="Run now (immediate)"
-          aria-label={`Run ${w.name} now`}
-        >
-          {isPending(w, "run") ? (
-            "Running…"
-          ) : (
-            <>
-              <Play size={12} strokeWidth={2.5} aria-hidden="true" />
-              Run
-            </>
-          )}
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
           onClick={() => void handleEnqueue(w)}
           disabled={
-            isPending(w, "run") ||
             isPending(w, "toggle") ||
             isPending(w, "delete") ||
             pendingEnqueueId === w.id
           }
-          title="Enqueue via admission queue"
-          aria-label={`Enqueue ${w.name}`}
+          title="Queue through scheduler admission control"
+          aria-label={`Queue run for ${w.name}`}
         >
-          {pendingEnqueueId === w.id ? "Enqueueing…" : "Enqueue"}
+          {pendingEnqueueId === w.id ? "Submitting…" : "Queue run"}
         </Button>
         <Button
           type="button"
@@ -437,7 +382,7 @@ export default function WorkflowList({
             pendingDeleteId === w.id ? "btn-danger-confirm" : "btn-danger"
           }
           onClick={() => void handleDelete(w)}
-          disabled={isPending(w, "run") || isPending(w, "toggle")}
+          disabled={isPending(w, "toggle")}
         >
           {isPending(w, "delete")
             ? "Deleting…"
