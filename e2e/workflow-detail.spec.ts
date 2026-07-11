@@ -20,11 +20,22 @@ test.describe("Unified workflow detail", () => {
     await expect(
       detail.getByRole("heading", { name: "Configuration" }),
     ).toBeVisible();
-    await expect(detail.getByRole("heading", { name: "Health" })).toBeVisible();
+    await expect(
+      detail.getByRole("heading", { name: "Latest run" }),
+    ).toBeVisible();
+    await expect(
+      detail.getByRole("button", { name: "Edit workflow" }),
+    ).toBeVisible();
+    await expect(
+      detail.getByRole("button", { name: "View latest run" }),
+    ).toBeVisible();
     await expect(
       detail.getByRole("heading", { name: "Recent runs" }),
     ).toBeVisible();
     await expectNoAxeViolations(page, "unified workflow detail");
+    await page.getByRole("button", { name: "Light theme" }).click();
+    await expect(page.locator('html[data-theme="light"]')).toHaveCount(1);
+    await expectNoAxeViolations(page, "unified workflow detail light");
 
     // Drill into a run's detail from the recent-runs table.
     await detail

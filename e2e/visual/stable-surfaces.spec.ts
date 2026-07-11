@@ -58,6 +58,22 @@ test.describe("stable surfaces — main window (960x680)", () => {
       await expect(page).toHaveScreenshot(`${slug}.png`);
     });
   }
+
+  test("workflow-detail dark and light", async ({ page }) => {
+    await gotoSurface(page, "Workflows");
+    await page
+      .getByRole("button", { name: "Nightly sync", exact: true })
+      .click();
+    await expect(
+      page.getByRole("heading", { name: "Latest run" }),
+    ).toBeVisible();
+    await waitForFonts(page);
+    await expect(page).toHaveScreenshot("workflow-detail-dark.png");
+
+    await page.getByRole("button", { name: "Light theme" }).click();
+    await expect(page.locator('html[data-theme="light"]')).toHaveCount(1);
+    await expect(page).toHaveScreenshot("workflow-detail-light.png");
+  });
 });
 
 test.describe("stable surfaces — menu bar popup (340x440)", () => {

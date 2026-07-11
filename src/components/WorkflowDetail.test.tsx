@@ -4,6 +4,7 @@ import {
   fireEvent,
   render,
   screen,
+  within,
   waitFor,
 } from "@testing-library/react";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
@@ -71,5 +72,62 @@ describe("WorkflowDetail manual execution", () => {
     );
     expect(triggerWorkflow).not.toHaveBeenCalled();
     expect(enqueueArgs?.idempotencyKey).toMatch(/^ui-enqueue:wf-demo-1:/);
+  });
+
+  it("uses the approved detail hierarchy while preserving run drill-downs", async () => {
+    installStrictIpcMocks();
+    const onEdit = vi.fn();
+    const onFullHistory = vi.fn();
+    const onViewRun = vi.fn();
+
+    const { container } = render(
+      <WorkflowDetail
+        workflow={sampleWorkflow}
+        onBack={() => {}}
+        onEdit={onEdit}
+        onFullHistory={onFullHistory}
+        onViewRun={onViewRun}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Latest run" });
+
+    const header = container.querySelector(".page-header");
+    expect(header).not.toBeNull();
+    expect(
+      within(header as HTMLElement).getByRole("button", {
+        name: "Edit workflow",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(header as HTMLElement).getByText(/Daily at 9:00 AM · UTC/),
+    ).toBeInTheDocument();
+    expect(
+      within(header as HTMLElement).queryByRole("button", { name: "Refresh" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(header as HTMLElement).queryByRole("button", {
+        name: "Full history",
+      }),
+    ).not.toBeInTheDocument();
+
+    const latestRun = screen
+      .getByRole("heading", { name: "Latest run" })
+      .closest("section");
+    expect(latestRun).not.toBeNull();
+    expect(
+      await within(latestRun as HTMLElement).findByText(/^Duration · /),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(latestRun as HTMLElement).getByRole("button", {
+        name: "View latest run",
+      }),
+    );
+    expect(onViewRun).toHaveBeenCalledWith("run-demo-1");
+
+    fireEvent.click(screen.getByRole("button", { name: "View all" }));
+    expect(onFullHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ id: sampleWorkflow.id }),
+    );
   });
 });
