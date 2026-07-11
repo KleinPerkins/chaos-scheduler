@@ -11,6 +11,7 @@ import {
 import type { Run, Workflow, WorkflowHistoryBucket } from "../lib/commands";
 import { cronToHuman } from "./ScheduleBuilder";
 import { formatRunStatusLabel } from "../lib/runStatus";
+import { formatDurationBetween } from "../lib/duration";
 import EnvironmentBadge from "./EnvironmentBadge";
 import Notice from "./ui/Notice";
 import Button from "./Button";
@@ -39,11 +40,7 @@ function formatDate(iso: string | null): string {
 
 function formatDuration(start: string, end: string | null): string {
   if (!end) return "running…";
-  const secs = Math.floor(
-    (new Date(end).getTime() - new Date(start).getTime()) / 1000,
-  );
-  if (secs < 60) return `${secs}s`;
-  return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  return formatDurationBetween(start, end);
 }
 
 /**
