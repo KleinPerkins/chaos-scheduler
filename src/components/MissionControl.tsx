@@ -34,8 +34,10 @@ import {
   OperationalHealthPage,
   OperationalHealthSummary,
 } from "./missionControl/OperationalHealth";
+import { ResourcesPage, ResourcesSummary } from "./missionControl/Resources";
 import { useNeedsAttention } from "./missionControl/useNeedsAttention";
 import { useOperationalHealth } from "./missionControl/useOperationalHealth";
+import { useResources } from "./missionControl/useResources";
 import Overview from "./overview/Overview";
 import Select from "./Select";
 import StatusBadge from "./StatusBadge";
@@ -43,7 +45,8 @@ import StatusDot from "./StatusDot";
 import "./MissionControl.css";
 
 /** Which full-detail Mission Control drill-down is open, if any (G09/G06). */
-export type MissionDrilldown = "needs-attention" | "operational-health" | null;
+export type MissionDrilldown =
+  "needs-attention" | "operational-health" | "resources" | null;
 
 export type MissionTab =
   "overview" | "activity" | "freshness" | "telemetry" | "matrix";
@@ -503,6 +506,7 @@ export default function MissionControl({
     environmentFilter,
     lookbackParam,
   );
+  const resources = useResources(environmentFilter, lookbackParam);
 
   // Entering a full-detail drill-down replaces the overview landing, so land at
   // the top of the scroll viewport (its "← Back to overview" affordance),
@@ -642,6 +646,11 @@ export default function MissionControl({
                 state={operationalHealth}
                 onBack={() => setDrilldown(null)}
               />
+            ) : drilldown === "resources" ? (
+              <ResourcesPage
+                state={resources}
+                onBack={() => setDrilldown(null)}
+              />
             ) : (
               <>
                 <HeaderStatus />
@@ -667,6 +676,10 @@ export default function MissionControl({
                   <OperationalHealthSummary
                     state={operationalHealth}
                     onViewDetails={() => setDrilldown("operational-health")}
+                  />
+                  <ResourcesSummary
+                    state={resources}
+                    onViewDetails={() => setDrilldown("resources")}
                   />
                 </section>
                 {/* Remaining legacy surfaces kept reachable (G06) until their

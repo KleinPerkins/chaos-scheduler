@@ -28,6 +28,12 @@
   box-shadow: var(--shadow);
 }
 
+/* a group summary card that spans the full two-column width (e.g. Resources,
+ * the odd third card below the two primary health groups) */
+.mc-grp--wide {
+  grid-column: 1 / -1;
+}
+
 .mc-grp__head {
   display: flex;
   align-items: center;
@@ -380,6 +386,81 @@
 
 .mc-chart-legend__swatch--dashed {
   border-top-style: dashed;
+}
+
+/* --- execution-slot gauges (Resources) --- */
+.mc-gauge-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.mc-gauge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 8px;
+  border: 1px solid rgba(var(--elevate-rgb), 0.06);
+  border-radius: 12px;
+  background: rgba(var(--elevate-rgb), 0.03);
+  text-align: center;
+}
+
+.mc-gauge__label {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.mc-gauge__sub {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.mc-gauge__caption {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- queue-health status cell (Resources table) --- */
+.mc-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.mc-status::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.mc-status--clear {
+  color: var(--success-text);
+}
+.mc-status--clear::before {
+  background: var(--success);
+}
+
+.mc-status--warn {
+  color: var(--warning-text);
+}
+.mc-status--warn::before {
+  background: var(--warning);
+}
+
+.mc-status--critical {
+  color: var(--error-text);
+}
+.mc-status--critical::before {
+  background: var(--error);
 }
 
 /* responsive: collapse to a single column at the native 960 width & below */
