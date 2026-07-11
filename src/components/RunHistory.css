@@ -106,3 +106,69 @@
   font-size: 11px;
   color: var(--text-muted);
 }
+
+/* Lighter History toolbar (DR02 v2) — a flat filter row that live-scopes the
+   bounded backend query, plus a client-side search over the loaded rows. */
+.hist-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.hist-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.hist-field-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+}
+
+.hist-field-search {
+  flex: 1 1 220px;
+  min-width: 200px;
+}
+
+.hist-bounded {
+  margin-left: auto;
+  align-self: center;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.hist-caption {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+
+.hist-caption-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.hist-caption-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.hist-footnote {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}

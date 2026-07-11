@@ -34,9 +34,7 @@ test.describe("Dashboard navigation", () => {
     ).toBeVisible();
 
     await nav.getByRole("button", { name: "History" }).click();
-    await expect(
-      page.getByRole("heading", { name: "Global History" }),
-    ).toBeVisible();
+    await expect(page.getByRole("heading", { name: "History" })).toBeVisible();
 
     await nav.getByRole("button", { name: "Queues" }).click();
     await expect(page.getByRole("heading", { name: "Queues" })).toBeVisible();
