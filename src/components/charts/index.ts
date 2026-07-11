@@ -33,6 +33,19 @@ export type { GaugeProps, GaugeThresholds } from "./Gauge";
 export { default as StatusDonut } from "./StatusDonut";
 export type { StatusDonutProps, StatusDonutSegment } from "./StatusDonut";
 
+export { default as DualAxisLine } from "./DualAxisLine";
+export type {
+  DualAxisLineProps,
+  LineSeries,
+  DualAxisBaseline,
+} from "./DualAxisLine";
+
+export { default as ImpactBars } from "./ImpactBars";
+export type { ImpactBarsProps, ImpactBarItem } from "./ImpactBars";
+
+export { default as QueueLine } from "./QueueLine";
+export type { QueueLineProps } from "./QueueLine";
+
 // Scale + tick helpers
 export { niceLinearDomain, linearAxisTicks, timeTicks } from "./scales";
 export type { LinearAxisTick, TimeTick } from "./scales";
