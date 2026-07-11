@@ -4,17 +4,22 @@ export type ResolvedTheme = "dark" | "light";
 const STORAGE_KEY = "chaos-theme";
 const LIGHT_QUERY = "(prefers-color-scheme: light)";
 const SWITCHING_CLASS = "theme-switching";
+const CHANGE_EVENT = "chaos-theme-preference-change";
+let inMemoryPreference: ThemePreference = "dark";
 
 export function getStoredPreference(): ThemePreference {
   try {
     const value = localStorage.getItem(STORAGE_KEY);
     if (value === "light" || value === "dark" || value === "system") {
+      inMemoryPreference = value;
       return value;
     }
   } catch {
-    // localStorage unavailable (private mode / SSR) — fall through.
+    // localStorage unavailable (private mode / SSR) — use this session's value.
+    return inMemoryPreference;
   }
-  return "dark";
+  inMemoryPreference = "dark";
+  return inMemoryPreference;
 }
 
 export function resolveTheme(pref: ThemePreference): ResolvedTheme {
@@ -40,12 +45,32 @@ export function applyTheme(pref: ThemePreference): void {
 }
 
 export function setThemePreference(pref: ThemePreference): void {
+  inMemoryPreference = pref;
   try {
     localStorage.setItem(STORAGE_KEY, pref);
   } catch {
     // Preference won't persist, but the applied theme still takes effect.
   }
   applyTheme(pref);
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new window.Event(CHANGE_EVENT));
+  }
+}
+
+export function subscribeThemePreference(listener: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+
+  const handleChange = () => listener();
+  const handleStorage = (event: StorageEvent) => {
+    if (event.key === STORAGE_KEY || event.key === null) listener();
+  };
+
+  window.addEventListener(CHANGE_EVENT, handleChange);
+  window.addEventListener("storage", handleStorage);
+  return () => {
+    window.removeEventListener(CHANGE_EVENT, handleChange);
+    window.removeEventListener("storage", handleStorage);
+  };
 }
 
 /**
@@ -56,5 +81,10 @@ export function initTheme(): void {
   applyTheme(getStoredPreference());
   window.matchMedia?.(LIGHT_QUERY).addEventListener?.("change", () => {
     if (getStoredPreference() === "system") applyTheme("system");
+  });
+  window.addEventListener("storage", (event) => {
+    if (event.key === STORAGE_KEY || event.key === null) {
+      applyTheme(getStoredPreference());
+    }
   });
 }
