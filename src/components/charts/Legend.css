@@ -1,0 +1,31 @@
+/*
+ * Legend — chart color-key list. Layout + type bind to the shared tokens
+ * (tokens.css / DESIGN-SYSTEM.md); series colors arrive per-item via Swatch.
+ */
+
+.cs-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cs-legend--vertical {
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.cs-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.cs-legend__label {
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: 1;
+}
