@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Pencil, History as HistoryIcon, RefreshCw } from "lucide-react";
+import { Pencil, RefreshCw } from "lucide-react";
 import {
   getWorkflow,
   getRunHistory,
@@ -93,6 +93,7 @@ export default function WorkflowDetail({
   const lastRun = runs[0] ?? null;
   const failedCount = buckets.reduce((sum, b) => sum + b.failed, 0);
   const totalRuns = buckets.reduce((sum, b) => sum + b.total, 0);
+  const scheduleLabel = `${cronToHuman(workflow.cron_schedule)} · ${workflow.timezone}`;
 
   const handleEnqueue = async () => {
     setBusy("enqueue");
@@ -117,9 +118,8 @@ export default function WorkflowDetail({
   const summaryRows: { label: string; value: React.ReactNode }[] = [
     {
       label: "Schedule",
-      value: cronToHuman(workflow.cron_schedule, workflow.timezone),
+      value: scheduleLabel,
     },
-    { label: "Timezone", value: workflow.timezone },
     {
       label: workflow.kind === "typed" ? "Operator" : "Script",
       value: <code className="wd-code">{workflow.script_path || "—"}</code>,
@@ -156,8 +156,11 @@ export default function WorkflowDetail({
                 {workflow.enabled ? "Enabled" : "Disabled"}
               </span>
             </div>
+            <p className="wd-header-meta">{scheduleLabel}</p>
             {workflow.description && (
-              <p className="page-subtitle">{workflow.description}</p>
+              <p className="page-subtitle wd-description">
+                {workflow.description}
+              </p>
             )}
           </div>
         </div>
@@ -165,38 +168,22 @@ export default function WorkflowDetail({
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => void refresh()}
-            aria-label="Refresh"
-            title="Refresh"
-          >
-            <RefreshCw size={14} strokeWidth={2} />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleEnqueue}
-            disabled={busy !== null}
-            title="Queue through scheduler admission control"
-          >
-            {busy === "enqueue" ? "Submitting…" : "Queue run"}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => onFullHistory(workflow)}
-          >
-            <HistoryIcon size={14} strokeWidth={2} /> Full history
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
             onClick={() => onEdit(workflow)}
             disabled={isManaged}
             title={
               isManaged ? "Externally managed — read-only" : "Edit workflow"
             }
           >
-            <Pencil size={14} strokeWidth={2} /> Edit
+            <Pencil size={14} strokeWidth={2} /> Edit workflow
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={handleEnqueue}
+            disabled={busy !== null}
+            title="Queue through scheduler admission control"
+          >
+            {busy === "enqueue" ? "Submitting…" : "Queue run"}
           </Button>
         </div>
       </div>
@@ -221,33 +208,49 @@ export default function WorkflowDetail({
         </section>
 
         <section className="wd-card">
-          <h2 className="wd-card-title">Health</h2>
-          <div className="wd-health">
-            <div className="wd-stat">
-              <span className="wd-stat-label">Last run</span>
-              <span className="wd-stat-value">
-                {lastRun ? (
-                  <StatusBadge status={lastRun.status}>
-                    {formatRunStatusLabel(lastRun.status)}
-                  </StatusBadge>
-                ) : (
-                  "No runs yet"
-                )}
-              </span>
-              {lastRun && (
-                <span className="wd-stat-sub">
-                  {formatDate(lastRun.started_at)}
-                </span>
-              )}
-            </div>
-            <div className="wd-stat">
-              <span className="wd-stat-label">Failed (30d)</span>
-              <span className="wd-stat-value">
-                {failedCount}
-                <span className="wd-stat-sub"> / {totalRuns} runs</span>
-              </span>
-            </div>
+          <div className="wd-card-header">
+            <h2 className="wd-card-title">Latest run</h2>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void refresh()}
+              aria-label="Refresh"
+              title="Refresh"
+            >
+              <RefreshCw size={14} strokeWidth={2} />
+            </Button>
           </div>
+          {loading ? (
+            <div className="wd-muted">Loading latest run…</div>
+          ) : lastRun ? (
+            <div className="wd-latest-run">
+              <div className="wd-latest-status">
+                <StatusBadge status={lastRun.status}>
+                  {formatRunStatusLabel(lastRun.status)}
+                </StatusBadge>
+                <span>{formatDate(lastRun.started_at)}</span>
+              </div>
+              <div className="wd-latest-facts">
+                <span>
+                  Duration ·{" "}
+                  {formatDuration(lastRun.started_at, lastRun.finished_at)}
+                </span>
+                <span>Trigger · {lastRun.trigger_kind ?? "cron"}</span>
+                <span>
+                  Failed (30d) · {failedCount} / {totalRuns} runs
+                </span>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => onViewRun(lastRun.id)}
+              >
+                View latest run
+              </Button>
+            </div>
+          ) : (
+            <div className="wd-muted">No runs yet for this workflow.</div>
+          )}
           {buckets.length > 0 && (
             <div className="wd-heatmap" aria-label="30-day failure heatmap">
               {buckets.map((b) => {
