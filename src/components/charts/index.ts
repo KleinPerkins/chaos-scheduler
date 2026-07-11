@@ -26,6 +26,13 @@ export type { ChartTooltipProps, ChartTooltipRow } from "./ChartTooltip";
 export { default as Swatch } from "./chartSwatch";
 export type { SwatchProps, SwatchShape } from "./chartSwatch";
 
+// Charts
+export { default as Gauge } from "./Gauge";
+export type { GaugeProps, GaugeThresholds } from "./Gauge";
+
+export { default as StatusDonut } from "./StatusDonut";
+export type { StatusDonutProps, StatusDonutSegment } from "./StatusDonut";
+
 // Scale + tick helpers
 export { niceLinearDomain, linearAxisTicks, timeTicks } from "./scales";
 export type { LinearAxisTick, TimeTick } from "./scales";
