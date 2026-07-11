@@ -62,6 +62,15 @@
   pointer-events: auto;
 }
 
+/* Escape-dismissed: overrides the hover/focus reveal until focus leaves the
+ * trigger (see InfoTip.tsx). Declared after the reveal rule so it wins at
+ * equal specificity. */
+.info-tip.is-dismissed .info-tip-card {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .info-tip-title {
   font-size: var(--font-size-md);
   font-weight: 600;
