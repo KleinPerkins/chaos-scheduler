@@ -51,6 +51,24 @@
   --warning-text: #ffe8a3;
   --running-text: #c5dcff;
 
+  /* Data-viz — categorical series (qualitative; solid + rgb triplet for fills) */
+  --chart-1: #a78bfa;
+  --chart-1-rgb: 167, 139, 250;
+  --chart-2: #fb923c;
+  --chart-2-rgb: 251, 146, 60;
+  --chart-3: #2dd4bf;
+  --chart-3-rgb: 45, 212, 191;
+  --chart-4: #f472b6;
+  --chart-4-rgb: 244, 114, 182;
+  --chart-5: #94a3b8;
+  --chart-5-rgb: 148, 163, 184;
+  --chart-6: #e879f9;
+  --chart-6-rgb: 232, 121, 249;
+  --chart-7: #84cc16;
+  --chart-7-rgb: 132, 204, 22;
+  --chart-8: #b08968;
+  --chart-8-rgb: 176, 137, 104;
+
   /* Neutral overlays (flip polarity between themes) */
   --elevate-rgb: 255, 255, 255;
   --scrim-rgb: 0, 0, 0;
@@ -141,6 +159,24 @@
   --error-text: #a93232;
   --warning-text: #8a5a12;
   --running-text: #23508f;
+
+  /* Data-viz — categorical series (qualitative; solid + rgb triplet for fills) */
+  --chart-1: #6d28d9;
+  --chart-1-rgb: 109, 40, 217;
+  --chart-2: #dc5a10;
+  --chart-2-rgb: 220, 90, 16;
+  --chart-3: #0f766e;
+  --chart-3-rgb: 15, 118, 110;
+  --chart-4: #be185d;
+  --chart-4-rgb: 190, 24, 93;
+  --chart-5: #475569;
+  --chart-5-rgb: 71, 85, 105;
+  --chart-6: #a21caf;
+  --chart-6-rgb: 162, 28, 175;
+  --chart-7: #4d7c0f;
+  --chart-7-rgb: 77, 124, 15;
+  --chart-8: #78350f;
+  --chart-8-rgb: 120, 53, 15;
 
   /* Neutral overlays (flip polarity between themes) */
   --elevate-rgb: 15, 17, 23;
