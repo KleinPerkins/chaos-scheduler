@@ -46,6 +46,12 @@ export type { ImpactBarsProps, ImpactBarItem } from "./ImpactBars";
 export { default as QueueLine } from "./QueueLine";
 export type { QueueLineProps } from "./QueueLine";
 
+export { default as Vehicle } from "./Vehicle";
+export type { VehicleProps, VehicleStyle, VehicleColor } from "./Vehicle";
+
+export { default as RaceTrack } from "./RaceTrack";
+export type { RaceTrackProps, RaceTrackJob } from "./RaceTrack";
+
 // Scale + tick helpers
 export { niceLinearDomain, linearAxisTicks, timeTicks } from "./scales";
 export type { LinearAxisTick, TimeTick } from "./scales";
