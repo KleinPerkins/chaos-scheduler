@@ -14,7 +14,9 @@ test.describe("Global History", () => {
     await gotoDashboard(page);
     await openSidebar(page, "History");
 
-    await expect(page.getByRole("heading", { name: "History" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Global History" }),
+    ).toBeVisible();
     await expect(page.getByText(/index unavailable/)).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
     await expectNoAxeViolations(page, "global history error");
@@ -24,13 +26,19 @@ test.describe("Global History", () => {
     await gotoDashboard(page);
     await openSidebar(page, "History");
 
-    await expect(page.getByRole("heading", { name: "History" })).toBeVisible();
-    await expect(page.getByText("Latest 100")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Global History" }),
+    ).toBeVisible();
+    await expect(page.getByText("Latest 100", { exact: true })).toBeVisible();
 
     await page.getByLabel("Status").selectOption("poll_exhausted");
 
     await expect(page.locator(".status-badge.poll_exhausted")).toBeVisible();
     await expect(page.getByText("1 loaded · newest first")).toBeVisible();
     await expectNoAxeViolations(page, "global history poll_exhausted");
+
+    await page.getByRole("button", { name: "Light theme" }).click();
+    await expect(page.locator('html[data-theme="light"]')).toHaveCount(1);
+    await expectNoAxeViolations(page, "global history light");
   });
 });

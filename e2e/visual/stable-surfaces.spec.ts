@@ -45,7 +45,6 @@ test.describe("stable surfaces — main window (960x680)", () => {
   // [nav label, baseline slug]
   const surfaces: ReadonlyArray<readonly [string, string]> = [
     ["Workflows", "workflows"],
-    ["History", "global-history"],
     ["Queues", "queues"],
     ["Environments", "environments"],
     ["Integrations", "integrations"],
@@ -58,6 +57,19 @@ test.describe("stable surfaces — main window (960x680)", () => {
       await expect(page).toHaveScreenshot(`${slug}.png`);
     });
   }
+
+  test("global-history dark and light", async ({ page }) => {
+    await gotoSurface(page, "History");
+    await expect(
+      page.getByRole("heading", { name: "Global History" }),
+    ).toBeVisible();
+    await waitForFonts(page);
+    await expect(page).toHaveScreenshot("global-history.png");
+
+    await page.getByRole("button", { name: "Light theme" }).click();
+    await expect(page.locator('html[data-theme="light"]')).toHaveCount(1);
+    await expect(page).toHaveScreenshot("global-history-light.png");
+  });
 
   test("workflow-detail dark and light", async ({ page }) => {
     await gotoSurface(page, "Workflows");

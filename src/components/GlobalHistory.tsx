@@ -78,10 +78,10 @@ export default function GlobalHistory({ onViewRun }: Props) {
       : `${runs.length} loaded · newest first`;
 
   return (
-    <div>
+    <section className="global-history" aria-label="Global History">
       <PageHeader
-        title="History"
-        subtitle="Search and filter every run across all workflows — drill in to per-run logs."
+        title="Global History"
+        subtitle={`Latest ${GLOBAL_HISTORY_LIMIT} indexed runs across workflows. Search filters loaded rows only.`}
       />
 
       <div
@@ -89,13 +89,13 @@ export default function GlobalHistory({ onViewRun }: Props) {
         role="group"
         aria-label="Run history filters"
       >
-        <label className="hist-field">
-          <span className="hist-field-label">Environment</span>
-          <EnvSelect
-            value={environmentFilter}
-            onChange={(e) => setEnvironmentFilter(e.target.value)}
-            environments={environments}
-            includeAllOption
+        <label className="hist-field hist-field-search">
+          <span className="hist-field-label">Search loaded rows</span>
+          <Input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Workflow or run ID…"
           />
         </label>
         <label className="hist-field">
@@ -113,6 +113,15 @@ export default function GlobalHistory({ onViewRun }: Props) {
           </Select>
         </label>
         <label className="hist-field">
+          <span className="hist-field-label">Environment</span>
+          <EnvSelect
+            value={environmentFilter}
+            onChange={(e) => setEnvironmentFilter(e.target.value)}
+            environments={environments}
+            includeAllOption
+          />
+        </label>
+        <label className="hist-field">
           <span className="hist-field-label">Trigger</span>
           <Select
             value={triggerKind}
@@ -124,15 +133,6 @@ export default function GlobalHistory({ onViewRun }: Props) {
             <option value="backfill">Backfill</option>
             <option value="child_workflow">Child workflow</option>
           </Select>
-        </label>
-        <label className="hist-field hist-field-search">
-          <span className="sr-only">Search loaded runs</span>
-          <Input
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search loaded runs — workflow or run ID…"
-          />
         </label>
         <span
           className="hist-bounded"
@@ -155,10 +155,28 @@ export default function GlobalHistory({ onViewRun }: Props) {
           </Button>
         </div>
       ) : (
-        <>
+        <section
+          className="hist-results"
+          aria-labelledby="global-history-results-title"
+        >
           <div className="hist-caption">
-            <span className="hist-caption-title">Run history</span>
-            <span className="hist-caption-meta">{captionMeta}</span>
+            <div className="hist-caption-copy">
+              <h2
+                className="hist-caption-title"
+                id="global-history-results-title"
+              >
+                Latest runs
+              </h2>
+              <span className="hist-caption-meta">{captionMeta}</span>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setReloadToken((n) => n + 1)}
+              disabled={loading}
+            >
+              Refresh
+            </Button>
           </div>
           <RunsTable
             runs={visibleRuns}
@@ -173,8 +191,8 @@ export default function GlobalHistory({ onViewRun }: Props) {
             Search filters loaded rows only — older runs beyond the latest{" "}
             {GLOBAL_HISTORY_LIMIT} aren’t fetched.
           </p>
-        </>
+        </section>
       )}
-    </div>
+    </section>
   );
 }

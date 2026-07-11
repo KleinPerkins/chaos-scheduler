@@ -37,7 +37,7 @@ describe("GlobalHistory", () => {
     delete window.__CHAOS_IPC_OVERRIDES__;
   });
 
-  it("renders the History surface with a bounded latest-100 label", async () => {
+  it("renders the bounded Global History region and truthful filters", async () => {
     installStrictIpcMocks();
     window.__CHAOS_IPC_OVERRIDES__ = {
       get_global_run_history: () => loadedRuns,
@@ -46,25 +46,46 @@ describe("GlobalHistory", () => {
     render(<GlobalHistory onViewRun={() => {}} />);
 
     expect(
-      await screen.findByRole("heading", { name: "History" }),
+      await screen.findByRole("heading", { name: "Global History" }),
     ).toBeInTheDocument();
     await screen.findByText("Nightly sync");
+    expect(
+      screen.getByRole("region", { name: "Global History" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Latest 100 indexed runs across workflows. Search filters loaded rows only.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("group", { name: "Run history filters" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Search loaded rows")).toBeInTheDocument();
+    expect(screen.getByLabelText("Status")).toBeInTheDocument();
+    expect(screen.getByLabelText("Environment")).toBeInTheDocument();
+    expect(screen.getByLabelText("Trigger")).toBeInTheDocument();
     expect(screen.getByText("Latest 100")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
   });
 
   it("search refines only the loaded rows without refetching", async () => {
     installStrictIpcMocks();
+    let fetchCount = 0;
     window.__CHAOS_IPC_OVERRIDES__ = {
-      get_global_run_history: () => loadedRuns,
+      get_global_run_history: () => {
+        fetchCount += 1;
+        return loadedRuns;
+      },
     };
 
     render(<GlobalHistory onViewRun={() => {}} />);
 
     await screen.findByText("Nightly sync");
+    expect(fetchCount).toBe(1);
     expect(screen.getByText("Ledger reconcile")).toBeInTheDocument();
     expect(screen.getByText("Cursor triage")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("Search loaded runs"), {
+    fireEvent.change(screen.getByLabelText("Search loaded rows"), {
       target: { value: "ledger" },
     });
 
@@ -73,5 +94,24 @@ describe("GlobalHistory", () => {
     );
     expect(screen.getByText("Ledger reconcile")).toBeInTheDocument();
     expect(screen.queryByText("Cursor triage")).not.toBeInTheDocument();
+    expect(fetchCount).toBe(1);
+  });
+
+  it("refreshes the same bounded query on demand", async () => {
+    installStrictIpcMocks();
+    let fetchCount = 0;
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_global_run_history: () => {
+        fetchCount += 1;
+        return loadedRuns;
+      },
+    };
+
+    render(<GlobalHistory onViewRun={() => {}} />);
+
+    await screen.findByText("Nightly sync");
+    expect(fetchCount).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(fetchCount).toBe(2));
   });
 });
