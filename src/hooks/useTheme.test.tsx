@@ -36,4 +36,32 @@ describe("useTheme", () => {
     expect(second.result.current.preference).toBe("light");
     expect(document.documentElement).toHaveAttribute("data-theme", "light");
   });
+
+  it("keeps consumers synchronized when preference storage is unavailable", () => {
+    const unavailable = () => {
+      throw new Error("storage unavailable");
+    };
+    vi.stubGlobal("localStorage", {
+      getItem: unavailable,
+      setItem: unavailable,
+      removeItem: unavailable,
+      clear: unavailable,
+      key: unavailable,
+      get length() {
+        return 0;
+      },
+    } satisfies Storage);
+
+    const first = renderHook(() => useTheme());
+    const second = renderHook(() => useTheme());
+
+    act(() => first.result.current.setPreference("dark"));
+    expect(first.result.current.preference).toBe("dark");
+    expect(second.result.current.preference).toBe("dark");
+
+    act(() => first.result.current.setPreference("light"));
+    expect(first.result.current.preference).toBe("light");
+    expect(second.result.current.preference).toBe("light");
+    expect(document.documentElement).toHaveAttribute("data-theme", "light");
+  });
 });

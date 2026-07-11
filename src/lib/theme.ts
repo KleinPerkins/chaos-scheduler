@@ -5,17 +5,21 @@ const STORAGE_KEY = "chaos-theme";
 const LIGHT_QUERY = "(prefers-color-scheme: light)";
 const SWITCHING_CLASS = "theme-switching";
 const CHANGE_EVENT = "chaos-theme-preference-change";
+let inMemoryPreference: ThemePreference = "dark";
 
 export function getStoredPreference(): ThemePreference {
   try {
     const value = localStorage.getItem(STORAGE_KEY);
     if (value === "light" || value === "dark" || value === "system") {
+      inMemoryPreference = value;
       return value;
     }
   } catch {
-    // localStorage unavailable (private mode / SSR) — fall through.
+    // localStorage unavailable (private mode / SSR) — use this session's value.
+    return inMemoryPreference;
   }
-  return "dark";
+  inMemoryPreference = "dark";
+  return inMemoryPreference;
 }
 
 export function resolveTheme(pref: ThemePreference): ResolvedTheme {
@@ -41,6 +45,7 @@ export function applyTheme(pref: ThemePreference): void {
 }
 
 export function setThemePreference(pref: ThemePreference): void {
+  inMemoryPreference = pref;
   try {
     localStorage.setItem(STORAGE_KEY, pref);
   } catch {
