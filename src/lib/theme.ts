@@ -4,6 +4,7 @@ export type ResolvedTheme = "dark" | "light";
 const STORAGE_KEY = "chaos-theme";
 const LIGHT_QUERY = "(prefers-color-scheme: light)";
 const SWITCHING_CLASS = "theme-switching";
+const CHANGE_EVENT = "chaos-theme-preference-change";
 
 export function getStoredPreference(): ThemePreference {
   try {
@@ -46,6 +47,25 @@ export function setThemePreference(pref: ThemePreference): void {
     // Preference won't persist, but the applied theme still takes effect.
   }
   applyTheme(pref);
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new window.Event(CHANGE_EVENT));
+  }
+}
+
+export function subscribeThemePreference(listener: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+
+  const handleChange = () => listener();
+  const handleStorage = (event: StorageEvent) => {
+    if (event.key === STORAGE_KEY || event.key === null) listener();
+  };
+
+  window.addEventListener(CHANGE_EVENT, handleChange);
+  window.addEventListener("storage", handleStorage);
+  return () => {
+    window.removeEventListener(CHANGE_EVENT, handleChange);
+    window.removeEventListener("storage", handleStorage);
+  };
 }
 
 /**
@@ -56,5 +76,10 @@ export function initTheme(): void {
   applyTheme(getStoredPreference());
   window.matchMedia?.(LIGHT_QUERY).addEventListener?.("change", () => {
     if (getStoredPreference() === "system") applyTheme("system");
+  });
+  window.addEventListener("storage", (event) => {
+    if (event.key === STORAGE_KEY || event.key === null) {
+      applyTheme(getStoredPreference());
+    }
   });
 }
