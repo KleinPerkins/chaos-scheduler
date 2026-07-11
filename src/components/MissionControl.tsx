@@ -19,7 +19,10 @@ import {
   type Run,
 } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
+import { formatDuration } from "../lib/duration";
+import { DEFAULT_LOOKBACK, type Lookback } from "../lib/lookback";
 import { formatRunStatusLabel, statusKey } from "../lib/runStatus";
+import FilterBar, { type CustomRange } from "./FilterBar";
 import Select from "./Select";
 import StatCard from "./StatCard";
 import StatusBadge from "./StatusBadge";
@@ -96,6 +99,17 @@ function formatBytes(value?: number | null): string {
   return `${mib.toFixed(mib > 99 ? 0 : 1)} MiB`;
 }
 
+/** Format a `Date` as the `yyyy-mm-dd` value an `<input type="date">` expects. */
+function toDateInputValue(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+/** Seed a `custom` window with a trailing 7-day range ending today. */
+function defaultCustomRange(now: Date = new Date()): CustomRange {
+  const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  return { start: toDateInputValue(start), end: toDateInputValue(now) };
+}
+
 function EmptyPanel({ children }: { children: string }) {
   return <div className="mc-empty">{children}</div>;
 }
@@ -145,7 +159,7 @@ function SlaStrip({
       value:
         snapshot.sla.median_wait_seconds == null
           ? "n/a"
-          : `${snapshot.sla.median_wait_seconds}s`,
+          : formatDuration(snapshot.sla.median_wait_seconds * 1000),
     },
     {
       label: "Waiting",
@@ -466,6 +480,15 @@ export default function MissionControl({
     MissionControlPreferences["environment_filter"]
   >(initialEnvironment ?? "all");
   const [domain, setDomain] = useState(initialDomain ?? "all");
+  // Shared (environment, lookback) filter state. `environment` reuses the
+  // server-authoritative `environmentFilter` above; `lookback` is the new
+  // standardized window (PR B's Overview queries consume it via
+  // `lookbackToParam`). Existing snapshot queries are lookback-agnostic, so
+  // changing it is behavior-preserving here.
+  const [lookback, setLookback] = useState<Lookback>(DEFAULT_LOOKBACK);
+  const [customRange, setCustomRange] = useState<CustomRange | undefined>(
+    undefined,
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const latestRequestId = useRef(0);
@@ -553,15 +576,22 @@ export default function MissionControl({
     [tab, environmentFilter, domain],
   );
 
-  // Environment filter options are sourced from the environments backend and
-  // unioned with the currently-selected value (so an out-of-list selection is
-  // still shown). Unknown values normalize to "all" server-side (graceful).
-  const envFilterOptions = useMemo(() => {
-    const names = new Set<string>(["all"]);
-    for (const env of environments) names.add(env.name);
-    if (environmentFilter) names.add(environmentFilter);
-    return Array.from(names);
-  }, [environments, environmentFilter]);
+  const handleEnvironmentChange = useCallback(
+    (next: string) => {
+      void loadSnapshot(next, domain, true);
+    },
+    [loadSnapshot, domain],
+  );
+
+  // Seed a trailing 7-day range the first time `custom` is chosen so the picker
+  // is never a dead affordance (interaction-time only — the default 1d window
+  // renders no picker, keeping the initial surface deterministic).
+  const handleLookbackChange = useCallback((next: Lookback) => {
+    setLookback(next);
+    if (next === "custom") {
+      setCustomRange((prev) => prev ?? defaultCustomRange());
+    }
+  }, []);
 
   if (loading && !snapshot) {
     return <div className="mc-loading">Loading Mission Control...</div>;
@@ -608,37 +638,37 @@ export default function MissionControl({
             ))}
           </div>
           <div className="mc-filters">
-            <div
-              className="mc-segmented"
-              role="group"
-              aria-label="Environment filter"
-            >
-              {envFilterOptions.map((item) => (
-                <button
-                  key={item}
-                  className={environmentFilter === item ? "active" : ""}
-                  onClick={() => {
-                    void loadSnapshot(item, domain, true);
-                  }}
-                  aria-pressed={environmentFilter === item}
-                >
-                  {item}
-                </button>
-              ))}
-            </div>
-            <Select
-              value={domain}
-              onChange={(event) => {
-                void loadSnapshot(environmentFilter, event.target.value, true);
-              }}
-              aria-label="Domain filter"
-            >
-              {snapshot.domains.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label} ({option.workflow_count})
-                </option>
-              ))}
-            </Select>
+            <FilterBar
+              environments={environments}
+              environment={environmentFilter}
+              onEnvironmentChange={handleEnvironmentChange}
+              lookback={lookback}
+              onLookbackChange={handleLookbackChange}
+              customRange={customRange}
+              onCustomRangeChange={setCustomRange}
+              extras={
+                <label>
+                  <span className="filter-bar-label-text">Domain</span>
+                  <Select
+                    value={domain}
+                    onChange={(event) => {
+                      void loadSnapshot(
+                        environmentFilter,
+                        event.target.value,
+                        true,
+                      );
+                    }}
+                    aria-label="Domain filter"
+                  >
+                    {snapshot.domains.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label} ({option.workflow_count})
+                      </option>
+                    ))}
+                  </Select>
+                </label>
+              }
+            />
           </div>
         </div>
 

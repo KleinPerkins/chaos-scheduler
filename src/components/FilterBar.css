@@ -1,0 +1,62 @@
+/*
+ * FilterBar — the standardized global (environment, lookback) filter bar.
+ * Composes the EnvSelect / LookbackSelect / InfoTip masters; all colors/type
+ * bind to the shared tokens (see tokens.css / DESIGN-SYSTEM.md), never raw hex.
+ */
+
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 16px;
+}
+
+.filter-bar-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.filter-bar-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-bar-label-text {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-secondary);
+}
+
+.filter-bar-custom {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.filter-bar-date {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.filter-bar-extras {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.filter-bar-extras label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
