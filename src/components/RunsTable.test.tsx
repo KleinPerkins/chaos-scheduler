@@ -40,8 +40,9 @@ describe("RunsTable", () => {
       "Started",
       "Trigger",
       "Exit Code",
-      "",
+      "Actions",
     ]);
+    expect(screen.getByText("Actions")).toHaveClass("sr-only");
   });
 
   it("renders one row per run, composing StatusBadge and a Details Button", () => {

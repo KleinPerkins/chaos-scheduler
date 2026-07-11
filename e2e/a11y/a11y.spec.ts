@@ -53,17 +53,8 @@ const THEMES: readonly ThemeName[] = ["dark", "light"];
  */
 const CONTRAST_ALLOW: readonly string[] = ["color-contrast"];
 
-// Structural violations that are specific to a single surface.
-const SURFACE_EXTRA_ALLOW: Readonly<Record<string, readonly string[]>> = {
-  // RunHistory: a table with an empty (icon-only) header cell + an h1→h3 jump.
-  history: ["empty-table-header", "heading-order"],
-  // Menu-bar popup: a compact surface rendered without a full document
-  // landmark/heading structure (no <main>, no h1, content outside landmarks).
-  popup: ["landmark-one-main", "page-has-heading-one", "region"],
-};
-
-function allowFor(slug: string): string[] {
-  return [...CONTRAST_ALLOW, ...(SURFACE_EXTRA_ALLOW[slug] ?? [])];
+function allowFor(): string[] {
+  return [...CONTRAST_ALLOW];
 }
 
 async function gotoSurface(page: Page, label: string): Promise<void> {
@@ -91,7 +82,7 @@ for (const theme of THEMES) {
         );
         await expectAxeClean(page, {
           context: `${slug}/${theme}`,
-          allow: allowFor(slug),
+          allow: allowFor(),
         });
       });
     }
@@ -103,7 +94,7 @@ for (const theme of THEMES) {
       await expect(page.locator(`html[data-theme="${theme}"]`)).toHaveCount(1);
       await expectAxeClean(page, {
         context: `popup/${theme}`,
-        allow: allowFor("popup"),
+        allow: allowFor(),
       });
     });
   });

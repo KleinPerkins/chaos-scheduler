@@ -51,7 +51,9 @@ export default function RunsTable({
           <th>Started</th>
           <th>Trigger</th>
           <th>Exit Code</th>
-          <th></th>
+          <th>
+            <span className="sr-only">Actions</span>
+          </th>
         </tr>
       </thead>
       <tbody>
