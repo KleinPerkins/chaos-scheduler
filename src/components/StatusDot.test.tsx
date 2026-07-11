@@ -39,6 +39,22 @@ describe("StatusDot", () => {
     expect(classOf(container)).toBe("mc-dot success extra");
   });
 
+  it("is decorative by default and honors explicit accessible overrides", () => {
+    const { container, rerender } = render(<StatusDot status="running" />);
+    const dot = () => container.firstChild as HTMLElement;
+
+    expect(dot()).toHaveAttribute("aria-hidden", "true");
+
+    rerender(
+      <StatusDot status="running" aria-label="Running" aria-hidden={true} />,
+    );
+    expect(dot()).toHaveAttribute("aria-label", "Running");
+    expect(dot()).not.toHaveAttribute("aria-hidden");
+
+    rerender(<StatusDot status="running" aria-hidden={false} />);
+    expect(dot()).toHaveAttribute("aria-hidden", "false");
+  });
+
   it("forwards native span attributes", () => {
     const { container } = render(<StatusDot status="running" title="live" />);
     expect(container.firstChild as HTMLElement).toHaveAttribute(

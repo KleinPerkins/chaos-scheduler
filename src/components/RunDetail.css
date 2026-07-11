@@ -90,28 +90,6 @@
   font-family: var(--font-mono);
 }
 
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-muted);
-}
-
-.status-dot.succeeded,
-.status-dot.success {
-  background: var(--success);
-}
-
-.status-dot.running,
-.status-dot.started {
-  background: var(--running);
-}
-
-.status-dot.failed,
-.status-dot.dead_lettered {
-  background: var(--error);
-}
-
 .rd-task-bar-wrap {
   min-width: 0;
   background: var(--bg-tertiary);

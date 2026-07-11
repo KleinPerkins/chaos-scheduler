@@ -13,20 +13,34 @@ export interface StatusDotProps extends React.HTMLAttributes<HTMLSpanElement> {
 
 /**
  * Shared status-indicator primitive. A thin, typed wrapper over the global
- * `.status-dot` / `.mc-dot` classes (see `index.css`, `RunDetail.css`,
- * `MissionControl.css` / DESIGN-SYSTEM.md) — it renders the exact same markup
- * call sites used before, so styling is unchanged. The status token is appended
- * as a modifier class. Callers that need the `succeeded`→`success` alias
- * collapse pass a status pre-normalized via `statusKey` (see `lib/runStatus`),
- * matching the sibling `StatusBadge` usage.
+ * `.status-dot` / `.mc-dot` classes in `index.css`. The status token is
+ * appended as a modifier class. Dots are decorative by default because call
+ * sites pair them with visible status text; an explicit accessible label or
+ * native `aria-hidden` override opts into assistive-technology exposure.
  */
 export default function StatusDot({
   status,
   variant = "status-dot",
   className,
+  "aria-hidden": ariaHidden,
+  "aria-label": ariaLabel,
+  "aria-labelledby": ariaLabelledBy,
   ...rest
 }: StatusDotProps) {
   const classes = [variant, status, className].filter(Boolean).join(" ");
+  const hasAccessibleLabel =
+    ariaLabel !== undefined || ariaLabelledBy !== undefined;
+  const resolvedAriaHidden = hasAccessibleLabel
+    ? undefined
+    : (ariaHidden ?? true);
 
-  return <span {...rest} className={classes} />;
+  return (
+    <span
+      {...rest}
+      aria-hidden={resolvedAriaHidden}
+      aria-label={ariaLabel}
+      aria-labelledby={ariaLabelledBy}
+      className={classes}
+    />
+  );
 }

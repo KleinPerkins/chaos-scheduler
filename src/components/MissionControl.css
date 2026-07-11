@@ -275,28 +275,6 @@
   text-transform: uppercase;
 }
 
-.mc-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--text-muted);
-}
-
-.mc-dot.success {
-  background: var(--success);
-}
-
-.mc-dot.running {
-  background: var(--running);
-}
-
-.mc-dot.failed,
-.mc-dot.cancelled,
-.mc-dot.dead_letter,
-.mc-dot.dead_lettered {
-  background: var(--error);
-}
-
 .mc-upcoming-grid,
 .mc-telemetry-grid {
   display: grid;
