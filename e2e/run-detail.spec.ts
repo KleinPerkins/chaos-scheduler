@@ -13,9 +13,9 @@ test.describe("Run detail smoke", () => {
     await card.getByRole("button", { name: "View history" }).click();
 
     await expect(
-      page.getByRole("heading", { name: "Nightly sync" }),
+      page.getByRole("heading", { name: "Nightly sync run history" }),
     ).toBeVisible();
-    await expect(page.getByText("Run History")).toBeVisible();
+    await expect(page.getByText("Latest 50", { exact: true })).toBeVisible();
     await page
       .getByRole("button", {
         name: /View details for .* run started/i,
