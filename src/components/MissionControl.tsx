@@ -30,7 +30,12 @@ import {
   NeedsAttentionPage,
   NeedsAttentionSummary,
 } from "./missionControl/NeedsAttention";
+import {
+  OperationalHealthPage,
+  OperationalHealthSummary,
+} from "./missionControl/OperationalHealth";
 import { useNeedsAttention } from "./missionControl/useNeedsAttention";
+import { useOperationalHealth } from "./missionControl/useOperationalHealth";
 import Overview from "./overview/Overview";
 import Select from "./Select";
 import StatusBadge from "./StatusBadge";
@@ -38,7 +43,7 @@ import StatusDot from "./StatusDot";
 import "./MissionControl.css";
 
 /** Which full-detail Mission Control drill-down is open, if any (G09/G06). */
-export type MissionDrilldown = "needs-attention" | null;
+export type MissionDrilldown = "needs-attention" | "operational-health" | null;
 
 export type MissionTab =
   "overview" | "activity" | "freshness" | "telemetry" | "matrix";
@@ -377,6 +382,7 @@ export default function MissionControl({
   const latestPreferenceWriteId = useRef(0);
   const persistentRequestInFlight = useRef(false);
   const preferenceWriteQueue = useRef<Promise<void>>(Promise.resolve());
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const loadSnapshot = useCallback(
     async (
@@ -493,6 +499,21 @@ export default function MissionControl({
   // once here so the at-a-glance summary card and the full-detail subpage share
   // one request (and one refresh when the filters change).
   const needsAttention = useNeedsAttention(environmentFilter, lookbackParam);
+  const operationalHealth = useOperationalHealth(
+    environmentFilter,
+    lookbackParam,
+  );
+
+  // Entering a full-detail drill-down replaces the overview landing, so land at
+  // the top of the scroll viewport (its "← Back to overview" affordance),
+  // exactly like navigating to a new page — otherwise a drill opened from a
+  // scrolled-down group card would render mid-content with its header hidden
+  // under the sticky toolbar. Only fires on entry; leaving a drill preserves
+  // the overview's own position (G06).
+  useEffect(() => {
+    if (!drilldown) return;
+    rootRef.current?.closest(".dashboard-main")?.scrollTo({ top: 0 });
+  }, [drilldown]);
 
   // Switching to another top-level tab leaves the overview drill-down, so
   // returning to overview lands back on the two-group summary.
@@ -532,7 +553,7 @@ export default function MissionControl({
 
   return (
     <MissionControlFiltersContext.Provider value={filters}>
-      <div className="mission-control">
+      <div className="mission-control" ref={rootRef}>
         <div className="mc-toolbar">
           <div
             className="mc-tabs"
@@ -616,6 +637,11 @@ export default function MissionControl({
                   onOpenHistory(workflowId, returnState)
                 }
               />
+            ) : drilldown === "operational-health" ? (
+              <OperationalHealthPage
+                state={operationalHealth}
+                onBack={() => setDrilldown(null)}
+              />
             ) : (
               <>
                 <HeaderStatus />
@@ -628,7 +654,8 @@ export default function MissionControl({
                 {/* Two-group IA (G09): at-a-glance group summaries →
                     in-place expand → full-detail drill-down subpage. The
                     "Critical / Needs Attention" group supersedes the legacy
-                    SLA strip + persisted-issues panel (deduped). */}
+                    SLA strip + persisted-issues panel; "Operational Health"
+                    is the Operational Health group (F03). */}
                 <section
                   className="mc-groups"
                   aria-label="Mission Control groups"
@@ -636,6 +663,10 @@ export default function MissionControl({
                   <NeedsAttentionSummary
                     state={needsAttention}
                     onViewDetails={() => setDrilldown("needs-attention")}
+                  />
+                  <OperationalHealthSummary
+                    state={operationalHealth}
+                    onViewDetails={() => setDrilldown("operational-health")}
                   />
                 </section>
                 {/* Remaining legacy surfaces kept reachable (G06) until their

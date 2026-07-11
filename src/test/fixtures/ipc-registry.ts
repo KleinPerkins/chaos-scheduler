@@ -22,6 +22,7 @@ import {
   sampleDashboardQueueHealth,
   sampleDashboardStatusDistribution,
   sampleDashboardSuccessFailTrend,
+  sampleDashboardWaitRuntimeTrend,
   sampleDashboardWorkflowBaselines,
   sampleEnvironments,
   sampleRun,
@@ -80,6 +81,7 @@ export type IpcCommand =
   | "get_dashboard_kpi_wow"
   | "get_dashboard_status_distribution"
   | "get_dashboard_success_fail_trend"
+  | "get_dashboard_wait_runtime_trend"
   | "get_dashboard_queue_health"
   | "get_dashboard_workflow_baselines"
   | "get_dashboard_execution_slots"
@@ -333,6 +335,11 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
     get_dashboard_success_fail_trend: () => ({
       ...sampleDashboardSuccessFailTrend,
       buckets: sampleDashboardSuccessFailTrend.buckets.map((b) => ({ ...b })),
+    }),
+    get_dashboard_wait_runtime_trend: () => ({
+      ...sampleDashboardWaitRuntimeTrend,
+      wait: sampleDashboardWaitRuntimeTrend.wait.map((b) => ({ ...b })),
+      runtime: sampleDashboardWaitRuntimeTrend.runtime.map((b) => ({ ...b })),
     }),
     get_dashboard_queue_health: () => ({
       ...sampleDashboardQueueHealth,

@@ -31,7 +31,9 @@ async function openNeedsAttention(page: Page): Promise<void> {
   await gotoDashboard(page);
   // The summary card renders below the Overview; opening the drill-down replaces
   // the overview column with the full-detail subpage.
-  await page.getByRole("button", { name: /View details/ }).click();
+  await page
+    .getByRole("button", { name: "View Needs Attention details" })
+    .click();
   const drill = page.locator('[data-drill="needs-attention"]');
   await expect(drill).toBeVisible();
   await expect(

@@ -8,6 +8,7 @@ import type {
   DashboardQueueHealthSummary,
   DashboardStatusCount,
   DashboardTrendSeries,
+  DashboardWaitRuntimeTrend,
   DashboardWorkflowBaseline,
   DashboardWorkflowFailureCount,
   EmailConfig,
@@ -256,6 +257,130 @@ export const sampleDashboardSuccessFailTrend: DashboardTrendSeries = {
     { bucket: "2026-07-04T10:00:00.000Z", total: 19, failed: 3, succeeded: 16 },
     { bucket: "2026-07-04T11:00:00.000Z", total: 16, failed: 1, succeeded: 15 },
     { bucket: "2026-07-04T12:00:00.000Z", total: 13, failed: 0, succeeded: 13 },
+  ],
+};
+
+/** Hourly wait + runtime duration trends (eight buckets ending at NOW), each
+ * with a 30-day trailing-average baseline. Seconds; the Operational Health
+ * drill-down plots them in minutes. Latest runtime avg sits just above its
+ * baseline (a mild "up" trend, below the regression margin). */
+export const sampleDashboardWaitRuntimeTrend: DashboardWaitRuntimeTrend = {
+  grain: "hour",
+  wait: [
+    {
+      bucket: "2026-07-04T05:00:00.000Z",
+      avg_seconds: 38,
+      max_seconds: 210,
+      count: 14,
+      baseline_avg_seconds: 45,
+    },
+    {
+      bucket: "2026-07-04T06:00:00.000Z",
+      avg_seconds: 41,
+      max_seconds: 190,
+      count: 16,
+      baseline_avg_seconds: 45,
+    },
+    {
+      bucket: "2026-07-04T07:00:00.000Z",
+      avg_seconds: 52,
+      max_seconds: 264,
+      count: 15,
+      baseline_avg_seconds: 45,
+    },
+    {
+      bucket: "2026-07-04T08:00:00.000Z",
+      avg_seconds: 47,
+      max_seconds: 248,
+      count: 18,
+      baseline_avg_seconds: 46,
+    },
+    {
+      bucket: "2026-07-04T09:00:00.000Z",
+      avg_seconds: 44,
+      max_seconds: 233,
+      count: 17,
+      baseline_avg_seconds: 46,
+    },
+    {
+      bucket: "2026-07-04T10:00:00.000Z",
+      avg_seconds: 58,
+      max_seconds: 312,
+      count: 19,
+      baseline_avg_seconds: 46,
+    },
+    {
+      bucket: "2026-07-04T11:00:00.000Z",
+      avg_seconds: 49,
+      max_seconds: 271,
+      count: 16,
+      baseline_avg_seconds: 47,
+    },
+    {
+      bucket: "2026-07-04T12:00:00.000Z",
+      avg_seconds: 42,
+      max_seconds: 226,
+      count: 13,
+      baseline_avg_seconds: 47,
+    },
+  ],
+  runtime: [
+    {
+      bucket: "2026-07-04T05:00:00.000Z",
+      avg_seconds: 352,
+      max_seconds: 4200,
+      count: 14,
+      baseline_avg_seconds: 360,
+    },
+    {
+      bucket: "2026-07-04T06:00:00.000Z",
+      avg_seconds: 368,
+      max_seconds: 3900,
+      count: 16,
+      baseline_avg_seconds: 360,
+    },
+    {
+      bucket: "2026-07-04T07:00:00.000Z",
+      avg_seconds: 401,
+      max_seconds: 5100,
+      count: 15,
+      baseline_avg_seconds: 362,
+    },
+    {
+      bucket: "2026-07-04T08:00:00.000Z",
+      avg_seconds: 389,
+      max_seconds: 4700,
+      count: 18,
+      baseline_avg_seconds: 362,
+    },
+    {
+      bucket: "2026-07-04T09:00:00.000Z",
+      avg_seconds: 372,
+      max_seconds: 4400,
+      count: 17,
+      baseline_avg_seconds: 364,
+    },
+    {
+      bucket: "2026-07-04T10:00:00.000Z",
+      avg_seconds: 418,
+      max_seconds: 5400,
+      count: 19,
+      baseline_avg_seconds: 364,
+    },
+    {
+      bucket: "2026-07-04T11:00:00.000Z",
+      avg_seconds: 395,
+      max_seconds: 4900,
+      count: 16,
+      baseline_avg_seconds: 366,
+    },
+    {
+      bucket: "2026-07-04T12:00:00.000Z",
+      avg_seconds: 388,
+      max_seconds: 4600,
+      count: 13,
+      baseline_avg_seconds: 366,
+    },
   ],
 };
 

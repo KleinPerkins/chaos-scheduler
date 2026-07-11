@@ -65,6 +65,7 @@ describe("ipc fixture registry", () => {
       "get_dashboard_kpi_wow",
       "get_dashboard_status_distribution",
       "get_dashboard_success_fail_trend",
+      "get_dashboard_wait_runtime_trend",
       "get_dashboard_queue_health",
       "get_dashboard_workflow_baselines",
       "get_dashboard_execution_slots",
