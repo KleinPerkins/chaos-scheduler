@@ -19,12 +19,31 @@ import {
   type Run,
 } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
+import {
+  DEFAULT_LOOKBACK,
+  lookbackToParam,
+  type Lookback,
+} from "../lib/lookback";
 import { formatRunStatusLabel, statusKey } from "../lib/runStatus";
+import FilterBar, { type CustomRange } from "./FilterBar";
+import {
+  NeedsAttentionPage,
+  NeedsAttentionSummary,
+} from "./missionControl/NeedsAttention";
+import {
+  OperationalHealthPage,
+  OperationalHealthSummary,
+} from "./missionControl/OperationalHealth";
+import { useNeedsAttention } from "./missionControl/useNeedsAttention";
+import { useOperationalHealth } from "./missionControl/useOperationalHealth";
+import Overview from "./overview/Overview";
 import Select from "./Select";
-import StatCard from "./StatCard";
 import StatusBadge from "./StatusBadge";
 import StatusDot from "./StatusDot";
 import "./MissionControl.css";
+
+/** Which full-detail Mission Control drill-down is open, if any (G09/G06). */
+export type MissionDrilldown = "needs-attention" | "operational-health" | null;
 
 export type MissionTab =
   "overview" | "activity" | "freshness" | "telemetry" | "matrix";
@@ -85,31 +104,31 @@ function formatTimeUntil(value: string): string {
   return `${days}d ${hours % 24}h`;
 }
 
-function formatPercent(value: number | null): string {
-  if (value == null) return "n/a";
-  return `${Math.round(value * 100)}%`;
-}
-
 function formatBytes(value?: number | null): string {
   if (value == null) return "no samples";
   const mib = value / 1024 / 1024;
   return `${mib.toFixed(mib > 99 ? 0 : 1)} MiB`;
 }
 
+/** Format a `Date` as the `yyyy-mm-dd` value an `<input type="date">` expects. */
+function toDateInputValue(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+/** Seed a `custom` window with a trailing 7-day range ending today. */
+function defaultCustomRange(now: Date = new Date()): CustomRange {
+  const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  return { start: toDateInputValue(start), end: toDateInputValue(now) };
+}
+
 function EmptyPanel({ children }: { children: string }) {
   return <div className="mc-empty">{children}</div>;
 }
 
-function HeaderStatus({ snapshot }: { snapshot: MissionControlSnapshot }) {
+function HeaderStatus() {
   const { environmentFilter, domain } = useMissionControlFilters();
-  const cards = [
-    ["Active workflows", snapshot.header.active_workflows],
-    ["Running now", snapshot.header.running_count],
-    ["Queued / admitted", snapshot.header.queued_count],
-    ["24h failures", snapshot.header.recent_failures],
-  ];
   return (
-    <section className="mc-hero-panel">
+    <section className="mc-hero-panel mc-hero-panel--slim">
       <div>
         <p className="mc-kicker">Mission Control</p>
         <h1>Scheduler operations by environment and owner</h1>
@@ -118,129 +137,6 @@ function HeaderStatus({ snapshot }: { snapshot: MissionControlSnapshot }) {
           {domain === "__unowned__" ? "Unowned" : domain}.
         </p>
       </div>
-      <div className="mc-stat-grid">
-        {cards.map(([label, value]) => (
-          <StatCard key={label} value={value} label={label} />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function SlaStrip({
-  snapshot,
-  onOpenQueues,
-}: {
-  snapshot: MissionControlSnapshot;
-  onOpenQueues: () => void;
-}) {
-  const items = [
-    { label: "SLA risks", value: snapshot.sla.violations_count.toString() },
-    {
-      label: "24h success",
-      value: formatPercent(snapshot.sla.success_rate_24h),
-    },
-    {
-      label: "Median queue wait",
-      value:
-        snapshot.sla.median_wait_seconds == null
-          ? "n/a"
-          : `${snapshot.sla.median_wait_seconds}s`,
-    },
-    {
-      label: "Waiting",
-      value: snapshot.sla.blocked_count.toString(),
-      action: onOpenQueues,
-    },
-  ];
-  return (
-    <section className="mc-panel mc-sla-strip">
-      {items.map((item) =>
-        item.action ? (
-          <button
-            className="mc-sla-card"
-            key={item.label}
-            onClick={item.action}
-          >
-            <span>{item.label}</span>
-            <strong>{item.value}</strong>
-          </button>
-        ) : (
-          <div className="mc-sla-card" key={item.label}>
-            <span>{item.label}</span>
-            <strong>{item.value}</strong>
-          </div>
-        ),
-      )}
-    </section>
-  );
-}
-
-function NeedsAttention({
-  snapshot,
-  onOpenRun,
-  onOpenQueues,
-  onOpenHistory,
-}: {
-  snapshot: MissionControlSnapshot;
-  onOpenRun: (runId: string, workflowId: string) => void;
-  onOpenQueues: () => void;
-  onOpenHistory: (workflowId: string) => void;
-}) {
-  const attentionAction = (
-    item: MissionControlSnapshot["needs_attention"][number],
-  ) => {
-    if (item.run_id && item.workflow_id)
-      return () => onOpenRun(item.run_id!, item.workflow_id!);
-    if (item.target === "queues") return onOpenQueues;
-    if (item.target === "history" && item.workflow_id)
-      return () => onOpenHistory(item.workflow_id!);
-    return null;
-  };
-  return (
-    <section className="mc-panel">
-      <div className="mc-panel-header">
-        <h2>Needs Attention</h2>
-        <span>
-          {snapshot.needs_attention_truncated
-            ? `top ${snapshot.needs_attention.length} of ${snapshot.needs_attention_total} persisted issues`
-            : `${snapshot.needs_attention_total} persisted issues`}
-        </span>
-      </div>
-      {snapshot.needs_attention.length === 0 ? (
-        <EmptyPanel>No persisted issues need attention.</EmptyPanel>
-      ) : (
-        <div className="mc-attention-list">
-          {snapshot.needs_attention.map((item) => {
-            const action = attentionAction(item);
-            const content = (
-              <>
-                <span className="mc-attention-severity">{item.severity}</span>
-                <span>
-                  <strong>{item.title}</strong>
-                  <small>{item.detail}</small>
-                </span>
-              </>
-            );
-            return action ? (
-              <button
-                className={`mc-attention-item ${item.severity}`}
-                key={item.id}
-                onClick={action}
-              >
-                {content}
-              </button>
-            ) : (
-              <div
-                className={`mc-attention-item ${item.severity}`}
-                key={item.id}
-              >
-                {content}
-              </div>
-            );
-          })}
-        </div>
-      )}
     </section>
   );
 }
@@ -462,16 +358,31 @@ export default function MissionControl({
   const { environments } = useEnvironments();
   const [snapshot, setSnapshot] = useState<MissionControlSnapshot | null>(null);
   const [tab, setTab] = useState<MissionTab>(initialTab);
+  // Which full-detail two-group drill-down is open on the overview surface.
+  // Local, ephemeral UI state layered ON TOP of the overview tab — the shared
+  // (environment, lookback, domain) filters live above it and are untouched
+  // when drilling in/out, so return state is preserved (G06).
+  const [drilldown, setDrilldown] = useState<MissionDrilldown>(null);
   const [environmentFilter, setEnvironmentFilter] = useState<
     MissionControlPreferences["environment_filter"]
   >(initialEnvironment ?? "all");
   const [domain, setDomain] = useState(initialDomain ?? "all");
+  // Shared (environment, lookback) filter state. `environment` reuses the
+  // server-authoritative `environmentFilter` above; `lookback` is the new
+  // standardized window (PR B's Overview queries consume it via
+  // `lookbackToParam`). Existing snapshot queries are lookback-agnostic, so
+  // changing it is behavior-preserving here.
+  const [lookback, setLookback] = useState<Lookback>(DEFAULT_LOOKBACK);
+  const [customRange, setCustomRange] = useState<CustomRange | undefined>(
+    undefined,
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const latestRequestId = useRef(0);
   const latestPreferenceWriteId = useRef(0);
   const persistentRequestInFlight = useRef(false);
   const preferenceWriteQueue = useRef<Promise<void>>(Promise.resolve());
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const loadSnapshot = useCallback(
     async (
@@ -553,15 +464,80 @@ export default function MissionControl({
     [tab, environmentFilter, domain],
   );
 
-  // Environment filter options are sourced from the environments backend and
-  // unioned with the currently-selected value (so an out-of-list selection is
-  // still shown). Unknown values normalize to "all" server-side (graceful).
-  const envFilterOptions = useMemo(() => {
-    const names = new Set<string>(["all"]);
-    for (const env of environments) names.add(env.name);
-    if (environmentFilter) names.add(environmentFilter);
-    return Array.from(names);
-  }, [environments, environmentFilter]);
+  // Running jobs for the Overview race hero come from the snapshot Mission
+  // Control already loads (live_activity), filtered to the running status.
+  const runningJobs = useMemo(
+    () =>
+      snapshot
+        ? snapshot.live_activity.filter(
+            (item) => statusKey(item.status) === "running",
+          )
+        : [],
+    [snapshot],
+  );
+
+  // Serialize the shared (environment, lookback) selection to the backend
+  // grammar the Overview's get_dashboard_* queries consume. A `custom` window
+  // with no (or invalid) range falls back to the default rather than throwing.
+  const lookbackParam = useMemo(() => {
+    try {
+      if (lookback === "custom") {
+        if (!customRange?.start || !customRange?.end) return DEFAULT_LOOKBACK;
+        return lookbackToParam("custom", {
+          customStart: new Date(customRange.start),
+          customEnd: new Date(customRange.end),
+        });
+      }
+      return lookbackToParam(lookback);
+    } catch {
+      return DEFAULT_LOOKBACK;
+    }
+  }, [lookback, customRange]);
+
+  // The two-group drill-down surfaces consume the shared (environment,
+  // lookback) selection through their own `get_dashboard_*` queries. Fetched
+  // once here so the at-a-glance summary card and the full-detail subpage share
+  // one request (and one refresh when the filters change).
+  const needsAttention = useNeedsAttention(environmentFilter, lookbackParam);
+  const operationalHealth = useOperationalHealth(
+    environmentFilter,
+    lookbackParam,
+  );
+
+  // Entering a full-detail drill-down replaces the overview landing, so land at
+  // the top of the scroll viewport (its "← Back to overview" affordance),
+  // exactly like navigating to a new page — otherwise a drill opened from a
+  // scrolled-down group card would render mid-content with its header hidden
+  // under the sticky toolbar. Only fires on entry; leaving a drill preserves
+  // the overview's own position (G06).
+  useEffect(() => {
+    if (!drilldown) return;
+    rootRef.current?.closest(".dashboard-main")?.scrollTo({ top: 0 });
+  }, [drilldown]);
+
+  // Switching to another top-level tab leaves the overview drill-down, so
+  // returning to overview lands back on the two-group summary.
+  const handleTabChange = useCallback((next: MissionTab) => {
+    setTab(next);
+    if (next !== "overview") setDrilldown(null);
+  }, []);
+
+  const handleEnvironmentChange = useCallback(
+    (next: string) => {
+      void loadSnapshot(next, domain, true);
+    },
+    [loadSnapshot, domain],
+  );
+
+  // Seed a trailing 7-day range the first time `custom` is chosen so the picker
+  // is never a dead affordance (interaction-time only — the default 1d window
+  // renders no picker, keeping the initial surface deterministic).
+  const handleLookbackChange = useCallback((next: Lookback) => {
+    setLookback(next);
+    if (next === "custom") {
+      setCustomRange((prev) => prev ?? defaultCustomRange());
+    }
+  }, []);
 
   if (loading && !snapshot) {
     return <div className="mc-loading">Loading Mission Control...</div>;
@@ -577,7 +553,7 @@ export default function MissionControl({
 
   return (
     <MissionControlFiltersContext.Provider value={filters}>
-      <div className="mission-control">
+      <div className="mission-control" ref={rootRef}>
         <div className="mc-toolbar">
           <div
             className="mc-tabs"
@@ -597,7 +573,7 @@ export default function MissionControl({
                 key={item}
                 id={`mc-tab-${item}`}
                 className={tab === item ? "active" : ""}
-                onClick={() => setTab(item)}
+                onClick={() => handleTabChange(item)}
                 role="tab"
                 aria-selected={tab === item}
                 aria-controls={`mc-panel-${item}`}
@@ -608,37 +584,37 @@ export default function MissionControl({
             ))}
           </div>
           <div className="mc-filters">
-            <div
-              className="mc-segmented"
-              role="group"
-              aria-label="Environment filter"
-            >
-              {envFilterOptions.map((item) => (
-                <button
-                  key={item}
-                  className={environmentFilter === item ? "active" : ""}
-                  onClick={() => {
-                    void loadSnapshot(item, domain, true);
-                  }}
-                  aria-pressed={environmentFilter === item}
-                >
-                  {item}
-                </button>
-              ))}
-            </div>
-            <Select
-              value={domain}
-              onChange={(event) => {
-                void loadSnapshot(environmentFilter, event.target.value, true);
-              }}
-              aria-label="Domain filter"
-            >
-              {snapshot.domains.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label} ({option.workflow_count})
-                </option>
-              ))}
-            </Select>
+            <FilterBar
+              environments={environments}
+              environment={environmentFilter}
+              onEnvironmentChange={handleEnvironmentChange}
+              lookback={lookback}
+              onLookbackChange={handleLookbackChange}
+              customRange={customRange}
+              onCustomRangeChange={setCustomRange}
+              extras={
+                <label>
+                  <span className="filter-bar-label-text">Domain</span>
+                  <Select
+                    value={domain}
+                    onChange={(event) => {
+                      void loadSnapshot(
+                        environmentFilter,
+                        event.target.value,
+                        true,
+                      );
+                    }}
+                    aria-label="Domain filter"
+                  >
+                    {snapshot.domains.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label} ({option.workflow_count})
+                      </option>
+                    ))}
+                  </Select>
+                </label>
+              }
+            />
           </div>
         </div>
 
@@ -650,30 +626,62 @@ export default function MissionControl({
             role="tabpanel"
             aria-labelledby="mc-tab-overview"
             tabIndex={0}
-            className="mc-grid"
+            className="mc-overview-panel"
           >
-            <HeaderStatus snapshot={snapshot} />
-            <SlaStrip
-              snapshot={snapshot}
-              onOpenQueues={() => onOpenQueues(returnState)}
-            />
-            <NeedsAttention
-              snapshot={snapshot}
-              onOpenRun={(runId, workflowId) =>
-                onOpenRun(runId, workflowId, returnState)
-              }
-              onOpenQueues={() => onOpenQueues(returnState)}
-              onOpenHistory={(workflowId) =>
-                onOpenHistory(workflowId, returnState)
-              }
-            />
-            <UpcomingRuns snapshot={snapshot} />
-            <RecentRuns
-              runs={snapshot.recent_runs}
-              onOpenRun={(runId, workflowId) =>
-                onOpenRun(runId, workflowId, returnState)
-              }
-            />
+            {drilldown === "needs-attention" ? (
+              <NeedsAttentionPage
+                state={needsAttention}
+                onBack={() => setDrilldown(null)}
+                onOpenQueues={() => onOpenQueues(returnState)}
+                onOpenHistory={(workflowId) =>
+                  onOpenHistory(workflowId, returnState)
+                }
+              />
+            ) : drilldown === "operational-health" ? (
+              <OperationalHealthPage
+                state={operationalHealth}
+                onBack={() => setDrilldown(null)}
+              />
+            ) : (
+              <>
+                <HeaderStatus />
+                <Overview
+                  environmentFilter={environmentFilter}
+                  lookbackParam={lookbackParam}
+                  lookbackLabel={lookback}
+                  runningJobs={runningJobs}
+                />
+                {/* Two-group IA (G09): at-a-glance group summaries →
+                    in-place expand → full-detail drill-down subpage. The
+                    "Critical / Needs Attention" group supersedes the legacy
+                    SLA strip + persisted-issues panel; "Operational Health"
+                    is the Operational Health group (F03). */}
+                <section
+                  className="mc-groups"
+                  aria-label="Mission Control groups"
+                >
+                  <NeedsAttentionSummary
+                    state={needsAttention}
+                    onViewDetails={() => setDrilldown("needs-attention")}
+                  />
+                  <OperationalHealthSummary
+                    state={operationalHealth}
+                    onViewDetails={() => setDrilldown("operational-health")}
+                  />
+                </section>
+                {/* Remaining legacy surfaces kept reachable (G06) until their
+                    gated drill-downs land (Activity reconciliation, PR D). */}
+                <div className="mc-grid">
+                  <UpcomingRuns snapshot={snapshot} />
+                  <RecentRuns
+                    runs={snapshot.recent_runs}
+                    onOpenRun={(runId, workflowId) =>
+                      onOpenRun(runId, workflowId, returnState)
+                    }
+                  />
+                </div>
+              </>
+            )}
           </div>
         )}
 

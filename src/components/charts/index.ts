@@ -26,6 +26,32 @@ export type { ChartTooltipProps, ChartTooltipRow } from "./ChartTooltip";
 export { default as Swatch } from "./chartSwatch";
 export type { SwatchProps, SwatchShape } from "./chartSwatch";
 
+// Charts
+export { default as Gauge } from "./Gauge";
+export type { GaugeProps, GaugeThresholds } from "./Gauge";
+
+export { default as StatusDonut } from "./StatusDonut";
+export type { StatusDonutProps, StatusDonutSegment } from "./StatusDonut";
+
+export { default as DualAxisLine } from "./DualAxisLine";
+export type {
+  DualAxisLineProps,
+  LineSeries,
+  DualAxisBaseline,
+} from "./DualAxisLine";
+
+export { default as ImpactBars } from "./ImpactBars";
+export type { ImpactBarsProps, ImpactBarItem } from "./ImpactBars";
+
+export { default as QueueLine } from "./QueueLine";
+export type { QueueLineProps } from "./QueueLine";
+
+export { default as Vehicle } from "./Vehicle";
+export type { VehicleProps, VehicleStyle, VehicleColor } from "./Vehicle";
+
+export { default as RaceTrack } from "./RaceTrack";
+export type { RaceTrackProps, RaceTrackJob } from "./RaceTrack";
+
 // Scale + tick helpers
 export { niceLinearDomain, linearAxisTicks, timeTicks } from "./scales";
 export type { LinearAxisTick, TimeTick } from "./scales";
