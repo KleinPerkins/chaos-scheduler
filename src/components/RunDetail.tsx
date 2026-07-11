@@ -8,6 +8,7 @@ import {
   analyzeRunError,
 } from "../lib/commands";
 import { openExternalSafe } from "../lib/openExternalSafe";
+import { formatDurationBetween } from "../lib/duration";
 import Button from "./Button";
 import PageHeader from "./PageHeader";
 import StatCard from "./StatCard";
@@ -122,13 +123,7 @@ function isSummarySection(value: unknown): value is SummarySection {
 
 function formatDuration(start: string, end: string | null): string {
   if (!end) return "running...";
-  const ms = new Date(end).getTime() - new Date(start).getTime();
-  const secs = Math.floor(ms / 1000);
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ${secs % 60}s`;
-  const hrs = Math.floor(mins / 60);
-  return `${hrs}h ${mins % 60}m`;
+  return formatDurationBetween(start, end);
 }
 
 function formatDate(iso: string): string {

@@ -8,6 +8,7 @@ import { openExternalSafe } from "../lib/openExternalSafe";
 import RerunModal from "./RerunModal";
 import type { Run, Workflow, WorkflowHistoryBucket } from "../lib/commands";
 import { formatRunStatusLabel } from "../lib/runStatus";
+import { formatDurationBetween } from "../lib/duration";
 import Button from "./Button";
 import PageHeader from "./PageHeader";
 import StatusBadge from "./StatusBadge";
@@ -21,11 +22,7 @@ interface Props {
 
 function formatDuration(start: string, end: string | null): string {
   if (!end) return "running...";
-  const ms = new Date(end).getTime() - new Date(start).getTime();
-  const secs = Math.floor(ms / 1000);
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  return `${mins}m ${secs % 60}s`;
+  return formatDurationBetween(start, end);
 }
 
 function formatDate(iso: string): string {
