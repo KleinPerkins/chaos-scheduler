@@ -4,6 +4,7 @@ import {
   fireEvent,
   render,
   screen,
+  within,
   waitFor,
 } from "@testing-library/react";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
@@ -65,7 +66,7 @@ describe("WorkflowEditor environment persistence", () => {
       target: { value: "sandbox" },
     });
     fireEvent.click(screen.getByRole("radio", { name: /^Typed/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Create Workflow" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create workflow" }));
 
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
     expect(createArgs?.environment).toBe("sandbox");
@@ -95,9 +96,44 @@ describe("WorkflowEditor environment persistence", () => {
       target: { value: "sandbox" },
     });
     expect(screen.getByLabelText("Environment")).toHaveValue("sandbox");
-    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
     expect(updateArgs?.environment).toBe("sandbox");
+  });
+
+  it("uses the approved card hierarchy with one primary save action", async () => {
+    installStrictIpcMocks();
+
+    render(
+      <WorkflowEditor
+        workflow={typedWorkflow}
+        onSaved={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+
+    await screen.findByRole("option", { name: "Sandbox" });
+    expect(
+      screen.getByRole("heading", { name: "Edit workflow" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Nightly sync · Production")).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", { name: "Save changes" }),
+    ).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Cancel" })).toHaveLength(1);
+
+    const general = screen.getByRole("region", { name: "General" });
+    expect(within(general).getByLabelText("Name")).toBeInTheDocument();
+    expect(within(general).getByLabelText("Environment")).toBeInTheDocument();
+
+    const schedule = screen.getByRole("region", { name: "Schedule" });
+    expect(
+      within(schedule).getByRole("group", { name: "Schedule" }),
+    ).toBeInTheDocument();
+
+    expect(
+      screen.getByRole("region", { name: "Runtime and notifications" }),
+    ).toBeInTheDocument();
   });
 });
