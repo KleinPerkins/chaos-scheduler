@@ -11,12 +11,10 @@ import {
   getMissionControlSnapshot,
   setMissionControlPreferences,
   environmentOf,
-  type MissionControlActivityItem,
   type MissionControlFreshnessItem,
   type MissionControlPreferences,
   type MissionControlSnapshot,
   type MissionControlWorkflowTelemetry,
-  type Run,
 } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
 import {
@@ -24,8 +22,9 @@ import {
   lookbackToParam,
   type Lookback,
 } from "../lib/lookback";
-import { formatRunStatusLabel, statusKey } from "../lib/runStatus";
+import { statusKey } from "../lib/runStatus";
 import FilterBar, { type CustomRange } from "./FilterBar";
+import { AgentActivity } from "./missionControl/AgentActivity";
 import {
   NeedsAttentionPage,
   NeedsAttentionSummary,
@@ -40,8 +39,6 @@ import { useOperationalHealth } from "./missionControl/useOperationalHealth";
 import { useResources } from "./missionControl/useResources";
 import Overview from "./overview/Overview";
 import Select from "./Select";
-import StatusBadge from "./StatusBadge";
-import StatusDot from "./StatusDot";
 import "./MissionControl.css";
 
 /** Which full-detail Mission Control drill-down is open, if any (G09/G06). */
@@ -96,17 +93,6 @@ function formatTime(value?: string | null): string {
   });
 }
 
-function formatTimeUntil(value: string): string {
-  const diff = new Date(value).getTime() - Date.now();
-  if (diff < 0) return "overdue";
-  const minutes = Math.floor(diff / 60000);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ${minutes % 60}m`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ${hours % 24}h`;
-}
-
 function formatBytes(value?: number | null): string {
   if (value == null) return "no samples";
   const mib = value / 1024 / 1024;
@@ -140,126 +126,6 @@ function HeaderStatus() {
           {domain === "__unowned__" ? "Unowned" : domain}.
         </p>
       </div>
-    </section>
-  );
-}
-
-function ActivityList({
-  title,
-  items,
-  onOpenRun,
-}: {
-  title: string;
-  items: MissionControlActivityItem[];
-  onOpenRun: (runId: string, workflowId: string) => void;
-}) {
-  return (
-    <section className="mc-panel">
-      <div className="mc-panel-header">
-        <h2>{title}</h2>
-        <span>auto-refreshes every 15s</span>
-      </div>
-      {items.length === 0 ? (
-        <EmptyPanel>No run activity for this filter.</EmptyPanel>
-      ) : (
-        <div className="mc-table">
-          {items.map((item) => (
-            <button
-              className="mc-table-row"
-              key={item.id}
-              onClick={() => onOpenRun(item.run_id, item.workflow_id)}
-            >
-              <StatusDot variant="mc-dot" status={statusKey(item.status)} />
-              <span>
-                <strong>{item.workflow_name}</strong>
-                <small>
-                  {item.domain} / {environmentOf(item)}
-                </small>
-              </span>
-              <StatusBadge status={statusKey(item.status)}>
-                {formatRunStatusLabel(item.status)}
-              </StatusBadge>
-              <time dateTime={item.started_at}>
-                {formatTime(item.started_at)}
-              </time>
-            </button>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function UpcomingRuns({ snapshot }: { snapshot: MissionControlSnapshot }) {
-  return (
-    <section className="mc-panel">
-      <div className="mc-panel-header">
-        <h2>Upcoming Runs</h2>
-        <span>fixed-time cron triggers</span>
-      </div>
-      {snapshot.upcoming_runs.length === 0 ? (
-        <EmptyPanel>
-          No fixed-time cron triggers match this filter. Event-driven workflows
-          need durable readiness state before Mission Control can show ETA.
-        </EmptyPanel>
-      ) : (
-        <div className="mc-upcoming-grid">
-          {snapshot.upcoming_runs.map((run) => (
-            <div
-              className="mc-upcoming-card"
-              key={`${run.workflow_id}-${run.trigger_label}`}
-            >
-              <span>{formatTimeUntil(run.next_time)}</span>
-              <strong>{run.workflow_name}</strong>
-              <small>
-                {run.domain} / {run.trigger_label}
-              </small>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function RecentRuns({
-  runs,
-  onOpenRun,
-}: {
-  runs: Run[];
-  onOpenRun: (runId: string, workflowId: string) => void;
-}) {
-  return (
-    <section className="mc-panel">
-      <div className="mc-panel-header">
-        <h2>Recent Runs</h2>
-        <span>filtered before limit</span>
-      </div>
-      {runs.length === 0 ? (
-        <EmptyPanel>No recent runs for this filter.</EmptyPanel>
-      ) : (
-        <div className="mc-table">
-          {runs.map((run) => (
-            <button
-              className="mc-table-row"
-              key={run.id}
-              onClick={() => onOpenRun(run.id, run.workflow_id)}
-            >
-              <StatusDot variant="mc-dot" status={statusKey(run.status)} />
-              <span>
-                <strong>{run.workflow_name ?? run.workflow_id}</strong>
-                <small>{run.workflow_id.slice(0, 8)}</small>
-              </span>
-              <StatusBadge status={statusKey(run.status)}>
-                {formatRunStatusLabel(run.status)}
-              </StatusBadge>
-              <time dateTime={run.started_at}>
-                {formatTime(run.started_at)}
-              </time>
-            </button>
-          ))}
-        </div>
-      )}
     </section>
   );
 }
@@ -682,17 +548,10 @@ export default function MissionControl({
                     onViewDetails={() => setDrilldown("resources")}
                   />
                 </section>
-                {/* Remaining legacy surfaces kept reachable (G06) until their
-                    gated drill-downs land (Activity reconciliation, PR D). */}
-                <div className="mc-grid">
-                  <UpcomingRuns snapshot={snapshot} />
-                  <RecentRuns
-                    runs={snapshot.recent_runs}
-                    onOpenRun={(runId, workflowId) =>
-                      onOpenRun(runId, workflowId, returnState)
-                    }
-                  />
-                </div>
+                {/* The legacy Upcoming Runs + Recent Runs panels are deduped
+                    into the canonical Agent Activity view (F16, the Activity
+                    tab): running / upcoming / failures. Recent-run browsing
+                    remains reachable via the History screen. */}
               </>
             )}
           </div>
@@ -705,9 +564,9 @@ export default function MissionControl({
             aria-labelledby="mc-tab-activity"
             tabIndex={0}
           >
-            <ActivityList
-              title="Live Activity"
-              items={snapshot.live_activity}
+            <AgentActivity
+              live={snapshot.live_activity}
+              upcoming={snapshot.upcoming_runs}
               onOpenRun={(runId, workflowId) =>
                 onOpenRun(runId, workflowId, returnState)
               }

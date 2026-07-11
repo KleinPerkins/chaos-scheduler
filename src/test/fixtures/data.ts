@@ -18,6 +18,7 @@ import type {
   MissionControlActivityItem,
   MissionControlPreferences,
   MissionControlSnapshot,
+  MissionControlUpcomingRun,
   QueueInfo,
   Run,
   SchedulerStatus,
@@ -164,12 +165,67 @@ export const runningActivity: MissionControlActivityItem[] = [
   },
 ];
 
+/** Recently-finished failures for the Agent Activity "Recent failures" section.
+ * These carry a terminal unsuccessful status + a `finished_at` before NOW so the
+ * activity view can compute "N ago". They are appended to `live_activity` after
+ * the running jobs; the Overview race hero filters `live_activity` to the
+ * running status, so these never perturb the race hero. */
+export const recentFailures: MissionControlActivityItem[] = [
+  {
+    id: "act-fail-export",
+    workflow_id: "wf-data-export",
+    workflow_name: "Data export",
+    environment: "production",
+    domain: "data",
+    status: "failed",
+    started_at: "2026-07-04T11:38:00.000Z",
+    finished_at: "2026-07-04T11:50:00.000Z", // 10m ago
+    run_id: "run-fail-export",
+  },
+  {
+    id: "act-fail-index",
+    workflow_id: "wf-search-index",
+    workflow_name: "Search reindex",
+    environment: "sandbox",
+    domain: "ml",
+    status: "timed_out",
+    started_at: "2026-07-04T11:05:00.000Z",
+    finished_at: "2026-07-04T11:35:00.000Z", // 25m ago
+    run_id: "run-fail-index",
+  },
+];
+
+/** Upcoming fixed-time cron triggers for the Agent Activity "Upcoming" section
+ * (next_time after NOW so the ETA is positive). */
+export const sampleUpcomingRuns: MissionControlUpcomingRun[] = [
+  {
+    workflow_id: "wf-nightly-sync",
+    workflow_name: "Nightly sync",
+    environment: "production",
+    domain: "ops",
+    trigger_kind: "cron",
+    trigger_label: "0 15 * * *",
+    next_time: "2026-07-04T15:00:00.000Z", // in 3h
+  },
+  {
+    workflow_id: "wf-weekly-report",
+    workflow_name: "Weekly report",
+    environment: "production",
+    domain: "ops",
+    trigger_kind: "cron",
+    trigger_label: "0 8 * * 1",
+    next_time: "2026-07-05T08:00:00.000Z", // in 20h
+  },
+];
+
 /** Populated Mission Control snapshot used as the default IPC fixture: the
- * empty snapshot plus the running jobs (so the Overview race hero renders). */
+ * empty snapshot plus the running jobs (so the Overview race hero renders) and
+ * the Agent Activity feed (running + upcoming + recent failures). */
 export const dashboardMissionControlSnapshot: MissionControlSnapshot = {
   ...emptyMissionControlSnapshot,
   header: { ...emptyMissionControlSnapshot.header, running_count: 3 },
-  live_activity: runningActivity,
+  live_activity: [...runningActivity, ...recentFailures],
+  upcoming_runs: sampleUpcomingRuns,
 };
 
 /** Per-workflow runtime baselines feeding the race-hero finish lines (p50 =
