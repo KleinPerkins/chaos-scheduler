@@ -50,9 +50,11 @@ describe("StatusDot", () => {
     );
     expect(dot()).toHaveAttribute("aria-label", "Running");
     expect(dot()).not.toHaveAttribute("aria-hidden");
+    expect(dot()).toHaveAttribute("role", "img");
 
     rerender(<StatusDot status="running" aria-hidden={false} />);
     expect(dot()).toHaveAttribute("aria-hidden", "false");
+    expect(dot()).not.toHaveAttribute("role");
   });
 
   it("forwards native span attributes", () => {

@@ -25,6 +25,7 @@ export default function StatusDot({
   "aria-hidden": ariaHidden,
   "aria-label": ariaLabel,
   "aria-labelledby": ariaLabelledBy,
+  role,
   ...rest
 }: StatusDotProps) {
   const classes = [variant, status, className].filter(Boolean).join(" ");
@@ -40,6 +41,7 @@ export default function StatusDot({
       aria-hidden={resolvedAriaHidden}
       aria-label={ariaLabel}
       aria-labelledby={ariaLabelledBy}
+      role={hasAccessibleLabel ? (role ?? "img") : role}
       className={classes}
     />
   );
