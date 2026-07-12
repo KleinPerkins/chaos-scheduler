@@ -739,12 +739,7 @@ export default function RunDetail({ runId, onBack }: Props) {
         </h2>
 
         {showLogs && (
-          <div
-            className="rd-logs-content"
-            id="run-log-content"
-            role="region"
-            aria-labelledby="run-logs-title"
-          >
+          <div className="rd-logs-content" id="run-log-content">
             <div className="rd-log-tabs" role="tablist" aria-label="Log stream">
               <button
                 type="button"
