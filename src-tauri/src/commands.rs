@@ -459,6 +459,25 @@ pub fn enqueue_workflow(
         .map_err(|e| e.to_string())
 }
 
+/// Dispatch a Cursor **cloud** fix agent for a FAILED run (D05 / F10). This is
+/// invoked ONLY behind the explicit human-consent Modal in run detail — there
+/// is no automated caller. Every spend + safety gate (enabled toggle, non-prod
+/// target, per-run idempotency, per-hour rate cap, source-must-be-failed) lives
+/// in [`SchedulerService::dispatch_fix_agent`]; this adapter just stringifies
+/// the typed refusal. The initiator is recorded as `ui` for the desktop
+/// surface. Inherits the shared admission behavior (queues at capacity, else
+/// runs inline).
+#[tauri::command]
+pub fn dispatch_fix_agent(
+    state: State<AppState>,
+    run_id: String,
+) -> Result<scheduler::DispatchOutcome, String> {
+    state
+        .service
+        .dispatch_fix_agent(&state.workspace_root, &state.python_path, &run_id, "ui")
+        .map_err(|e| e.to_string())
+}
+
 /// Re-run a workflow. Routed through the shared admission choke point
 /// ([`SchedulerService::dispatch_manual_run`]) so a rerun respects dependency
 /// and capacity gating (it queues instead of spawning immediately) and honors
