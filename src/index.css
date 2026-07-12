@@ -306,8 +306,11 @@ a:focus-visible,
 }
 
 .mc-dot.queued,
-.mc-dot.admitted,
+.mc-dot.admitted {
+  background: var(--text-muted);
+}
+
 .mc-dot.warning,
 .mc-dot.poll_exhausted {
-  background: var(--text-muted);
+  background: var(--warning);
 }
