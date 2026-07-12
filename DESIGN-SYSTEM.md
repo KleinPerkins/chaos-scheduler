@@ -13,10 +13,14 @@ point; the machine-readable source of truth is the `tokens/` directory.
   bare `vite build`):
   - `src/styles/tokens.css` — the `:root` (dark, default) + `:root[data-theme="light"]` blocks.
   - `src/styles/tokens.ts` — typed token maps (`themeTokens`, `baseTokens`) + a `ThemeMode` union.
+  - `figma-tokens.json` (repo root) — the one-way repo→Figma mirror manifest that
+    projects the same tokens as Figma `cs.*` variable collections.
 
 **Repo is the source of truth; Figma mirrors it.** Token values are authored here
-and later reflected into Figma variables (a `cs.*` collection) — never the reverse.
-The code never reads from Figma at build time.
+and mirrored one-way into a Figma `cs.*` variable collection (pinned to Dark) — never
+the reverse. The code never reads from Figma at build time. A required CI freshness
+check (the `tokens` job) regenerates all three outputs and fails the build if any
+drift from `tokens/*.json`.
 
 ## Build step
 
@@ -118,12 +122,39 @@ on purpose, not by accident. If Calibre is ever licensed for the app, swap the
   `index.css`) have been swapped to `--duration-fast`; the remaining per-component
   transitions can migrate opportunistically. The global reduced-motion reset always wins.
 
-## Deferred / follow-ups
+## Design ↔ code integration (shipped)
 
-- **Figma `cs.*` mirror**: reflect these token values into a Figma variable
-  collection so design and code share names. Repo stays the SOT (Figma mirrors it).
-- **Code Connect**: map Figma components to the React primitives above. Deferred
-  until the primitives are inventoried in Figma; no Code Connect files exist yet.
+- **Figma `cs.*` mirror — LIVE.** The generated `figma-tokens.json` is the one-way
+  repo→Figma manifest; its `cs.*` variable collections (pinned to Dark) mirror the
+  token values so design and code share names. Repo stays the SOT — code never reads
+  Figma. `.github/workflows/figma-variables-sync.yml` runs the one-way sync on token
+  changes.
+- **Code Connect — LIVE (not deferred).** Figma components are mapped to the React
+  primitives above via source-tracked `src/**/*.figma.tsx` files wired through the
+  root `figma.config.json` (react parser). `.github/workflows/figma-code-connect.yml`
+  publishes the mappings to the Figma team library on every push to `main` (PRs get a
+  `--dry-run` validate-only pass); a credential-free `code-connect` job in the
+  `ci-required` fan-in type-checks and parses every mapping on the PR. See
+  **`design/divergence-ledger.md`** for the per-component mapping status (18+ live
+  mappings) plus the full screen/component/design-revision divergence ledger.
+
+### Verification mechanisms (live vs pending)
+
+Design↔code parity is verified by three gates; be precise about which are live:
+
+- **Token projection + CI diff-fail (the G02 mechanism) — LIVE.** The `tokens` job
+  (in the `ci-required` fan-in) regenerates `tokens.css`, `tokens.ts`, and
+  `figma-tokens.json` and fails on any drift, so a token change can never merge with
+  stale generated output.
+- **Protected live-Figma token readback (the G03 mechanism) — pending.** Reading the
+  live Figma file back to confirm the mirror applied is not yet automated.
+- **Descendant `cs.*` binding / remote-dependency audit (the G04 mechanism) —
+  pending.** The one-time plugin/API audit that every master binds only to `cs.*`
+  and carries no remote-component dependency has not run (the ledger's rows carry
+  `pending G04 audit`).
+
+## Follow-ups (open)
+
 - **Pending asset**: none for fonts — Inter ships via npm. (The earlier Calibre
   self-host plan is dropped now that the repo is public.)
 - **Wider token adoption**: migrate remaining hard-coded spacing/type/motion literals
