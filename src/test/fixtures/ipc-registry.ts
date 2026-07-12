@@ -246,7 +246,15 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       queued_run_id: "queue-fixture-1",
       queue_name: "default",
     }),
-    rerun_workflow: () => "run-rerun-1",
+    // Rerun routes through admission control (#263): it returns a
+    // DispatchOutcome, not a bare run-id. Default to a queued outcome to mirror
+    // the enqueue fixture and the "manual runs = queue-only" contract.
+    rerun_workflow: () => ({
+      workflow_id: sampleWorkflow.id,
+      status: "queued",
+      queued_run_id: "rerun-fixture-1",
+      queue_name: "default",
+    }),
     plan_backfill: (args) => ({
       workflow_id: String(args.workflowId),
       trigger_kind: "backfill",

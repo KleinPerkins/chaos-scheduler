@@ -83,7 +83,14 @@ describe("RunHistory (workflow-scoped)", () => {
 
   it("reruns a specific past run via rerun_workflow, never enqueue or trigger", async () => {
     installStrictIpcMocks();
-    const rerun = vi.fn(() => "run-rerun-xyz");
+    // Rerun routes through admission control (#263): it resolves to a
+    // DispatchOutcome, not a bare run-id string.
+    const rerun = vi.fn(() => ({
+      workflow_id: sampleWorkflow.id,
+      status: "admitted",
+      run_id: "run-rerun-xyz",
+      queue_name: "default",
+    }));
     const enqueue = vi.fn(() => ({
       workflow_id: sampleWorkflow.id,
       status: "queued",
@@ -125,6 +132,63 @@ describe("RunHistory (workflow-scoped)", () => {
     // Rerun re-runs a SPECIFIC past run, identified by its source run id.
     expect(args.sourceRunId).toBe("run-bad-1");
     // It targets a past run — it must not fire-now or enqueue a fresh run.
+    expect(trigger).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the admission outcome when a queued rerun is accepted", async () => {
+    installStrictIpcMocks();
+    // A dependency-/capacity-gated rerun QUEUES instead of starting now. The UI
+    // must consume that DispatchOutcome and show the same feedback the
+    // Queue-run path does, or a queued rerun is silently invisible to the user.
+    const rerun = vi.fn(() => ({
+      workflow_id: sampleWorkflow.id,
+      status: "queued",
+      queued_run_id: "rerun-queued-9",
+      queue_name: "default",
+    }));
+    const enqueue = vi.fn(() => ({
+      workflow_id: sampleWorkflow.id,
+      status: "queued",
+      queued_run_id: "queued-unused",
+      queue_name: "default",
+    }));
+    const trigger = vi.fn(() => sampleRun.id);
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_run_history: () => runs,
+      rerun_workflow: rerun,
+      enqueue_workflow: enqueue,
+      trigger_workflow: trigger,
+    };
+
+    render(
+      <RunHistory
+        workflow={sampleWorkflow}
+        onBack={() => {}}
+        onViewLog={() => {}}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /Rerun failed run started/i,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /Rerun Nightly sync/i,
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Rerun" }));
+
+    await waitFor(() => expect(rerun).toHaveBeenCalledTimes(1));
+
+    // The queued outcome is surfaced to the user, carrying the short queued-run
+    // identity — mirroring formatWorkflowQueueOutcome used by "Queue run".
+    expect(
+      await screen.findByText(/Waiting to start: Nightly sync.*rerun-qu/),
+    ).toBeInTheDocument();
+
+    // Still a rerun-through-admission — never the dead fire-now trigger nor a
+    // fresh enqueue.
     expect(trigger).not.toHaveBeenCalled();
     expect(enqueue).not.toHaveBeenCalled();
   });

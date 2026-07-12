@@ -931,15 +931,24 @@ export function enqueueWorkflow(
   return invoke("enqueue_workflow", { id, idempotencyKey });
 }
 
+/**
+ * Rerun a workflow (optionally re-running a specific past run's input) THROUGH
+ * scheduler admission control. Like {@link enqueueWorkflow}, this returns a
+ * {@link DispatchOutcome} (`queued` | `admitted` | `duplicate` | `skipped`) —
+ * NOT a bare run-id — because a dependency-gated rerun now queues rather than
+ * spawning immediately, and a reused `idempotencyKey` replays as a duplicate.
+ */
 export function rerunWorkflow(
   workflowId: string,
   sourceRunId?: string,
   inputOverrideJson?: string,
-): Promise<string> {
+  idempotencyKey?: string,
+): Promise<DispatchOutcome> {
   return invoke("rerun_workflow", {
     workflowId,
     sourceRunId,
     inputOverrideJson,
+    idempotencyKey,
   });
 }
 
