@@ -508,7 +508,7 @@ impl SchedulerService {
     /// Mint a new API key. The plaintext token is returned exactly once (never
     /// stored); only a salted SHA-256 hash is persisted.
     pub fn create_api_key(&self, name: Option<&str>, scopes: &[&str]) -> ServiceResult<NewApiKey> {
-        use rand::RngCore;
+        use rand::Rng;
         let mut secret_bytes = [0u8; 24];
         rand::rng().fill_bytes(&mut secret_bytes);
         let secret = hex::encode(secret_bytes);
