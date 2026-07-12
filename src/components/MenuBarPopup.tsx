@@ -8,16 +8,16 @@ import {
   openRunDetail,
   environmentOf,
 } from "../lib/commands";
+import {
+  queueWorkflowRun,
+  formatWorkflowQueueOutcome,
+  formatWorkflowQueueError,
+} from "../lib/workflowEnqueue";
 import Button from "./Button";
 import StatusBadge from "./StatusBadge";
 import type { NextRun } from "../lib/commands";
 import { PRODUCT_SHORT_NAME } from "../lib/branding";
 import { formatRunStatusLabel, statusKey } from "../lib/runStatus";
-import {
-  formatWorkflowQueueError,
-  formatWorkflowQueueOutcome,
-  queueWorkflowRun,
-} from "../lib/workflowEnqueue";
 import "./MenuBarPopup.css";
 
 function envLabel(name: string): string {
