@@ -16,10 +16,6 @@ import {
 
 const THEMES: readonly ThemeName[] = ["dark", "light"];
 
-// See e2e/a11y/a11y.spec.ts — color-contrast is a design-token decision
-// allowlisted suite-wide; every other violation still fails.
-const CONTRAST_ALLOW: readonly string[] = ["color-contrast"];
-
 async function openOperationalHealth(page: Page): Promise<void> {
   await gotoDashboard(page);
   await page
@@ -45,7 +41,6 @@ for (const theme of THEMES) {
       await expect(page.locator(`html[data-theme="${theme}"]`)).toHaveCount(1);
       await expectAxeClean(page, {
         context: `operational-health/${theme}`,
-        allow: CONTRAST_ALLOW,
       });
     });
   });

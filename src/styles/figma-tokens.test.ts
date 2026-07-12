@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import figmaTokens from "../../figma-tokens.json";
@@ -167,6 +170,35 @@ function colorVarByCss(name: string): FigmaVariable {
   return found;
 }
 
+const infoTipCss = readFileSync(
+  resolve(process.cwd(), "src/components/InfoTip.css"),
+  "utf8",
+);
+
+/** Body of a single CSS rule matched by EXACT selector (comments stripped). */
+function cssRuleBody(css: string, selector: string): string {
+  const clean = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  for (const chunk of clean.split("}")) {
+    const brace = chunk.indexOf("{");
+    if (brace === -1) continue;
+    const selectors = chunk
+      .slice(0, brace)
+      .split(",")
+      .map((s) => s.trim());
+    if (selectors.includes(selector)) return chunk.slice(brace + 1);
+  }
+  throw new Error(`No CSS rule found for selector ${selector}`);
+}
+
+/** Resolve `<prop>: var(--x)` inside a rule body to the token name `x`. */
+function boundToken(body: string, prop: string): string {
+  const m = body.match(
+    new RegExp(`(?:^|[;{\\s])${prop}:\\s*var\\(--([\\w-]+)\\)`),
+  );
+  if (!m) throw new Error(`No ${prop}: var(--…) in rule body`);
+  return m[1];
+}
+
 describe("figma-tokens manifest", () => {
   it("has the expected collections, modes, and variable counts", () => {
     for (const [name, count] of Object.entries(EXPECTED_COUNTS)) {
@@ -238,6 +270,25 @@ describe("figma-tokens manifest", () => {
           ).toBeGreaterThanOrEqual(4.5);
         }
       }
+    }
+  });
+
+  it("keeps the InfoTip glyph at WCAG AA over its trigger surface", () => {
+    // Discover the tokens the trigger ACTUALLY binds so this fails if the glyph
+    // color regresses to a low-contrast token — e.g. --accent, which is only
+    // ~2.82:1 on the dark --bg-tertiary surface (fails 1.4.3) — instead of
+    // pinning a hard-coded pair the CSS could silently drift away from.
+    const trigger = cssRuleBody(infoTipCss, ".info-tip-trigger");
+    const fg = boundToken(trigger, "color");
+    const bg = boundToken(trigger, "background");
+
+    // The glyph is small text (18px circle, --font-size-xs), so AA is 4.5:1 in
+    // BOTH themes, not the 3:1 large-text bar.
+    for (const [mode, scope] of themeScopes) {
+      expect(
+        contrastRatio(parseHex(scope[fg]), parseHex(scope[bg])),
+        `--${fg} on --${bg} @ ${mode}`,
+      ).toBeGreaterThanOrEqual(4.5);
     }
   });
 
