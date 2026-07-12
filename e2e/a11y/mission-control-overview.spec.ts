@@ -20,13 +20,6 @@ import {
 
 const THEMES: readonly ThemeName[] = ["dark", "light"];
 
-/*
- * `color-contrast` is allowlisted suite-wide (a design-token decision that
- * surfaces across screens/themes and is prone to axe sampling variance — see
- * e2e/a11y/a11y.spec.ts). Every OTHER violation, at any impact, still fails.
- */
-const CONTRAST_ALLOW: readonly string[] = ["color-contrast"];
-
 async function gotoOverview(page: Page): Promise<void> {
   await gotoDashboard(page);
   // Overview is the default landing tab; wait for its data to load so axe sees
@@ -46,7 +39,6 @@ for (const theme of THEMES) {
       await expect(page.locator(`html[data-theme="${theme}"]`)).toHaveCount(1);
       await expectAxeClean(page, {
         context: `overview/${theme}`,
-        allow: CONTRAST_ALLOW,
       });
     });
   });

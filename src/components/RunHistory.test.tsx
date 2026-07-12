@@ -141,4 +141,54 @@ describe("RunHistory (workflow-scoped)", () => {
     expect(screen.getByText("running")).toBeInTheDocument();
     expect(screen.getByText("1 of 3 loaded")).toBeInTheDocument();
   });
+
+  it("announces a run-history load failure as an alert", async () => {
+    installStrictIpcMocks();
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_run_history: () => {
+        throw new Error("db locked");
+      },
+    };
+
+    render(
+      <RunHistory
+        workflow={sampleWorkflow}
+        onBack={() => {}}
+        onViewLog={() => {}}
+      />,
+    );
+
+    // A failed async load must be announced to assistive tech, not shown as a
+    // silent div.
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/Run history failed to load/i);
+  });
+
+  it("exposes heatmap cells to keyboard users with an accessible name", async () => {
+    installStrictIpcMocks();
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_run_history: () => runs,
+      get_workflow_history_buckets: () => [
+        { day: "2026-07-10", total: 3, failed: 1, succeeded: 2 },
+      ],
+    };
+
+    render(
+      <RunHistory
+        workflow={sampleWorkflow}
+        onBack={() => {}}
+        onViewLog={() => {}}
+      />,
+    );
+
+    // The per-day detail must be reachable by keyboard, not mouse-only: the
+    // cell is focusable (tabindex 0) and carries the failure summary as its
+    // accessible name.
+    const cell = await screen.findByRole("listitem", {
+      name: "2026-07-10: 1 of 3 runs failed",
+    });
+    expect(cell).toHaveAttribute("tabindex", "0");
+    cell.focus();
+    expect(cell).toHaveFocus();
+  });
 });

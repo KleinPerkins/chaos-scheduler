@@ -130,4 +130,33 @@ describe("WorkflowDetail manual execution", () => {
       expect.objectContaining({ id: sampleWorkflow.id }),
     );
   });
+
+  it("exposes failure-heatmap cells to keyboard users with accessible names", async () => {
+    installStrictIpcMocks();
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_workflow_history_buckets: () => [
+        { day: "2026-07-10", total: 4, failed: 2, succeeded: 2 },
+      ],
+    };
+
+    render(
+      <WorkflowDetail
+        workflow={sampleWorkflow}
+        onBack={() => {}}
+        onEdit={() => {}}
+        onFullHistory={() => {}}
+        onViewRun={() => {}}
+      />,
+    );
+
+    // The heatmap detail was previously mouse-only (native `title`). Each cell
+    // must now be keyboard-focusable with the failure summary as its
+    // accessible name.
+    const cell = await screen.findByRole("listitem", {
+      name: "2026-07-10: 2 of 4 runs failed",
+    });
+    expect(cell).toHaveAttribute("tabindex", "0");
+    cell.focus();
+    expect(cell).toHaveFocus();
+  });
 });

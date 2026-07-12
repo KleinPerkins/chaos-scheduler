@@ -2,6 +2,88 @@ use rusqlite::{params, types::Type, Connection, OptionalExtension, TransactionBe
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Canonical run-status classification — the single source of truth for
+/// "did this run finish, and did it finish OK?".
+///
+/// Every KPI/history aggregate and every scheduler dependency gate must derive
+/// its "ended OK" / "ended not-OK" / "in-flight" partition from this module.
+/// Historically the KPI SQL in `db.rs` and the terminal-status helpers in
+/// `scheduler.rs` maintained independent status lists that disagreed on
+/// `stale`, `poll_exhausted`, and `timed_out`, so the same run could count as a
+/// failure in one place, be invisible in another, and hang a `waits_for`
+/// downstream in a third. Adding a new terminal status now means editing
+/// exactly one of the slices below.
+pub mod run_status {
+    /// Runs that finished successfully. `succeeded` is a historical alias of
+    /// `success`.
+    pub const ENDED_OK: &[&str] = &["success", "succeeded"];
+
+    /// Runs that finished but did NOT succeed — every terminal, non-success
+    /// status. Keep in sync with the scheduler's failure handling.
+    pub const ENDED_NOT_OK: &[&str] = &[
+        "failed",
+        "cancelled",
+        "cascade-skipped",
+        "dead_letter",
+        "dead_lettered",
+        "stale",
+        "poll_exhausted",
+        "timed_out",
+    ];
+
+    /// In-flight runs that have not yet reached a terminal state.
+    pub const RUNNING: &[&str] = &["admitted", "running"];
+
+    /// True when `status` is a successful terminal status.
+    pub fn ended_ok(status: &str) -> bool {
+        ENDED_OK.contains(&status)
+    }
+
+    /// True when `status` is a terminal, non-success status.
+    pub fn ended_not_ok(status: &str) -> bool {
+        ENDED_NOT_OK.contains(&status)
+    }
+
+    /// True when `status` is terminal (finished), success or not.
+    pub fn is_terminal(status: &str) -> bool {
+        ended_ok(status) || ended_not_ok(status)
+    }
+
+    /// Render a slice of status tokens as the comma-separated body of a SQL
+    /// `IN (...)` list, e.g. `'success', 'succeeded'`. Only ever called with the
+    /// compile-time constants above (never user input), so there is no
+    /// injection surface.
+    fn sql_in_list(values: &[&str]) -> String {
+        values
+            .iter()
+            .map(|value| format!("'{value}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// SQL `IN (...)` body for the successful terminal statuses.
+    pub fn ended_ok_sql() -> String {
+        sql_in_list(ENDED_OK)
+    }
+
+    /// SQL `IN (...)` body for the non-success terminal statuses.
+    pub fn ended_not_ok_sql() -> String {
+        sql_in_list(ENDED_NOT_OK)
+    }
+
+    /// SQL `IN (...)` body for every terminal status (OK + not-OK).
+    pub fn terminal_sql() -> String {
+        let mut all = ENDED_OK.to_vec();
+        all.extend_from_slice(ENDED_NOT_OK);
+        sql_in_list(&all)
+    }
+
+    /// SQL `IN (...)` body for the in-flight statuses.
+    pub fn running_sql() -> String {
+        sql_in_list(RUNNING)
+    }
+}
+
 fn default_utc() -> String {
     "UTC".to_string()
 }
@@ -128,6 +210,59 @@ pub struct RunExecutionRecord {
     pub process_pid: Option<i64>,
     pub process_pgid: Option<i64>,
     pub process_started_at: Option<String>,
+}
+
+/// One lean, LOG-FREE history row. Deliberately omits `stdout`/`stderr` (and
+/// every other large blob on `runs`): this read model backs the filtered
+/// history table + its KPI header, never a log viewer, so logs are never
+/// SELECTed or returned. Fetch a single run's logs via `get_run_log` instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryRow {
+    pub id: String,
+    pub workflow_id: String,
+    pub workflow_name: Option<String>,
+    /// The run's environment SNAPSHOTTED at creation time (`runs.run_environment`,
+    /// schema v13), NOT the owning workflow's current environment — so re-homing
+    /// a workflow never re-buckets its history. See [`Database::history_read_model`].
+    pub environment: String,
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub exit_code: Option<i32>,
+    pub trigger_kind: Option<String>,
+    /// Wall-clock execution seconds (`finished_at - started_at`); `None` while
+    /// the run is still in-flight.
+    pub duration_seconds: Option<f64>,
+}
+
+/// Aggregate KPIs for the history read model, computed over the same
+/// environment/workflow/lookback scope as the returned rows. The status filter
+/// scopes the ROWS only (not these KPIs) so the header always shows the full
+/// breakdown for the scope. Every count derives from the canonical
+/// [`run_status`] sets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryKpis {
+    /// All runs in scope (any status).
+    pub total: i64,
+    /// Runs that ended OK (`run_status::ENDED_OK`).
+    pub ended_ok: i64,
+    /// Runs that ended not-OK — every non-success terminal status
+    /// (`run_status::ENDED_NOT_OK`).
+    pub ended_not_ok: i64,
+    /// In-flight runs (`run_status::RUNNING`).
+    pub running: i64,
+    /// p95 wall-clock execution seconds (nearest-rank) over FINISHED runs in
+    /// scope; `None` when there are no finished runs. Workflow-scoped when a
+    /// workflow filter is applied.
+    pub p95_duration_seconds: Option<f64>,
+}
+
+/// Filtered history rows plus their aggregate KPIs. Tauri-IPC-only; no
+/// REST/SDK/MCP surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryReadModel {
+    pub rows: Vec<HistoryRow>,
+    pub kpis: HistoryKpis,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -957,7 +1092,7 @@ pub enum IdempotencyReservation {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 12;
+pub const CURRENT_SCHEMA_VERSION: i64 = 13;
 
 pub struct Database {
     path: String,
@@ -1040,7 +1175,8 @@ impl Database {
                 process_started_at TEXT,
                 stdout_truncated INTEGER NOT NULL DEFAULT 0,
                 stderr_truncated INTEGER NOT NULL DEFAULT 0,
-                task_events_truncated INTEGER NOT NULL DEFAULT 0
+                task_events_truncated INTEGER NOT NULL DEFAULT 0,
+                run_environment TEXT
             );
             CREATE TABLE IF NOT EXISTS workflow_trigger_state (
                 workflow_id TEXT NOT NULL,
@@ -1434,7 +1570,42 @@ impl Database {
             (10, Self::migrate_v10_rename_mission_filter_key),
             (11, Self::migrate_v11_production_sandbox_environments),
             (12, Self::migrate_v12_queue_occupancy_samples),
+            (13, Self::migrate_v13_run_environment_snapshot),
         ]
+    }
+
+    /// v13: snapshot each run's environment at creation time. Adds a NULLABLE
+    /// `run_environment` column to `runs` so a run's historical environment is
+    /// preserved even after its workflow is re-homed to a different environment
+    /// (the read model previously derived a run's environment from the CURRENT
+    /// workflow env, which retroactively re-bucketed history — decision 4).
+    ///
+    /// Additive and idempotent: the `ALTER` is a no-op when the column already
+    /// exists (fresh DBs get it from the base `runs` schema in `init`), and the
+    /// backfill only touches rows that are still NULL. The backfill is
+    /// BEST-EFFORT: the true run-time environment of pre-existing rows is
+    /// unknown, so we seed them from their workflow's CURRENT environment (the
+    /// same value the old read model would have shown). New runs get the exact
+    /// run-time snapshot from the run-creation write paths.
+    fn migrate_v13_run_environment_snapshot(conn: &Connection) -> rusqlite::Result<()> {
+        // Additive column; ignore the duplicate-column error when a fresh DB
+        // already created it via the base schema (mirrors migrate_v8).
+        let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN run_environment TEXT;");
+        // Best-effort backfill: pre-existing rows have no recorded run-time env,
+        // so approximate it with the workflow's current environment. Uses the
+        // same canonical COALESCE the read model applies so buckets stay stable.
+        conn.execute_batch(
+            "UPDATE runs
+                SET run_environment = COALESCE(
+                    NULLIF(
+                        (SELECT w.environment FROM workflows w WHERE w.id = runs.workflow_id),
+                        ''
+                    ),
+                    'production'
+                )
+              WHERE run_environment IS NULL;",
+        )?;
+        Ok(())
     }
 
     /// v12: add the `queue_occupancy_samples` table for the queue-utilization
@@ -2540,8 +2711,12 @@ impl Database {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn()?;
+        // Snapshot the workflow's environment AT CREATION TIME so the run's
+        // historical environment survives a later workflow re-home (schema v13).
         conn.execute(
-            "INSERT INTO runs (id, workflow_id, started_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id) VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO runs (id, workflow_id, started_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id, run_environment)
+             VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8,
+                     (SELECT COALESCE(NULLIF(environment, ''), 'production') FROM workflows WHERE id = ?2))",
             params![id, workflow_id, now, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id],
         )?;
         self.get_run(&id)
@@ -2561,8 +2736,11 @@ impl Database {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn()?;
+        // Snapshot the workflow's environment AT CREATION TIME (schema v13).
         conn.execute(
-            "INSERT INTO runs (id, workflow_id, started_at, finished_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id) VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO runs (id, workflow_id, started_at, finished_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id, run_environment)
+             VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                     (SELECT COALESCE(NULLIF(environment, ''), 'production') FROM workflows WHERE id = ?2))",
             params![id, workflow_id, now, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id],
         )?;
         self.get_run(&id)
@@ -2687,9 +2865,12 @@ impl Database {
             }
         }
 
+        // Snapshot the workflow's environment AT ADMISSION TIME (schema v13) so
+        // re-homing the workflow later never retroactively re-buckets this run.
         tx.execute(
-            "INSERT INTO runs (id, workflow_id, started_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id)
-             VALUES (?1, ?2, ?3, 'admitted', ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO runs (id, workflow_id, started_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id, run_environment)
+             VALUES (?1, ?2, ?3, 'admitted', ?4, ?5, ?6, ?7, ?8,
+                     (SELECT COALESCE(NULLIF(environment, ''), 'production') FROM workflows WHERE id = ?2))",
             params![
                 id,
                 workflow_id,
@@ -3596,6 +3777,151 @@ impl Database {
         rows.collect()
     }
 
+    /// Lean, LOG-FREE history read model: filtered rows + aggregate KPIs
+    /// (`total` / `ended_ok` / `ended_not_ok` / `running` / p95 duration) for
+    /// the history table and its KPI header. Never SELECTs `stdout`/`stderr`;
+    /// fetch a single run's logs via [`Database::get_run`] instead.
+    ///
+    /// Filters: `environment_filter` and `workflow_filter` accept `"all"` (or
+    /// `None`) to disable. `status_filter` (`"all"`/`None` to disable) scopes
+    /// the returned ROWS only — the KPIs always report the full status
+    /// breakdown for the `(environment, workflow, window)` scope, so the header
+    /// stays stable as the table is filtered by status. `window_modifier` is a
+    /// SQLite datetime modifier (e.g. `"-1 day"`, or `"-100 years"` for "all"),
+    /// applied to `COALESCE(finished_at, started_at)` to match the other KPI
+    /// aggregates. p95 is nearest-rank over FINISHED runs in scope and is
+    /// therefore workflow-scoped whenever a workflow filter is applied. Every
+    /// count derives from the canonical [`run_status`] sets.
+    ///
+    /// ENVIRONMENT PROVENANCE — SNAPSHOTTED (schema v13, decision 4): a row's
+    /// `environment` (and the environment filter) reflect the run's environment
+    /// AS RECORDED AT CREATION TIME via the `runs.run_environment` snapshot, NOT
+    /// the owning workflow's environment *now*. Re-homing a workflow therefore
+    /// no longer retroactively re-buckets its historical runs. Pre-v13 rows were
+    /// backfilled best-effort from the workflow's environment (true run-time env
+    /// unknown); the `COALESCE` falls back to the current workflow env only for
+    /// a row whose snapshot is somehow absent.
+    pub fn history_read_model(
+        &self,
+        environment_filter: Option<&str>,
+        workflow_filter: Option<&str>,
+        status_filter: Option<&str>,
+        window_modifier: &str,
+        limit: i64,
+    ) -> rusqlite::Result<HistoryReadModel> {
+        let environment_filter = environment_filter.unwrap_or("all");
+        let workflow_filter = workflow_filter.unwrap_or("all");
+        let status_filter = status_filter.unwrap_or("all");
+        let conn = self.conn()?;
+
+        // Rows: log-free projection (no stdout/stderr), honoring all four
+        // filters, newest first.
+        let rows = {
+            let mut stmt = conn.prepare(
+                "SELECT r.id, r.workflow_id, w.name,
+                        COALESCE(NULLIF(r.run_environment, ''), NULLIF(w.environment, ''), 'production') AS env,
+                        r.status, r.started_at, r.finished_at, r.exit_code, r.trigger_kind,
+                        CASE WHEN r.finished_at IS NOT NULL
+                             THEN (julianday(r.finished_at) - julianday(r.started_at)) * 86400.0
+                             END AS duration_seconds
+                 FROM runs r
+                 LEFT JOIN workflows w ON w.id = r.workflow_id
+                 WHERE (?1 = 'all' OR COALESCE(NULLIF(r.run_environment, ''), NULLIF(w.environment, ''), 'production') = ?1)
+                   AND (?2 = 'all' OR r.workflow_id = ?2)
+                   AND (?3 = 'all' OR r.status = ?3)
+                   AND datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?4)
+                 ORDER BY r.started_at DESC
+                 LIMIT ?5",
+            )?;
+            let mapped = stmt.query_map(
+                params![
+                    environment_filter,
+                    workflow_filter,
+                    status_filter,
+                    window_modifier,
+                    limit
+                ],
+                |row| {
+                    Ok(HistoryRow {
+                        id: row.get(0)?,
+                        workflow_id: row.get(1)?,
+                        workflow_name: row.get(2)?,
+                        environment: row.get(3)?,
+                        status: row.get(4)?,
+                        started_at: row.get(5)?,
+                        finished_at: row.get(6)?,
+                        exit_code: row.get(7)?,
+                        trigger_kind: row.get(8)?,
+                        duration_seconds: row.get(9)?,
+                    })
+                },
+            )?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        // KPIs: environment/workflow/window scope only (deliberately NOT the
+        // status filter — see the doc comment). Counts come from the canonical
+        // run-status sets so they never drift from the scheduler/dashboards.
+        let (total, ended_ok, ended_not_ok, running): (i64, i64, i64, i64) = conn.query_row(
+            &format!(
+                "SELECT COUNT(*),
+                        SUM(CASE WHEN r.status IN ({ended_ok}) THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN r.status IN ({ended_not_ok}) THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN r.status IN ({running}) THEN 1 ELSE 0 END)
+                 FROM runs r
+                 LEFT JOIN workflows w ON w.id = r.workflow_id
+                 WHERE (?1 = 'all' OR COALESCE(NULLIF(r.run_environment, ''), NULLIF(w.environment, ''), 'production') = ?1)
+                   AND (?2 = 'all' OR r.workflow_id = ?2)
+                   AND datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?3)",
+                ended_ok = run_status::ended_ok_sql(),
+                ended_not_ok = run_status::ended_not_ok_sql(),
+                running = run_status::running_sql(),
+            ),
+            params![environment_filter, workflow_filter, window_modifier],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                ))
+            },
+        )?;
+
+        // p95 duration: nearest-rank over FINISHED runs in scope, reduced in
+        // Rust from the ordered durations (avoids a fragile SQL percentile and
+        // keeps the reduction obviously correct).
+        let durations: Vec<f64> = {
+            let mut stmt = conn.prepare(
+                "SELECT (julianday(r.finished_at) - julianday(r.started_at)) * 86400.0 AS secs
+                 FROM runs r
+                 LEFT JOIN workflows w ON w.id = r.workflow_id
+                 WHERE r.finished_at IS NOT NULL
+                   AND (?1 = 'all' OR COALESCE(NULLIF(r.run_environment, ''), NULLIF(w.environment, ''), 'production') = ?1)
+                   AND (?2 = 'all' OR r.workflow_id = ?2)
+                   AND datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?3)
+                 ORDER BY secs ASC",
+            )?;
+            let mapped = stmt.query_map(
+                params![environment_filter, workflow_filter, window_modifier],
+                |row| row.get::<_, f64>(0),
+            )?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let p95_duration_seconds = percentile_nearest_rank(&durations, 95);
+
+        Ok(HistoryReadModel {
+            rows,
+            kpis: HistoryKpis {
+                total,
+                ended_ok,
+                ended_not_ok,
+                running,
+                p95_duration_seconds,
+            },
+        })
+    }
+
     pub fn retention_preview(
         &self,
         older_than_days: i64,
@@ -3733,9 +4059,10 @@ impl Database {
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT
+            &format!(
+                "SELECT
                 COUNT(DISTINCT CASE WHEN w.enabled = 1 THEN w.id END) AS active_workflows,
-                SUM(CASE WHEN r.status IN ('admitted', 'running') THEN 1 ELSE 0 END) AS running_count,
+                SUM(CASE WHEN r.status IN ({running}) THEN 1 ELSE 0 END) AS running_count,
                 (SELECT COUNT(*)
                    FROM queued_runs q JOIN workflows qw ON qw.id = q.workflow_id
                   WHERE q.status IN ('queued', 'admitted')
@@ -3743,7 +4070,7 @@ impl Database {
                     AND (?2 = 'all'
                       OR (?2 = '__unowned__' AND (qw.domain IS NULL OR TRIM(qw.domain) = ''))
                       OR TRIM(qw.domain) = ?2)) AS queued_count,
-                SUM(CASE WHEN r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
+                SUM(CASE WHEN r.status IN ({ended_not_ok})
                           AND datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', '-1 day')
                          THEN 1 ELSE 0 END) AS recent_failures
              FROM workflows w
@@ -3752,6 +4079,9 @@ impl Database {
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
+                running = run_status::running_sql(),
+                ended_not_ok = run_status::ended_not_ok_sql(),
+            ),
             params![environment_filter, domain_filter],
             |row| {
                 Ok(MissionControlHeader {
@@ -3778,16 +4108,20 @@ impl Database {
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         let (total, succeeded): (i64, i64) = conn.query_row(
-            "SELECT COUNT(*),
-                    SUM(CASE WHEN r.status IN ('success', 'succeeded') THEN 1 ELSE 0 END)
+            &format!(
+                "SELECT COUNT(*),
+                    SUM(CASE WHEN r.status IN ({ended_ok}) THEN 1 ELSE 0 END)
              FROM runs r
              JOIN workflows w ON w.id = r.workflow_id
              WHERE datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?3)
-               AND r.status IN ('success', 'succeeded', 'failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
+               AND r.status IN ({terminal})
                AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
+                ended_ok = run_status::ended_ok_sql(),
+                terminal = run_status::terminal_sql(),
+            ),
             params![environment_filter, domain_filter, window_modifier],
             |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
         )?;
@@ -3903,10 +4237,11 @@ impl Database {
             Option<f64>,
             Option<f64>,
         ) = conn.query_row(
-            "SELECT
+            &format!(
+                "SELECT
                 COUNT(*),
-                SUM(CASE WHEN r.status IN ('success', 'succeeded') THEN 1 ELSE 0 END),
-                SUM(CASE WHEN r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered') THEN 1 ELSE 0 END),
+                SUM(CASE WHEN r.status IN ({ended_ok}) THEN 1 ELSE 0 END),
+                SUM(CASE WHEN r.status IN ({ended_not_ok}) THEN 1 ELSE 0 END),
                 AVG(CASE WHEN r.finished_at IS NOT NULL THEN (julianday(r.finished_at) - julianday(r.started_at)) * 86400 END),
                 MAX(CASE WHEN r.finished_at IS NOT NULL THEN (julianday(r.finished_at) - julianday(r.started_at)) * 86400 END)
              FROM runs r
@@ -3914,6 +4249,9 @@ impl Database {
              WHERE datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?2)
                AND datetime(COALESCE(r.finished_at, r.started_at)) < datetime('now', ?3)
                AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)",
+                ended_ok = run_status::ended_ok_sql(),
+                ended_not_ok = run_status::ended_not_ok_sql(),
+            ),
             params![environment_filter, lower_modifier, upper_modifier],
             |row| {
                 Ok((
@@ -4102,14 +4440,16 @@ impl Database {
         let sql = format!(
             "SELECT {bucket_expr} AS bucket,
                     COUNT(*) AS total,
-                    SUM(CASE WHEN r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered') THEN 1 ELSE 0 END) AS failed,
-                    SUM(CASE WHEN r.status IN ('success', 'succeeded') THEN 1 ELSE 0 END) AS succeeded
+                    SUM(CASE WHEN r.status IN ({ended_not_ok}) THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN r.status IN ({ended_ok}) THEN 1 ELSE 0 END) AS succeeded
              FROM runs r
              JOIN workflows w ON w.id = r.workflow_id
              WHERE datetime(r.started_at) >= datetime('now', ?2)
                AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
              GROUP BY bucket
-             ORDER BY bucket ASC"
+             ORDER BY bucket ASC",
+            ended_not_ok = run_status::ended_not_ok_sql(),
+            ended_ok = run_status::ended_ok_sql(),
         );
         let conn = self.conn()?;
         let mut stmt = conn.prepare(&sql)?;
@@ -4308,11 +4648,11 @@ impl Database {
     ) -> rusqlite::Result<Vec<DashboardWorkflowFailureCount>> {
         let environment_filter = normalize_mission_environment_filter(environment_filter);
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT w.id,
                     w.name,
                     COALESCE(NULLIF(w.environment, ''), 'production') AS env,
-                    SUM(CASE WHEN r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered') THEN 1 ELSE 0 END) AS failures,
+                    SUM(CASE WHEN r.status IN ({ended_not_ok}) THEN 1 ELSE 0 END) AS failures,
                     COUNT(r.id) AS total
              FROM workflows w
              JOIN runs r ON r.workflow_id = w.id
@@ -4321,7 +4661,8 @@ impl Database {
              GROUP BY w.id
              HAVING failures > 0
              ORDER BY failures DESC, total DESC, w.name ASC",
-        )?;
+            ended_not_ok = run_status::ended_not_ok_sql(),
+        ))?;
         let rows = stmt.query_map(params![environment_filter, window_modifier], |row| {
             Ok(DashboardWorkflowFailureCount {
                 workflow_id: row.get(0)?,
@@ -5442,11 +5783,15 @@ impl Database {
             if let Some(min_rate) = sla.get("min_success_rate_24h").and_then(|v| v.as_f64()) {
                 let conn = self.conn()?;
                 let (total, succeeded): (i64, i64) = conn.query_row(
-                    "SELECT COUNT(*), SUM(CASE WHEN status IN ('success', 'succeeded') THEN 1 ELSE 0 END)
+                    &format!(
+                        "SELECT COUNT(*), SUM(CASE WHEN status IN ({ended_ok}) THEN 1 ELSE 0 END)
                      FROM runs
                      WHERE workflow_id = ?1
                        AND datetime(started_at) >= datetime('now', '-1 day')
-                       AND status IN ('success', 'succeeded', 'failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')",
+                       AND status IN ({terminal})",
+                        ended_ok = run_status::ended_ok_sql(),
+                        terminal = run_status::terminal_sql(),
+                    ),
                     params![workflow.id],
                     |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
                 )?;
@@ -6490,6 +6835,20 @@ fn scheduler_asset_from_row(row: &rusqlite::Row) -> SchedulerAsset {
     }
 }
 
+/// Nearest-rank percentile over an ASCENDING-sorted slice. `p` is `1..=100`.
+/// Returns `None` for an empty slice. Rank = `ceil(p/100 * n)` (1-based),
+/// clamped into `[1, n]` — the standard nearest-rank definition, chosen over a
+/// SQL percentile so the reduction is obviously correct and unit-testable.
+fn percentile_nearest_rank(sorted_asc: &[f64], p: u32) -> Option<f64> {
+    if sorted_asc.is_empty() {
+        return None;
+    }
+    let n = sorted_asc.len();
+    // Nearest-rank: rank = ceil(p/100 * n), 1-based.
+    let rank = (p as usize * n).div_ceil(100);
+    Some(sorted_asc[rank.clamp(1, n) - 1])
+}
+
 fn run_from_row(row: &rusqlite::Row) -> Run {
     let stdout: Option<String> = row.get(5).unwrap_or(None);
     let summary = stdout.as_deref().and_then(extract_summary);
@@ -6687,6 +7046,52 @@ fn queue_tags_from_config(queue_config: Option<&str>) -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn run_status_canonicalizes_poll_exhausted_and_stale_as_ended_not_ok() {
+        use run_status::{ended_not_ok, ended_ok, is_terminal, ENDED_NOT_OK, ENDED_OK, RUNNING};
+
+        // The disagreement this canonical set resolves: `poll_exhausted`,
+        // `stale`, and `timed_out` are terminal, non-success statuses. Each
+        // counts as endedNotOk — never as endedOk, never as in-flight.
+        for status in ["poll_exhausted", "stale", "timed_out"] {
+            assert!(ended_not_ok(status), "{status} must be endedNotOk");
+            assert!(!ended_ok(status), "{status} must not be endedOk");
+            assert!(is_terminal(status), "{status} must be terminal");
+            assert!(!RUNNING.contains(&status), "{status} must not be running");
+        }
+
+        // endedOk is exactly `success` + its `succeeded` alias.
+        assert_eq!(ENDED_OK, ["success", "succeeded"].as_slice());
+        for &status in ENDED_OK {
+            assert!(ended_ok(status));
+            assert!(!ended_not_ok(status));
+            assert!(is_terminal(status));
+        }
+
+        // Pin the full non-success terminal set so a new status must be added
+        // here (the single source of truth) rather than in a scattered call-site.
+        assert_eq!(ENDED_NOT_OK.len(), 8);
+        for status in [
+            "failed",
+            "cancelled",
+            "cascade-skipped",
+            "dead_letter",
+            "dead_lettered",
+            "stale",
+            "poll_exhausted",
+            "timed_out",
+        ] {
+            assert!(ended_not_ok(status), "{status} must be endedNotOk");
+            assert!(!ended_ok(status), "{status} must not be endedOk");
+        }
+
+        // The in-flight set is terminal-free and failure-free.
+        for &status in RUNNING {
+            assert!(!is_terminal(status), "{status} must be in-flight");
+            assert!(!ended_not_ok(status), "{status} must be in-flight");
+        }
+    }
+
     fn fk_delete_action(conn: &Connection, table: &str, from_col: &str) -> String {
         let mut stmt = conn
             .prepare(&format!("PRAGMA foreign_key_list({table})"))
@@ -6791,7 +7196,7 @@ mod tests {
         // Tripwire: refresh this fixture (seed schema + asserted columns) the
         // next time a migration lands so the newest N-1 -> N paths stay covered.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 12,
+            CURRENT_SCHEMA_VERSION, 13,
             "add a v(N-1)->v(N) fixture when a new migration ships"
         );
 
@@ -6873,7 +7278,7 @@ mod tests {
             assert_eq!(v, 7);
         }
 
-        // Apply the pending v8–v12 migrations.
+        // Apply the pending v8–v13 migrations.
         let conn = db.conn().unwrap();
         db.run_migrations(&conn, 7).unwrap();
 
@@ -6911,6 +7316,25 @@ mod tests {
                 "v8 migration should add `{expected}` to runs"
             );
         }
+
+        // v13 adds the run-time environment snapshot column and backfills
+        // pre-existing rows best-effort from their workflow's current env.
+        assert!(
+            run_cols.contains("run_environment"),
+            "v13 migration should add `run_environment` to runs"
+        );
+        let snap_env: Option<String> = conn
+            .query_row(
+                "SELECT run_environment FROM runs WHERE id = 'run-mig'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            snap_env.as_deref(),
+            Some("staging"),
+            "v13 backfill seeds run_environment from the workflow's environment"
+        );
 
         // v9 drops the vestigial corpus column but keeps environment.
         let wf_cols = workflow_columns(&conn);
@@ -9784,6 +10208,327 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(all.total_runs, 4);
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn history_read_model_is_log_free_filtered_and_reuses_canonical_status_sets() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let prod = db
+            .create_workflow(
+                "Prod WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let sandbox = db
+            .create_workflow(
+                "Sandbox WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 1 * * *",
+                false,
+                true,
+                "UTC",
+                "sandbox",
+                Some("card"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let now = chrono::Utc::now();
+        let at = |mins_ago: i64| (now - chrono::Duration::minutes(mins_ago)).to_rfc3339();
+        let span = |mins_ago: i64, secs: i64| {
+            (now - chrono::Duration::minutes(mins_ago) + chrono::Duration::seconds(secs))
+                .to_rfc3339()
+        };
+        let conn = db.conn().unwrap();
+        // Insert WITH stdout/stderr populated so we can prove the read model
+        // never returns them.
+        let insert =
+            |id: &str, wf: &str, started: String, finished: Option<String>, status: &str| {
+                conn.execute(
+                "INSERT INTO runs (id, workflow_id, started_at, finished_at, status, stdout, stderr)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'SECRET STDOUT', 'SECRET STDERR')",
+                params![id, wf, started, finished, status],
+            )
+            .unwrap();
+            };
+        // Prod, in window (1d), finished durations 60/120/30/90s + 1 running.
+        insert("r1", &prod.id, at(120), Some(span(120, 60)), "success");
+        insert("r2", &prod.id, at(180), Some(span(180, 120)), "failed");
+        insert(
+            "r3",
+            &prod.id,
+            at(150),
+            Some(span(150, 30)),
+            "poll_exhausted",
+        );
+        insert("r4", &prod.id, at(200), Some(span(200, 90)), "stale");
+        insert("r5", &prod.id, at(30), None, "running");
+        // Prod, OUTSIDE the window (40h ago) — excluded from rows and KPIs.
+        insert(
+            "r6",
+            &prod.id,
+            at(40 * 60),
+            Some(span(40 * 60, 10)),
+            "success",
+        );
+        // Sandbox, in window — excluded by the production environment filter.
+        insert("s1", &sandbox.id, at(90), Some(span(90, 200)), "failed");
+
+        // --- Production, all statuses, 1d window ---
+        let model = db
+            .history_read_model(Some("production"), None, None, "-1 day", 100)
+            .unwrap();
+        assert_eq!(
+            model.rows.len(),
+            5,
+            "r1..r5 in the prod window; r6 out of window; s1 is sandbox"
+        );
+        // KPIs derive from the canonical run_status sets: poll_exhausted AND
+        // stale both count as ended_not_ok (the PR1 canonicalization), never as
+        // ended_ok and never as running.
+        assert_eq!(model.kpis.total, 5);
+        assert_eq!(model.kpis.ended_ok, 1, "only r1 (success) ended ok");
+        assert_eq!(
+            model.kpis.ended_not_ok, 3,
+            "failed + poll_exhausted + stale all count as ended_not_ok"
+        );
+        assert_eq!(model.kpis.running, 1, "r5 is in-flight");
+        // p95 nearest-rank over finished prod durations [30,60,90,120] -> 120s.
+        let p95 = model
+            .kpis
+            .p95_duration_seconds
+            .expect("finished runs present");
+        assert!((p95 - 120.0).abs() < 1.0, "p95 ~120s, got {p95}");
+
+        // LOG-FREE: a serialized row exposes no stdout/stderr keys even though
+        // both columns are populated in the DB.
+        let json = serde_json::to_value(&model.rows[0]).unwrap();
+        assert!(
+            json.get("stdout").is_none(),
+            "history rows must be log-free (no stdout)"
+        );
+        assert!(
+            json.get("stderr").is_none(),
+            "history rows must be log-free (no stderr)"
+        );
+
+        // --- Status filter scopes ROWS only, never the KPI header ---
+        let failed_only = db
+            .history_read_model(Some("production"), None, Some("failed"), "-1 day", 100)
+            .unwrap();
+        assert_eq!(failed_only.rows.len(), 1, "status filter narrows rows");
+        assert_eq!(failed_only.rows[0].status, "failed");
+        assert_eq!(
+            failed_only.kpis.total, 5,
+            "status filter must NOT narrow the KPI header"
+        );
+        assert_eq!(failed_only.kpis.ended_not_ok, 3);
+
+        // --- Workflow filter scopes rows AND p95 (workflow-scoped duration) ---
+        let sandbox_only = db
+            .history_read_model(None, Some(&sandbox.id), None, "-1 day", 100)
+            .unwrap();
+        assert_eq!(sandbox_only.rows.len(), 1, "only the sandbox run in scope");
+        assert_eq!(sandbox_only.kpis.total, 1);
+        assert_eq!(sandbox_only.kpis.ended_not_ok, 1);
+        let sp95 = sandbox_only
+            .kpis
+            .p95_duration_seconds
+            .expect("sandbox has one finished run");
+        assert!(
+            (sp95 - 200.0).abs() < 1.0,
+            "workflow-scoped p95 ~200s, got {sp95}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migrate_v13_adds_run_environment_column_and_backfills_from_workflow_env() {
+        // (a) The v13 migration adds the NULLABLE `run_environment` column to an
+        // existing (pre-v13) DB and backfills existing rows best-effort from the
+        // owning workflow's environment (true run-time env of old rows unknown).
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        let db = Database {
+            path: db_path.to_string_lossy().to_string(),
+        };
+
+        // Seed a pre-v13 shape: `runs` WITHOUT the snapshot column, a workflow
+        // in sandbox, and a run for it. Stamp v12 so ONLY v13 is pending. We
+        // drive `run_migrations` directly (no base `init`) to isolate the v13
+        // transition.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runs (
+                    id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    status TEXT DEFAULT 'running'
+                );
+                CREATE TABLE workflows (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    environment TEXT
+                );
+                INSERT INTO workflows (id, name, environment)
+                    VALUES ('wf-a', 'A', 'sandbox');
+                INSERT INTO runs (id, workflow_id, started_at, status)
+                    VALUES ('run-a', 'wf-a', '2026-01-01T00:00:00Z', 'success');
+                PRAGMA user_version = 12;",
+            )
+            .unwrap();
+            assert!(
+                !runs_columns(&conn).contains("run_environment"),
+                "pre-v13 fixture must not already carry the snapshot column"
+            );
+        }
+
+        let conn = db.conn().unwrap();
+        db.run_migrations(&conn, 12).unwrap();
+
+        assert!(
+            runs_columns(&conn).contains("run_environment"),
+            "v13 must add the run_environment column"
+        );
+        let backfilled: Option<String> = conn
+            .query_row(
+                "SELECT run_environment FROM runs WHERE id = 'run-a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            backfilled.as_deref(),
+            Some("sandbox"),
+            "v13 backfills the run's environment from its owning workflow"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn history_read_model_snapshots_run_environment_and_survives_workflow_rehome() {
+        // (b)+(c) Core provenance guarantee (schema v13, decision 4): a run
+        // created while its workflow is in environment X STILL reports X in
+        // history after the workflow is later re-homed to Y. The read model
+        // returns the creation-time snapshot, never the workflow's current env.
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        // Workflow starts in production; create a run under it.
+        let wf = db
+            .create_workflow(
+                "Rehome WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let run = db
+            .create_run_with_context(&wf.id, Some("manual"), None, None, None, None)
+            .unwrap();
+
+        // Run creation snapshotted the workflow's environment AT THAT MOMENT.
+        let snap: Option<String> = db
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT run_environment FROM runs WHERE id = ?1",
+                params![run.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            snap.as_deref(),
+            Some("production"),
+            "run creation must snapshot the workflow's environment"
+        );
+
+        // Re-home the workflow to sandbox AFTER the run was created.
+        db.conn()
+            .unwrap()
+            .execute(
+                "UPDATE workflows SET environment = 'sandbox' WHERE id = ?1",
+                params![wf.id],
+            )
+            .unwrap();
+        let now_env: String = db
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT environment FROM workflows WHERE id = ?1",
+                params![wf.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(now_env, "sandbox", "sanity: the workflow really moved");
+
+        // History STILL reports the run under production (its snapshot), NOT
+        // sandbox (the workflow's current env).
+        let prod = db
+            .history_read_model(Some("production"), None, None, "-1 day", 100)
+            .unwrap();
+        assert_eq!(
+            prod.rows.len(),
+            1,
+            "the run stays in its creation-time environment (production)"
+        );
+        assert_eq!(prod.rows[0].id, run.id);
+        assert_eq!(
+            prod.rows[0].environment, "production",
+            "read model returns the SNAPSHOT, not the current workflow env"
+        );
+
+        // Filtering by the workflow's NEW env must NOT surface the old run.
+        let sandbox = db
+            .history_read_model(Some("sandbox"), None, None, "-1 day", 100)
+            .unwrap();
+        assert!(
+            sandbox.rows.iter().all(|r| r.id != run.id),
+            "a re-homed workflow must not retroactively re-bucket its old runs"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn percentile_nearest_rank_matches_the_standard_definition() {
+        assert_eq!(percentile_nearest_rank(&[], 95), None);
+        assert_eq!(percentile_nearest_rank(&[42.0], 95), Some(42.0));
+        // [30,60,90,120]: nearest-rank p95 -> rank ceil(0.95*4)=4 -> 120.
+        assert_eq!(
+            percentile_nearest_rank(&[30.0, 60.0, 90.0, 120.0], 95),
+            Some(120.0)
+        );
+        // 100 evenly-spaced values 1..=100: p95 -> the 95th value.
+        let hundred: Vec<f64> = (1..=100).map(|n| n as f64).collect();
+        assert_eq!(percentile_nearest_rank(&hundred, 95), Some(95.0));
+        assert_eq!(percentile_nearest_rank(&hundred, 100), Some(100.0));
     }
 
     #[test]

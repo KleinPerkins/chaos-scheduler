@@ -104,4 +104,33 @@ describe("InfoTip", () => {
     fireEvent.blur(trigger);
     expect(container.firstChild).not.toHaveClass("is-dismissed");
   });
+
+  it("dismisses a pointer-opened tip on Escape without focusing the trigger", () => {
+    const { container } = render(
+      <InfoTip title="Backlog" def="Runs waiting to start." />,
+    );
+    const tip = container.firstChild as HTMLElement;
+    const trigger = screen.getByRole("button", { name: "Backlog" });
+
+    // Open by pointer hover — the trigger stays unfocused, exactly the case the
+    // old trigger-only keydown handler could not dismiss. (jsdom does not apply
+    // the CSS `:hover` reveal, so the open/visible state is asserted via the
+    // absence of `.is-dismissed`; real pixel visibility is covered by the
+    // Playwright a11y e2e.)
+    fireEvent.mouseEnter(tip);
+    expect(trigger).not.toHaveFocus();
+    expect(tip).not.toHaveClass("is-dismissed");
+    // The card is present and describes the trigger while open.
+    expect(screen.getByRole("tooltip")).toHaveTextContent(
+      "Runs waiting to start.",
+    );
+
+    // Escape anywhere (document-level) dismisses the hover-opened card.
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(tip).toHaveClass("is-dismissed");
+
+    // Moving the pointer away re-arms the tip for the next hover.
+    fireEvent.mouseLeave(tip);
+    expect(tip).not.toHaveClass("is-dismissed");
+  });
 });

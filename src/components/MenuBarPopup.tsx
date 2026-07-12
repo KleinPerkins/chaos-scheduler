@@ -141,7 +141,10 @@ export default function MenuBarPopup() {
         <h1 id="popup-title" className="sr-only">
           {PRODUCT_SHORT_NAME}
         </h1>
-        <div className={error ? "popup-loading popup-error" : "popup-loading"}>
+        <div
+          className={error ? "popup-loading popup-error" : "popup-loading"}
+          role={error ? "alert" : undefined}
+        >
           {error ? `Status failed to load: ${error}` : "Loading..."}
         </div>
       </main>

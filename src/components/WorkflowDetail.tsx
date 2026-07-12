@@ -252,15 +252,28 @@ export default function WorkflowDetail({
             <div className="wd-muted">No runs yet for this workflow.</div>
           )}
           {buckets.length > 0 && (
-            <div className="wd-heatmap" aria-label="30-day failure heatmap">
+            <div
+              className="wd-heatmap"
+              role="list"
+              aria-label="30-day failure heatmap"
+            >
               {buckets.map((b) => {
                 const rate = b.total ? b.failed / b.total : 0;
                 const level = rate === 0 ? "ok" : rate < 0.5 ? "warn" : "bad";
+                const summary = `${b.day}: ${b.failed} of ${b.total} runs failed`;
                 return (
                   <span
                     key={b.day}
                     className={`wd-heat-cell ${b.total ? level : "empty"}`}
-                    title={`${b.day}: ${b.failed}/${b.total} failed`}
+                    role="listitem"
+                    // Heatmap cells are non-interactive, but keyboard/switch
+                    // users must reach each day's failure summary (the
+                    // accessible name) without a pointer, so the cells are
+                    // deliberately focusable (cf. GitHub's contribution graph).
+                    // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- intentional data-viz focus affordance
+                    tabIndex={0}
+                    title={summary}
+                    aria-label={summary}
                   />
                 );
               })}
