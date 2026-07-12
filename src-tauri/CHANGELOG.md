@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.3.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v1.2.0...chaos-scheduler-tauri-v1.3.0) (2026-07-12)
+
+
+### Features
+
+* **dashboard:** blocked/waiting reason taxonomy + heavy-blocker Σ-wait ([#194](https://github.com/KleinPerkins/chaos-scheduler/issues/194)) ([328ae2e](https://github.com/KleinPerkins/chaos-scheduler/commit/328ae2e463ffb27935e9c18aefb5f3c1156fcc16))
+* **dashboard:** downstream blast-radius (chain count + depth) per workflow ([#197](https://github.com/KleinPerkins/chaos-scheduler/issues/197)) ([5066530](https://github.com/KleinPerkins/chaos-scheduler/commit/5066530b88bd1a1f5ae0a114be0283455a342b01))
+* **dashboard:** execution slots (running vs configured capacity) per queue + global ([#196](https://github.com/KleinPerkins/chaos-scheduler/issues/196)) ([4699dcc](https://github.com/KleinPerkins/chaos-scheduler/commit/4699dcc6fade2e3cb8dc4595df2912af958a3007))
+* **dashboard:** failure-recurrence per workflow + queue-health signals ([#191](https://github.com/KleinPerkins/chaos-scheduler/issues/191)) ([264f1cf](https://github.com/KleinPerkins/chaos-scheduler/commit/264f1cf648836bf5967e4fac39babbb17b55316f))
+* **dashboard:** queue-utilization history sampler + (env, lookback) series ([#195](https://github.com/KleinPerkins/chaos-scheduler/issues/195)) ([650f2f8](https://github.com/KleinPerkins/chaos-scheduler/commit/650f2f8e1ff23cc0d76a20343e35e5c8bba223e4))
+* **dashboard:** rolling per-workflow p50 + mean runtime baselines ([#192](https://github.com/KleinPerkins/chaos-scheduler/issues/192)) ([ef283f7](https://github.com/KleinPerkins/chaos-scheduler/commit/ef283f7008da6d41fcf0e8421838807a3ebefcc8))
+* **dashboard:** status-distribution counts keyed by (environment, lookback) ([#188](https://github.com/KleinPerkins/chaos-scheduler/issues/188)) ([b951bce](https://github.com/KleinPerkins/chaos-scheduler/commit/b951bcebaa9a3c1ea4232d9f533586508303f116))
+* **dashboard:** success/fail trend buckets keyed by (environment, lookback) ([#189](https://github.com/KleinPerkins/chaos-scheduler/issues/189)) ([7fb79e8](https://github.com/KleinPerkins/chaos-scheduler/commit/7fb79e8a7d641eebbe786f64254c3fe31580aa7b))
+* **dashboard:** wait+runtime trend buckets with 30-day trailing baseline ([#190](https://github.com/KleinPerkins/chaos-scheduler/issues/190)) ([9b579d0](https://github.com/KleinPerkins/chaos-scheduler/commit/9b579d0925003a28220ae372f2e8ef55484f7ed2))
+* **dashboard:** week-over-week KPI deltas (current vs prior equal window) ([#193](https://github.com/KleinPerkins/chaos-scheduler/issues/193)) ([0b4a82a](https://github.com/KleinPerkins/chaos-scheduler/commit/0b4a82a09969b4f60d35a4967d5c59707cf7fbca))
+* **dashboard:** windowed KPI summary keyed by (environment, lookback) ([#187](https://github.com/KleinPerkins/chaos-scheduler/issues/187)) ([94f7ec5](https://github.com/KleinPerkins/chaos-scheduler/commit/94f7ec549cd118fce03f37bb2b2e8bd3f6508d4e))
+* **history:** add lean filtered log-free run-history read model ([#247](https://github.com/KleinPerkins/chaos-scheduler/issues/247)) ([c9db657](https://github.com/KleinPerkins/chaos-scheduler/commit/c9db657d9756ffabc7d8635af0121aedd08c1a60))
+* **history:** snapshot run-time environment provenance (schema v13) ([#251](https://github.com/KleinPerkins/chaos-scheduler/issues/251)) ([d88e928](https://github.com/KleinPerkins/chaos-scheduler/commit/d88e9284dbb39ede28b0c6ad9b90c136c6211e44))
+* **popup:** complete tray mini-dashboard at 384x590 ([#269](https://github.com/KleinPerkins/chaos-scheduler/issues/269)) ([9fc45c8](https://github.com/KleinPerkins/chaos-scheduler/commit/9fc45c81ad78c9de3c51ec7edb9ea9e9c602b292))
+* **scheduler:** route rerun_workflow through admission control ([#263](https://github.com/KleinPerkins/chaos-scheduler/issues/263)) ([1ec0649](https://github.com/KleinPerkins/chaos-scheduler/commit/1ec064973de581b8d26d6801004cfec28df1be51))
+
+
+### Bug Fixes
+
+* **status:** unify run-status canonicalization across KPIs and scheduler gates ([#242](https://github.com/KleinPerkins/chaos-scheduler/issues/242)) ([3b000c9](https://github.com/KleinPerkins/chaos-scheduler/commit/3b000c90ae448bb9e200030bcdf70b3a7269b9f3))
+
 ## [1.2.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v1.1.0...chaos-scheduler-tauri-v1.2.0) (2026-07-10)
 
 

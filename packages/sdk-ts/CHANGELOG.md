@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/KleinPerkins/chaos-scheduler/compare/sdk-ts-v1.0.1...sdk-ts-v1.1.0) (2026-07-12)
+
+
+### Features
+
+* **sdk:** deprecate runWorkflow in favor of enqueueWorkflow ([#265](https://github.com/KleinPerkins/chaos-scheduler/issues/265)) ([4894ec5](https://github.com/KleinPerkins/chaos-scheduler/commit/4894ec5d6bfd5b8f77b4fd47336d077ef106bf70))
+
 ## [1.0.1](https://github.com/KleinPerkins/chaos-scheduler/compare/sdk-ts-v1.0.0...sdk-ts-v1.0.1) (2026-07-07)
 
 
