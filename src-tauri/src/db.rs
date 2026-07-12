@@ -566,6 +566,21 @@ pub struct MissionControlPreferences {
     pub domain_filter: String,
 }
 
+/// Cursor integration preferences (D05 / F10). SAFE BY DEFAULT: `enabled`
+/// defaults to `false` so the human-consent fix-agent dispatch path is opt-in,
+/// and `max_dispatches_per_hour` is a mandatory low global ceiling (default 5)
+/// enforced as defense-in-depth against runaway spend. Persisted as individual
+/// keys in `scheduler_config` (no dedicated table / schema migration).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CursorIntegrationPrefs {
+    pub enabled: bool,
+    pub fix_workflow_id: Option<String>,
+    pub max_dispatches_per_hour: u32,
+}
+
+/// Mandatory low default for the per-hour fix-agent dispatch ceiling.
+pub const CURSOR_INTEGRATION_DEFAULT_MAX_DISPATCHES_PER_HOUR: u32 = 5;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionControlHeader {
     pub active_workflows: i64,
@@ -5970,6 +5985,16 @@ impl Database {
         .optional()
     }
 
+    fn set_string_config(&self, key: &str, value: &str) -> rusqlite::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO scheduler_config (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     /// Public accessor for a scheduler_config string value (used by the HTTP API
     /// to read, e.g., the inbound webhook secret).
     pub fn get_scheduler_config(&self, key: &str) -> rusqlite::Result<Option<String>> {
@@ -6088,6 +6113,52 @@ impl Database {
         }
         tx.commit()?;
         self.get_mission_control_preferences()
+    }
+
+    /// Read the Cursor integration preferences (D05 / F10). Unset / corrupt
+    /// values fall back to the SAFE defaults: disabled, no designated
+    /// fix-agent workflow, and the mandatory low per-hour ceiling.
+    pub fn get_cursor_integration_prefs(&self) -> rusqlite::Result<CursorIntegrationPrefs> {
+        let enabled = self.get_bool_config("cursor_integration.enabled", false)?;
+        let fix_workflow_id = self
+            .get_string_config("cursor_integration.fix_workflow_id")?
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let max_dispatches_per_hour = self
+            .get_string_config("cursor_integration.max_dispatches_per_hour")?
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|v| *v >= 1)
+            .unwrap_or(CURSOR_INTEGRATION_DEFAULT_MAX_DISPATCHES_PER_HOUR);
+        Ok(CursorIntegrationPrefs {
+            enabled,
+            fix_workflow_id,
+            max_dispatches_per_hour,
+        })
+    }
+
+    /// Persist the Cursor integration preferences. The per-hour ceiling is
+    /// floored at 1 as a storage invariant — a stored `0` is indistinguishable
+    /// from "unset" (which silently re-defaults to 5), so it is never allowed;
+    /// the `enabled` toggle is the intended off switch. Clearing the fix
+    /// workflow id stores an empty string, which reads back as `None`.
+    pub fn set_cursor_integration_prefs(
+        &self,
+        enabled: bool,
+        fix_workflow_id: Option<&str>,
+        max_dispatches_per_hour: u32,
+    ) -> rusqlite::Result<CursorIntegrationPrefs> {
+        let max = max_dispatches_per_hour.max(1);
+        self.set_bool_config("cursor_integration.enabled", enabled)?;
+        let normalized_fix = fix_workflow_id
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("");
+        self.set_string_config("cursor_integration.fix_workflow_id", normalized_fix)?;
+        self.set_string_config(
+            "cursor_integration.max_dispatches_per_hour",
+            &max.to_string(),
+        )?;
+        self.get_cursor_integration_prefs()
     }
 
     pub fn validate_queue_cap_lattice(&self) -> rusqlite::Result<Vec<String>> {
@@ -9332,6 +9403,41 @@ SUMMARY_JSON:{\"title\":\"current\"}
         // Corrupt/unrecognized values fall back to the documented default
         // (on) rather than erroring, matching `get_bool_config`'s contract.
         assert_eq!(db.get_updater_preferences().unwrap(), (true, None));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cursor_integration_prefs_default_safe_and_round_trip() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        // SAFE BY DEFAULT: disabled, no designated fix workflow, low ceiling.
+        let prefs = db.get_cursor_integration_prefs().unwrap();
+        assert!(!prefs.enabled);
+        assert_eq!(prefs.fix_workflow_id, None);
+        assert_eq!(prefs.max_dispatches_per_hour, 5);
+
+        // Full round-trip.
+        let saved = db
+            .set_cursor_integration_prefs(true, Some("wf-fix"), 3)
+            .unwrap();
+        assert!(saved.enabled);
+        assert_eq!(saved.fix_workflow_id.as_deref(), Some("wf-fix"));
+        assert_eq!(saved.max_dispatches_per_hour, 3);
+        assert_eq!(db.get_cursor_integration_prefs().unwrap(), saved);
+
+        // A `0` ceiling is floored to 1 (never silently re-defaults to 5).
+        let floored = db
+            .set_cursor_integration_prefs(true, Some("wf-fix"), 0)
+            .unwrap();
+        assert_eq!(floored.max_dispatches_per_hour, 1);
+
+        // Clearing the fix workflow id reads back as None.
+        let cleared = db.set_cursor_integration_prefs(false, None, 5).unwrap();
+        assert!(!cleared.enabled);
+        assert_eq!(cleared.fix_workflow_id, None);
 
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -2099,6 +2099,34 @@ pub fn get_notification_prefs(state: State<AppState>) -> Result<serde_json::Valu
     }))
 }
 
+/// Read the Cursor integration preferences (D05 / F10). SAFE BY DEFAULT:
+/// disabled, no designated fix-agent workflow, low per-hour dispatch ceiling.
+#[tauri::command]
+pub fn get_cursor_integration_prefs(
+    state: State<AppState>,
+) -> Result<crate::db::CursorIntegrationPrefs, String> {
+    state
+        .db
+        .get_cursor_integration_prefs()
+        .map_err(|e| e.to_string())
+}
+
+/// Persist the Cursor integration preferences and return the canonical stored
+/// state (the per-hour ceiling is floored at 1). The fix-agent dispatch path
+/// stays gated on `enabled` (default off) elsewhere; this only stores prefs.
+#[tauri::command]
+pub fn set_cursor_integration_prefs(
+    state: State<AppState>,
+    enabled: bool,
+    fix_workflow_id: Option<String>,
+    max_dispatches_per_hour: u32,
+) -> Result<crate::db::CursorIntegrationPrefs, String> {
+    state
+        .db
+        .set_cursor_integration_prefs(enabled, fix_workflow_id.as_deref(), max_dispatches_per_hour)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn analyze_run_error(
     state: State<AppState>,
