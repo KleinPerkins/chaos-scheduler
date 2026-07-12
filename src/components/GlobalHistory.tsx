@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getGlobalRunHistory } from "../lib/commands";
 import type { Run } from "../lib/commands";
 import { useEnvironments } from "../hooks/useEnvironments";
@@ -9,7 +9,8 @@ import Input from "./Input";
 import RunsTable from "./RunsTable";
 import Select from "./Select";
 import "./RunHistory.css";
-import "./QueueView.css";
+
+const GLOBAL_HISTORY_LIMIT = 100;
 
 interface Props {
   onViewRun: (run: Run) => void;
@@ -21,110 +22,177 @@ export default function GlobalHistory({ onViewRun }: Props) {
   const [statusFilter, setStatusFilter] = useState("all");
   const [triggerKind, setTriggerKind] = useState("all");
   const [environmentFilter, setEnvironmentFilter] = useState("all");
-  const [domainFilter, setDomainFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [reloadToken, setReloadToken] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = () => {
-    setLoading(true);
-    setError(null);
-    getGlobalRunHistory(
-      statusFilter,
-      triggerKind,
-      environmentFilter,
-      domainFilter,
-      100,
-    )
-      .then(setRuns)
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false));
-  };
-
-  // Defer the initial load to a macrotask so load()'s synchronous
-  // setLoading(true)/setError(null) do not run inside the effect body
-  // (avoids react-hooks/set-state-in-effect). Mirrors useSchedulerStatus.
+  // Backend-scoped filters (status / trigger / environment) re-query the indexed
+  // scheduler.db, bounded to the latest 100 runs. The initial fetch is deferred
+  // to a macrotask so the synchronous setLoading/setError don't run inside the
+  // effect body (avoids react-hooks/set-state-in-effect; mirrors other loaders).
   useEffect(() => {
-    const id = setTimeout(load, 0);
-    return () => clearTimeout(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    let cancelled = false;
+    const id = setTimeout(() => {
+      setLoading(true);
+      setError(null);
+      getGlobalRunHistory(
+        statusFilter,
+        triggerKind,
+        environmentFilter,
+        "all",
+        GLOBAL_HISTORY_LIMIT,
+      )
+        .then((rows) => {
+          if (!cancelled) setRuns(rows);
+        })
+        .catch((e) => {
+          if (!cancelled) setError(String(e));
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(id);
+    };
+  }, [statusFilter, triggerKind, environmentFilter, reloadToken]);
+
+  // Search is intentionally a client-side refinement over the loaded rows only —
+  // it never fetches beyond the bounded window, so the contract stays truthful.
+  const query = search.trim().toLowerCase();
+  const visibleRuns = useMemo(() => {
+    if (!query) return runs;
+    return runs.filter(
+      (run) =>
+        (run.workflow_name ?? run.workflow_id).toLowerCase().includes(query) ||
+        run.id.toLowerCase().includes(query),
+    );
+  }, [runs, query]);
+
+  const captionMeta = query
+    ? `${visibleRuns.length} of ${runs.length} loaded`
+    : loading
+      ? "Loading…"
+      : `${runs.length} loaded · newest first`;
 
   return (
-    <div>
+    <section className="global-history" aria-label="Global History">
       <PageHeader
         title="Global History"
-        subtitle="Filter indexed scheduler.db runs across workflows."
+        subtitle={`Latest ${GLOBAL_HISTORY_LIMIT} indexed runs across workflows. Search filters loaded rows only.`}
       />
 
-      <div className="rh-heatmap" style={{ marginBottom: 16 }}>
-        <div className="rh-heatmap-header">
-          <h3>Filters</h3>
-          <span>{runs.length} run(s)</span>
-        </div>
-        <div className="queue-fields">
-          <label>
-            Status
-            <Select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-            >
-              <option value="all">All</option>
-              <option value="running">Running</option>
-              <option value="success">Success</option>
-              <option value="failed">Failed</option>
-              <option value="skipped">Skipped</option>
-              <option value="poll_exhausted">Poll exhausted</option>
-            </Select>
-          </label>
-          <label>
-            Trigger
-            <Select
-              value={triggerKind}
-              onChange={(e) => setTriggerKind(e.target.value)}
-            >
-              <option value="all">All</option>
-              <option value="cron">Cron</option>
-              <option value="manual">Manual</option>
-              <option value="backfill">Backfill</option>
-              <option value="child_workflow">Child workflow</option>
-            </Select>
-          </label>
-          <label>
-            Environment
-            <EnvSelect
-              value={environmentFilter}
-              onChange={(e) => setEnvironmentFilter(e.target.value)}
-              environments={environments}
-              includeAllOption
-            />
-          </label>
-          <label>
-            Domain
-            <Input
-              value={domainFilter}
-              onChange={(e) => setDomainFilter(e.target.value || "all")}
-            />
-          </label>
-          <Button variant="primary" size="sm" onClick={load} disabled={loading}>
-            {loading ? "Loading..." : "Apply"}
-          </Button>
-        </div>
+      <div
+        className="hist-toolbar"
+        role="group"
+        aria-label="Run history filters"
+      >
+        <label className="hist-field hist-field-search">
+          <span className="hist-field-label">Search loaded rows</span>
+          <Input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Workflow or run ID…"
+          />
+        </label>
+        <label className="hist-field">
+          <span className="hist-field-label">Status</span>
+          <Select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+          >
+            <option value="all">All statuses</option>
+            <option value="running">Running</option>
+            <option value="success">Success</option>
+            <option value="failed">Failed</option>
+            <option value="skipped">Skipped</option>
+            <option value="poll_exhausted">Poll exhausted</option>
+          </Select>
+        </label>
+        <label className="hist-field">
+          <span className="hist-field-label">Environment</span>
+          <EnvSelect
+            value={environmentFilter}
+            onChange={(e) => setEnvironmentFilter(e.target.value)}
+            environments={environments}
+            includeAllOption
+          />
+        </label>
+        <label className="hist-field">
+          <span className="hist-field-label">Trigger</span>
+          <Select
+            value={triggerKind}
+            onChange={(e) => setTriggerKind(e.target.value)}
+          >
+            <option value="all">All triggers</option>
+            <option value="cron">Cron</option>
+            <option value="manual">Manual</option>
+            <option value="backfill">Backfill</option>
+            <option value="child_workflow">Child workflow</option>
+          </Select>
+        </label>
+        <span
+          className="hist-bounded"
+          title={`Showing at most the latest ${GLOBAL_HISTORY_LIMIT} runs`}
+        >
+          Latest {GLOBAL_HISTORY_LIMIT}
+        </span>
       </div>
 
       {error ? (
-        <div className="rh-error">
-          <span>Global history failed to load: {error}</span>
-          <Button variant="ghost" size="sm" onClick={load} disabled={loading}>
+        <div className="rh-error" role="alert">
+          <span>History failed to load: {error}</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setReloadToken((n) => n + 1)}
+            disabled={loading}
+          >
             Retry
           </Button>
         </div>
       ) : (
-        <RunsTable
-          runs={runs}
-          emptyLabel="No runs match these filters."
-          onViewRun={onViewRun}
-        />
+        <section
+          className="hist-results"
+          aria-labelledby="global-history-results-title"
+        >
+          <div className="hist-caption">
+            <div className="hist-caption-copy">
+              <h2
+                className="hist-caption-title"
+                id="global-history-results-title"
+              >
+                Latest runs
+              </h2>
+              <span className="hist-caption-meta">{captionMeta}</span>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setReloadToken((n) => n + 1)}
+              disabled={loading}
+            >
+              Refresh
+            </Button>
+          </div>
+          <RunsTable
+            runs={visibleRuns}
+            emptyLabel={
+              query
+                ? "No loaded runs match your search."
+                : "No runs match these filters."
+            }
+            onViewRun={onViewRun}
+          />
+          <p className="hist-footnote">
+            Search filters loaded rows only — older runs beyond the latest{" "}
+            {GLOBAL_HISTORY_LIMIT} aren’t fetched.
+          </p>
+        </section>
       )}
-    </div>
+    </section>
   );
 }

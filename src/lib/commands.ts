@@ -742,6 +742,48 @@ export interface RetentionPreview {
   deleted_runs: number;
 }
 
+/** One lean, LOG-FREE history row from {@link getRunHistoryModel}. Mirrors
+ * `db::HistoryRow` — deliberately has NO `stdout`/`stderr` (fetch a single
+ * run's logs via {@link getRunLog} instead). `environment` is the run's
+ * environment SNAPSHOTTED at creation time (`runs.run_environment`, schema
+ * v13), NOT the owning workflow's current environment — so re-homing a
+ * workflow never re-buckets its history. */
+export interface HistoryRow {
+  id: string;
+  workflow_id: string;
+  workflow_name: string | null;
+  environment: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  exit_code: number | null;
+  trigger_kind: string | null;
+  /** Wall-clock execution seconds; null while the run is still in-flight. */
+  duration_seconds: number | null;
+}
+
+/** Aggregate KPIs for the history read model. Mirrors `db::HistoryKpis`. Counts
+ * derive from the canonical run-status sets, so `ended_not_ok` includes every
+ * non-success terminal status (failed, poll_exhausted, stale, cancelled,
+ * timed_out, …). Computed over the `(environment, workflow, lookback)` scope —
+ * the status filter scopes rows only, never these KPIs. */
+export interface HistoryKpis {
+  total: number;
+  ended_ok: number;
+  ended_not_ok: number;
+  running: number;
+  /** p95 wall-clock seconds over finished runs in scope; null when there are
+   * none. Workflow-scoped when a workflow filter is applied. */
+  p95_duration_seconds: number | null;
+}
+
+/** Filtered history rows plus their aggregate KPIs. Mirrors
+ * `db::HistoryReadModel`. Tauri-IPC-only (no REST/SDK/MCP surface). */
+export interface HistoryReadModel {
+  rows: HistoryRow[];
+  kpis: HistoryKpis;
+}
+
 export interface AvailableScript {
   name: string;
   path: string;
@@ -878,10 +920,6 @@ export function deleteWorkflow(id: string): Promise<void> {
   return invoke("delete_workflow", { id });
 }
 
-export function triggerWorkflow(id: string): Promise<string> {
-  return invoke("trigger_workflow", { id });
-}
-
 export function enqueueWorkflow(
   id: string,
   idempotencyKey?: string,
@@ -889,15 +927,24 @@ export function enqueueWorkflow(
   return invoke("enqueue_workflow", { id, idempotencyKey });
 }
 
+/**
+ * Rerun a workflow (optionally re-running a specific past run's input) THROUGH
+ * scheduler admission control. Like {@link enqueueWorkflow}, this returns a
+ * {@link DispatchOutcome} (`queued` | `admitted` | `duplicate` | `skipped`) —
+ * NOT a bare run-id — because a dependency-gated rerun now queues rather than
+ * spawning immediately, and a reused `idempotencyKey` replays as a duplicate.
+ */
 export function rerunWorkflow(
   workflowId: string,
   sourceRunId?: string,
   inputOverrideJson?: string,
-): Promise<string> {
+  idempotencyKey?: string,
+): Promise<DispatchOutcome> {
   return invoke("rerun_workflow", {
     workflowId,
     sourceRunId,
     inputOverrideJson,
+    idempotencyKey,
   });
 }
 
@@ -973,6 +1020,28 @@ export function getGlobalRunHistory(
     triggerKind,
     environmentFilter,
     domainFilter,
+    limit,
+  });
+}
+
+/** Lean, LOG-FREE history read model backing the filtered history table + its
+ * KPI header: rows (never stdout/stderr) plus aggregate KPIs. The status filter
+ * scopes the ROWS only — the KPIs always report the full breakdown for the
+ * `(environment, workflow, lookback)` scope. `lookback` accepts the shared
+ * dashboard grammar (`1d`/`3d`/`7d`/`30d`/`<n>h`/`all`) and defaults to `1d`;
+ * p95 duration is workflow-scoped when a workflow filter is applied. */
+export function getRunHistoryModel(
+  environmentFilter = "all",
+  workflowFilter = "all",
+  statusFilter = "all",
+  lookback = "1d",
+  limit = 200,
+): Promise<HistoryReadModel> {
+  return invoke("get_run_history_model", {
+    environmentFilter,
+    workflowFilter,
+    statusFilter,
+    lookback,
     limit,
   });
 }

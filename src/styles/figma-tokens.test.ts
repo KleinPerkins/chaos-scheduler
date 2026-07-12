@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import figmaTokens from "../../figma-tokens.json";
@@ -57,14 +60,26 @@ const themeScopes = [
   ["Light", light],
 ] as const;
 
-/** The two `*-rgb` CSS companions that are intentionally NOT separate variables. */
+/**
+ * The `*-rgb` CSS companions that are intentionally NOT separate variables:
+ * they mirror a base color's hex as a triplet for `rgba(var(--x-rgb), α)`. The
+ * two surface/brand companions plus the eight categorical data-viz series.
+ */
 const RGB_COMPANIONS: ReadonlyArray<readonly [string, string]> = [
   ["bg-primary", "bg-primary-rgb"],
   ["accent", "accent-rgb"],
+  ["chart-1", "chart-1-rgb"],
+  ["chart-2", "chart-2-rgb"],
+  ["chart-3", "chart-3-rgb"],
+  ["chart-4", "chart-4-rgb"],
+  ["chart-5", "chart-5-rgb"],
+  ["chart-6", "chart-6-rgb"],
+  ["chart-7", "chart-7-rgb"],
+  ["chart-8", "chart-8-rgb"],
 ];
 
 const EXPECTED_COUNTS: Record<string, number> = {
-  "cs.color": 29,
+  "cs.color": 37,
   "cs.space": 7,
   "cs.radius": 2,
   "cs.type": 10,
@@ -107,12 +122,81 @@ function parseShadowColor(shadow: string): ColorValue {
   return { hex, alpha };
 }
 
+type Rgb = readonly [number, number, number];
+
+function parseHex(hex: string): Rgb {
+  return [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)) as [
+    number,
+    number,
+    number,
+  ];
+}
+
+function parseTriplet(value: string): Rgb {
+  return value.split(",").map(Number) as [number, number, number];
+}
+
+function composite(foreground: Rgb, background: Rgb, alpha: number): Rgb {
+  return foreground.map((channel, i) =>
+    Math.round(channel * alpha + background[i] * (1 - alpha)),
+  ) as [number, number, number];
+}
+
+function relativeLuminance(color: Rgb): number {
+  const [r, g, b] = color.map((channel) => {
+    const value = channel / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrastRatio(foreground: Rgb, background: Rgb): number {
+  const lighter = Math.max(
+    relativeLuminance(foreground),
+    relativeLuminance(background),
+  );
+  const darker = Math.min(
+    relativeLuminance(foreground),
+    relativeLuminance(background),
+  );
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
 function colorVarByCss(name: string): FigmaVariable {
   const found = collection("cs.color").variables.find(
     (v) => cssName(v) === name,
   );
   if (!found) throw new Error(`Missing cs.color variable for --${name}`);
   return found;
+}
+
+const infoTipCss = readFileSync(
+  resolve(process.cwd(), "src/components/InfoTip.css"),
+  "utf8",
+);
+
+/** Body of a single CSS rule matched by EXACT selector (comments stripped). */
+function cssRuleBody(css: string, selector: string): string {
+  const clean = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  for (const chunk of clean.split("}")) {
+    const brace = chunk.indexOf("{");
+    if (brace === -1) continue;
+    const selectors = chunk
+      .slice(0, brace)
+      .split(",")
+      .map((s) => s.trim());
+    if (selectors.includes(selector)) return chunk.slice(brace + 1);
+  }
+  throw new Error(`No CSS rule found for selector ${selector}`);
+}
+
+/** Resolve `<prop>: var(--x)` inside a rule body to the token name `x`. */
+function boundToken(body: string, prop: string): string {
+  const m = body.match(
+    new RegExp(`(?:^|[;{\\s])${prop}:\\s*var\\(--([\\w-]+)\\)`),
+  );
+  if (!m) throw new Error(`No ${prop}: var(--…) in rule body`);
+  return m[1];
 }
 
 describe("figma-tokens manifest", () => {
@@ -128,7 +212,7 @@ describe("figma-tokens manifest", () => {
       (n, c) => n + c.variables.length,
       0,
     );
-    expect(total).toBe(54);
+    expect(total).toBe(62);
   });
 
   it("every variable is well-formed (type, scopes, WEB code syntax, per-mode values)", () => {
@@ -161,6 +245,50 @@ describe("figma-tokens manifest", () => {
           expect(mv.hex, `${v.name} @ ${mode}`).toBe(scope[name].toLowerCase());
         }
       }
+    }
+  });
+
+  it("status text keeps WCAG AA contrast over tinted badge surfaces", () => {
+    const statuses = ["success", "error", "warning", "running"] as const;
+    const surfaces = [
+      "bg-primary",
+      "bg-secondary",
+      "bg-tertiary",
+      "bg-hover",
+      "bg-elevated",
+    ] as const;
+
+    for (const [mode, scope] of themeScopes) {
+      for (const status of statuses) {
+        const text = parseHex(scope[`${status}-text`]);
+        const tint = parseTriplet(scope[`${status}-rgb`]);
+        for (const surface of surfaces) {
+          const badge = composite(tint, parseHex(scope[surface]), 0.22);
+          expect(
+            contrastRatio(text, badge),
+            `${status}-text on 22% ${status} tint over ${surface} @ ${mode}`,
+          ).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+    }
+  });
+
+  it("keeps the InfoTip glyph at WCAG AA over its trigger surface", () => {
+    // Discover the tokens the trigger ACTUALLY binds so this fails if the glyph
+    // color regresses to a low-contrast token — e.g. --accent, which is only
+    // ~2.82:1 on the dark --bg-tertiary surface (fails 1.4.3) — instead of
+    // pinning a hard-coded pair the CSS could silently drift away from.
+    const trigger = cssRuleBody(infoTipCss, ".info-tip-trigger");
+    const fg = boundToken(trigger, "color");
+    const bg = boundToken(trigger, "background");
+
+    // The glyph is small text (18px circle, --font-size-xs), so AA is 4.5:1 in
+    // BOTH themes, not the 3:1 large-text bar.
+    for (const [mode, scope] of themeScopes) {
+      expect(
+        contrastRatio(parseHex(scope[fg]), parseHex(scope[bg])),
+        `--${fg} on --${bg} @ ${mode}`,
+      ).toBeGreaterThanOrEqual(4.5);
     }
   });
 

@@ -1,17 +1,30 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import {
   getRunHistory,
   getWorkflowHistoryBuckets,
   rerunWorkflow,
+  environmentOf,
 } from "../lib/commands";
 import { openExternalSafe } from "../lib/openExternalSafe";
+import {
+  queueWorkflowRun,
+  formatWorkflowQueueOutcome,
+  formatWorkflowQueueError,
+} from "../lib/workflowEnqueue";
 import RerunModal from "./RerunModal";
 import type { Run, Workflow, WorkflowHistoryBucket } from "../lib/commands";
-import { formatRunStatusLabel } from "../lib/runStatus";
+import { formatRunStatusLabel, statusKey } from "../lib/runStatus";
+import { formatDurationBetween } from "../lib/duration";
 import Button from "./Button";
 import PageHeader from "./PageHeader";
+import Input from "./Input";
+import Select from "./Select";
 import StatusBadge from "./StatusBadge";
+import Notice from "./ui/Notice";
+import { cronToHuman } from "./ScheduleBuilder";
 import "./RunHistory.css";
+
+const WORKFLOW_HISTORY_LIMIT = 50;
 
 interface Props {
   workflow: Workflow;
@@ -21,11 +34,7 @@ interface Props {
 
 function formatDuration(start: string, end: string | null): string {
   if (!end) return "running...";
-  const ms = new Date(end).getTime() - new Date(start).getTime();
-  const secs = Math.floor(ms / 1000);
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  return `${mins}m ${secs % 60}s`;
+  return formatDurationBetween(start, end);
 }
 
 function formatDate(iso: string): string {
@@ -41,10 +50,22 @@ function formatDate(iso: string): string {
   );
 }
 
+function formatBucketDay(day: string): string {
+  const match = /^\d{4}-\d{2}-(\d{2})$/.exec(day);
+  return match ? String(Number(match[1])) : day;
+}
+
 export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
   const [runs, setRuns] = useState<Run[]>([]);
   const [buckets, setBuckets] = useState<WorkflowHistoryBucket[]>([]);
   const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<{
+    text: string;
+    type: "success" | "error";
+  } | null>(null);
   const [rerunning, setRerunning] = useState<string | null>(null);
   const [rerunTarget, setRerunTarget] = useState<Run | null>(null);
   const [rerunError, setRerunError] = useState<string | null>(null);
@@ -54,7 +75,7 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
     setLoading(true);
     setError(null);
     return Promise.all([
-      getRunHistory(workflow.id, 50).then(setRuns),
+      getRunHistory(workflow.id, WORKFLOW_HISTORY_LIMIT).then(setRuns),
       getWorkflowHistoryBuckets(workflow.id, 30).then(setBuckets),
     ])
       .catch((e) => {
@@ -71,13 +92,41 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
     return () => clearTimeout(id);
   }, [refreshRuns]);
 
+  const handleEnqueue = async () => {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const outcome = await queueWorkflowRun(workflow.id);
+      setNotice({
+        text: formatWorkflowQueueOutcome(workflow.name, outcome),
+        type: "success",
+      });
+      await refreshRuns();
+    } catch (e) {
+      setNotice({
+        text: formatWorkflowQueueError(workflow.name, e),
+        type: "error",
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submitRerun = async (input: string) => {
     if (!rerunTarget) return;
     setRerunning(rerunTarget.id);
     setRerunError(null);
     try {
-      await rerunWorkflow(workflow.id, rerunTarget.id, input);
+      // Rerun routes through admission control now, so it may QUEUE (or replay
+      // as a duplicate) rather than start immediately. Surface the same
+      // outcome feedback the "Queue run" path shows so a queued rerun is not
+      // silently invisible to the user.
+      const outcome = await rerunWorkflow(workflow.id, rerunTarget.id, input);
       setRerunTarget(null);
+      setNotice({
+        text: formatWorkflowQueueOutcome(workflow.name, outcome),
+        type: "success",
+      });
       await refreshRuns();
     } catch (e) {
       setRerunError(String(e));
@@ -86,22 +135,67 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
     }
   };
 
+  // Status + search both refine the loaded rows only (the latest 50 for this
+  // workflow) — no refetch, so the bounded contract stays truthful.
+  const query = search.trim().toLowerCase();
+  const visibleRuns = useMemo(() => {
+    return runs.filter((run) => {
+      if (statusFilter !== "all" && statusKey(run.status) !== statusFilter) {
+        return false;
+      }
+      if (!query) return true;
+      const haystack =
+        `${run.id} ${formatRunStatusLabel(run.status)} ${run.trigger_kind ?? "cron"}`.toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [runs, statusFilter, query]);
+
+  const filtering = statusFilter !== "all" || query.length > 0;
+  const captionMeta = filtering
+    ? `${visibleRuns.length} of ${runs.length} loaded`
+    : `${runs.length} loaded · newest first`;
+
+  const envLabel = (() => {
+    const env = environmentOf(workflow);
+    return env.charAt(0).toUpperCase() + env.slice(1);
+  })();
+  const subtitle = `Latest ${WORKFLOW_HISTORY_LIMIT} runs · ${envLabel} · ${cronToHuman(workflow.cron_schedule)} · 30 calendar-day failure buckets`;
+
   return (
-    <div>
+    <section
+      className="run-history"
+      aria-label={`${workflow.name} run history`}
+    >
       <PageHeader
-        title={workflow.name}
-        subtitle="Run History"
+        title={`${workflow.name} run history`}
+        subtitle={subtitle}
         actions={
-          <Button variant="ghost" onClick={onBack}>
-            &larr; Back
-          </Button>
+          <div className="rh-header-actions">
+            <Button variant="ghost" onClick={onBack}>
+              &larr; Workflow details
+            </Button>
+            <Button
+              variant="primary"
+              onClick={handleEnqueue}
+              disabled={busy}
+              title="Queue through scheduler admission control"
+            >
+              {busy ? "Submitting…" : "Queue run"}
+            </Button>
+          </div>
         }
       />
+
+      {notice && (
+        <Notice variant={notice.type} onDismiss={() => setNotice(null)}>
+          {notice.text}
+        </Notice>
+      )}
 
       {loading ? (
         <div className="rh-loading">Loading...</div>
       ) : error ? (
-        <div className="rh-error">
+        <div className="rh-error" role="alert">
           <span>Run history failed to load: {error}</span>
           <Button variant="ghost" size="sm" onClick={() => void refreshRuns()}>
             Retry
@@ -111,14 +205,24 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
         <div className="rh-empty">No runs yet for this workflow.</div>
       ) : (
         <>
-          <div className="rh-heatmap">
+          <section
+            className="rh-heatmap"
+            aria-labelledby="workflow-failure-history-title"
+          >
             <div className="rh-heatmap-header">
-              <h3>30-day failure heatmap</h3>
+              <h2 id="workflow-failure-history-title">
+                30-day failure history
+              </h2>
               <span>
-                {buckets.reduce((sum, b) => sum + b.failed, 0)} failed runs
+                {buckets.reduce((sum, b) => sum + b.failed, 0)} failed runs ·{" "}
+                {buckets.length} calendar-day buckets
               </span>
             </div>
-            <div className="rh-heatmap-grid">
+            <div
+              className="rh-heatmap-grid"
+              role="list"
+              aria-label="Daily failure buckets, oldest to newest"
+            >
               {buckets.map((bucket) => {
                 const failureRate = bucket.total
                   ? bucket.failed / bucket.total
@@ -129,87 +233,167 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
                   <div
                     key={bucket.day}
                     className={`rh-heatmap-cell ${level}`}
-                    title={`${bucket.day}: ${bucket.failed}/${bucket.total} failed`}
+                    role="listitem"
+                    // Heatmap cells are non-interactive, but keyboard/switch
+                    // users must reach each day's failure summary (the
+                    // accessible name) without a pointer, so the cells are
+                    // deliberately focusable (cf. GitHub's contribution graph).
+                    // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- intentional data-viz focus affordance
+                    tabIndex={0}
+                    title={`${bucket.day}: ${bucket.failed} of ${bucket.total} runs failed`}
+                    aria-label={`${bucket.day}: ${bucket.failed} of ${bucket.total} runs failed`}
                   >
-                    <span>{new Date(bucket.day).getDate()}</span>
+                    <span>{formatBucketDay(bucket.day)}</span>
                   </div>
                 );
               })}
             </div>
+            <div className="rh-heatmap-bounds" aria-hidden="true">
+              <span>Oldest</span>
+              <span>Today</span>
+            </div>
+          </section>
+
+          <div
+            className="hist-toolbar hist-toolbar--workflow"
+            role="group"
+            aria-label="Workflow run history filters"
+          >
+            <label className="hist-field hist-field-search">
+              <span className="hist-field-label">Search loaded rows</span>
+              <Input
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Run ID, status, or trigger…"
+              />
+            </label>
+            <label className="hist-field">
+              <span className="hist-field-label">Status</span>
+              <Select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+              >
+                <option value="all">All statuses</option>
+                <option value="running">Running</option>
+                <option value="success">Success</option>
+                <option value="failed">Failed</option>
+                <option value="skipped">Skipped</option>
+                <option value="poll_exhausted">Poll exhausted</option>
+              </Select>
+            </label>
+            <span
+              className="hist-bounded"
+              title={`Showing at most the latest ${WORKFLOW_HISTORY_LIMIT} runs`}
+            >
+              Latest {WORKFLOW_HISTORY_LIMIT}
+            </span>
           </div>
-          <table className="rh-table">
-            <thead>
-              <tr>
-                <th>Status</th>
-                <th>Started</th>
-                <th>Duration</th>
-                <th>Exit Code</th>
-                <th>Trigger</th>
-                <th>Result</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {runs.map((run) => (
-                <tr key={run.id}>
-                  <td>
-                    <StatusBadge status={run.status}>
-                      {formatRunStatusLabel(run.status)}
-                    </StatusBadge>
-                  </td>
-                  <td>{formatDate(run.started_at)}</td>
-                  <td>{formatDuration(run.started_at, run.finished_at)}</td>
-                  <td className="rh-exit">
-                    {run.exit_code !== null ? run.exit_code : "—"}
-                  </td>
-                  <td>
-                    <span className="rh-trigger-kind">
-                      {run.trigger_kind ?? "cron"}
-                    </span>
-                  </td>
-                  <td>
-                    {run.result_url ? (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => {
-                          void openExternalSafe(run.result_url!);
-                        }}
-                      >
-                        Open
-                      </Button>
-                    ) : (
-                      "—"
-                    )}
-                  </td>
-                  <td>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => onViewLog(run.id)}
-                      aria-label={`View details for ${run.status} run started ${formatDate(run.started_at)}`}
-                    >
-                      Details
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={
-                        rerunning === run.id || run.status === "running"
-                      }
-                      onClick={() => {
-                        setRerunError(null);
-                        setRerunTarget(run);
-                      }}
-                      aria-label={`Rerun ${run.status} run started ${formatDate(run.started_at)}`}
-                    >
-                      {rerunning === run.id ? "Rerunning..." : "Rerun"}
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+
+          <section
+            className="hist-results"
+            aria-labelledby="workflow-history-results-title"
+          >
+            <div className="hist-caption">
+              <div className="hist-caption-copy">
+                <h2
+                  className="hist-caption-title"
+                  id="workflow-history-results-title"
+                >
+                  Latest runs
+                </h2>
+                <span className="hist-caption-meta">{captionMeta}</span>
+              </div>
+            </div>
+
+            {visibleRuns.length === 0 ? (
+              <div className="rh-empty">No loaded runs match your filters.</div>
+            ) : (
+              <table className="rh-table">
+                <caption className="sr-only">
+                  Latest runs for {workflow.name}
+                </caption>
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Started</th>
+                    <th>Duration</th>
+                    <th>Exit Code</th>
+                    <th>Trigger</th>
+                    <th>Result</th>
+                    <th>
+                      <span className="sr-only">Actions</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleRuns.map((run) => (
+                    <tr key={run.id}>
+                      <td>
+                        <StatusBadge status={run.status}>
+                          {formatRunStatusLabel(run.status)}
+                        </StatusBadge>
+                      </td>
+                      <td>{formatDate(run.started_at)}</td>
+                      <td>{formatDuration(run.started_at, run.finished_at)}</td>
+                      <td className="rh-exit">
+                        {run.exit_code !== null ? run.exit_code : "—"}
+                      </td>
+                      <td>
+                        <span className="rh-trigger-kind">
+                          {run.trigger_kind ?? "cron"}
+                        </span>
+                      </td>
+                      <td>
+                        {run.result_url ? (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              void openExternalSafe(run.result_url!);
+                            }}
+                          >
+                            Open
+                          </Button>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => onViewLog(run.id)}
+                          aria-label={`View details for ${run.status} run started ${formatDate(run.started_at)}`}
+                        >
+                          Details
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={
+                            rerunning === run.id || run.status === "running"
+                          }
+                          onClick={() => {
+                            setRerunError(null);
+                            setRerunTarget(run);
+                          }}
+                          aria-label={`Rerun ${run.status} run started ${formatDate(run.started_at)}`}
+                        >
+                          {rerunning === run.id ? "Rerunning..." : "Rerun"}
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            <p className="hist-footnote">
+              Search and status filter the loaded rows only — the latest{" "}
+              {WORKFLOW_HISTORY_LIMIT} runs for this workflow, newest first.
+            </p>
+          </section>
         </>
       )}
       {rerunTarget && (
@@ -227,6 +411,6 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
           onSubmit={(input) => void submitRerun(input)}
         />
       )}
-    </div>
+    </section>
   );
 }

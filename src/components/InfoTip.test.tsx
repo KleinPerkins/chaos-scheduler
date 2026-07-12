@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import InfoTip, { type GlossaryRow } from "./InfoTip";
 
 afterEach(cleanup);
@@ -70,5 +76,61 @@ describe("InfoTip", () => {
     expect((container.firstChild as HTMLElement).className).toBe(
       "info-tip mc-infotip",
     );
+  });
+
+  it("dismisses on Escape while keeping focus on the trigger", () => {
+    const { container } = render(
+      <InfoTip title="p50" def="Historical median runtime." />,
+    );
+    const trigger = screen.getByRole("button", { name: "p50" });
+    trigger.focus();
+    expect(trigger).toHaveFocus();
+
+    fireEvent.keyDown(trigger, { key: "Escape" });
+
+    // Card is hidden (via the dismissed-state class) but focus is retained,
+    // per the APG tooltip pattern: Escape dismisses without moving focus.
+    expect(container.firstChild).toHaveClass("is-dismissed");
+    expect(trigger).toHaveFocus();
+  });
+
+  it("re-arms the tooltip once focus leaves the trigger", () => {
+    const { container } = render(<InfoTip title="p50" def="d" />);
+    const trigger = screen.getByRole("button", { name: "p50" });
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: "Escape" });
+    expect(container.firstChild).toHaveClass("is-dismissed");
+
+    fireEvent.blur(trigger);
+    expect(container.firstChild).not.toHaveClass("is-dismissed");
+  });
+
+  it("dismisses a pointer-opened tip on Escape without focusing the trigger", () => {
+    const { container } = render(
+      <InfoTip title="Backlog" def="Runs waiting to start." />,
+    );
+    const tip = container.firstChild as HTMLElement;
+    const trigger = screen.getByRole("button", { name: "Backlog" });
+
+    // Open by pointer hover — the trigger stays unfocused, exactly the case the
+    // old trigger-only keydown handler could not dismiss. (jsdom does not apply
+    // the CSS `:hover` reveal, so the open/visible state is asserted via the
+    // absence of `.is-dismissed`; real pixel visibility is covered by the
+    // Playwright a11y e2e.)
+    fireEvent.mouseEnter(tip);
+    expect(trigger).not.toHaveFocus();
+    expect(tip).not.toHaveClass("is-dismissed");
+    // The card is present and describes the trigger while open.
+    expect(screen.getByRole("tooltip")).toHaveTextContent(
+      "Runs waiting to start.",
+    );
+
+    // Escape anywhere (document-level) dismisses the hover-opened card.
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(tip).toHaveClass("is-dismissed");
+
+    // Moving the pointer away re-arms the tip for the next hover.
+    fireEvent.mouseLeave(tip);
+    expect(tip).not.toHaveClass("is-dismissed");
   });
 });

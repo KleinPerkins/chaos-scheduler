@@ -3,11 +3,11 @@ use crate::db::{
     DashboardKpiSummary, DashboardQueueHealthSummary, DashboardQueueUtilizationHistory,
     DashboardStatusCount, DashboardTrendSeries, DashboardWaitRuntimeTrend,
     DashboardWorkflowBaseline, DashboardWorkflowFailureCount, Database, EmailConfig, EmailProfile,
-    MissionControlNeedsAttentionItem, MissionControlPanelAvailability, MissionControlPreferences,
-    MissionControlSnapshot, MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun,
-    RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask, SchedulerAsset,
-    SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
-    WorkflowResourceSample, WorkflowTokenUsageRollup,
+    HistoryReadModel, MissionControlNeedsAttentionItem, MissionControlPanelAvailability,
+    MissionControlPreferences, MissionControlSnapshot, MissionControlUpcomingRun, NextRun,
+    QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask,
+    SchedulerAsset, SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow,
+    WorkflowHistoryBucket, WorkflowResourceSample, WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use crate::service::{SchedulerService, WorkflowDraft};
@@ -436,189 +436,89 @@ pub fn create_api_key(
 }
 
 #[tauri::command]
-pub fn trigger_workflow(state: State<AppState>, id: String) -> Result<String, String> {
-    state
-        .service
-        .ensure_workflow_execution_allowed(&id)
-        .map_err(|e| e.to_string())?;
-    let result = scheduler::execute_workflow_with_context(
-        &state.db,
-        &state.workspace_root,
-        &state.python_path,
-        &id,
-        true,
-        true,
-        false,
-        Some("manual"),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )?;
-    if result.completed {
-        scheduler::trigger_on_completion(
-            &state.db,
-            &state.workspace_root,
-            &state.python_path,
-            &id,
-            &result.run_id,
-            result.success,
-            true,
-            true,
-            false,
-        );
-    }
-    Ok(result.run_id)
-}
-
-#[tauri::command]
 pub fn enqueue_workflow(
     state: State<AppState>,
     id: String,
     idempotency_key: Option<String>,
 ) -> Result<scheduler::DispatchOutcome, String> {
-    use crate::db::IdempotencyReservation;
-    use scheduler::NonCronDispatchOptions;
-    use sha2::{Digest, Sha256};
-
+    // Centralized admission choke point: gate + idempotency + dispatch. The
+    // desktop enqueue path carries no payload/rerun context, so the fingerprint
+    // reduces to the historic `id + "ui_enqueue"` digest.
     state
         .service
-        .ensure_workflow_execution_allowed(&id)
-        .map_err(|e| e.to_string())?;
-
-    let trigger_kind = "ui_enqueue";
-    let fingerprint = idempotency_key.as_ref().map(|_| {
-        let mut hasher = Sha256::new();
-        hasher.update(id.as_bytes());
-        hasher.update([0]);
-        hasher.update(trigger_kind.as_bytes());
-        hasher.update([0]);
-        hex::encode(hasher.finalize())
-    });
-
-    if let (Some(key), Some(fp)) = (&idempotency_key, &fingerprint) {
-        match state
-            .db
-            .reserve_idempotency_key(key, &id, fp)
-            .map_err(|e| e.to_string())?
-        {
-            IdempotencyReservation::Reserved => {}
-            IdempotencyReservation::Existing(record) => {
-                if let Some(existing) = record.request_fingerprint.as_deref() {
-                    if existing != fp.as_str() {
-                        return Err(
-                            "idempotency key was already used for a different request".into()
-                        );
-                    }
-                }
-                return Ok(scheduler::DispatchOutcome {
-                    workflow_id: id,
-                    status: "duplicate".to_string(),
-                    run_id: record.run_id,
-                    queued_run_id: record.queued_run_id,
-                    queue_name: String::new(),
-                    trigger_kind: Some(trigger_kind.to_string()),
-                    trigger_payload: None,
-                    reason: Some("idempotent replay".to_string()),
-                });
-            }
-        }
-    }
-
-    let options = NonCronDispatchOptions {
-        notify_on_success: false,
-        notify_on_failure: true,
-        email_on_failure_enabled: false,
-        trigger_kind,
-        trigger_payload: None,
-        upstream_run_id: None,
-        input_json: None,
-        rerun_of_run_id: None,
-        suppress_completion_triggers: false,
-        dedupe: false,
-        app_handle: None,
-    };
-
-    let outcome = match scheduler::dispatch_non_cron_workflow(
-        &state.db,
-        &state.workspace_root,
-        &state.python_path,
-        &id,
-        options,
-    ) {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            if let (Some(key), Some(fp)) = (&idempotency_key, &fingerprint) {
-                let _ = state.db.delete_idempotency_reservation(key, fp);
-            }
-            return Err(e);
-        }
-    };
-
-    if let Some(key) = &idempotency_key {
-        let _ = state.db.complete_idempotency_key(
-            key,
-            outcome.run_id.as_deref(),
-            outcome.queued_run_id.as_deref(),
-            &outcome.status,
-        );
-    }
-
-    Ok(outcome)
+        .dispatch_manual_run(
+            &state.workspace_root,
+            &state.python_path,
+            &id,
+            "ui_enqueue",
+            idempotency_key.as_deref(),
+            None,
+            None,
+            None,
+        )
+        .map_err(|e| e.to_string())
 }
 
+/// Re-run a workflow. Routed through the shared admission choke point
+/// ([`SchedulerService::dispatch_manual_run`]) so a rerun respects dependency
+/// and capacity gating (it queues instead of spawning immediately) and honors
+/// an optional idempotency key — the same policy as the desktop enqueue and the
+/// REST run/enqueue/rerun/webhook handlers.
 #[tauri::command]
 pub fn rerun_workflow(
     state: State<AppState>,
     workflow_id: String,
     source_run_id: Option<String>,
     input_override_json: Option<String>,
-) -> Result<String, String> {
+    idempotency_key: Option<String>,
+) -> Result<scheduler::DispatchOutcome, String> {
+    dispatch_rerun(
+        &state.service,
+        &state.workspace_root,
+        &state.python_path,
+        workflow_id,
+        source_run_id,
+        input_override_json,
+        idempotency_key,
+    )
+}
+
+/// Build the rerun trigger payload and route it through admission control.
+/// Extracted from the Tauri command so it is unit-testable without a
+/// `State<AppState>`. The `ui_rerun` trigger kind and the source run id
+/// (carried as `rerun_of`) mirror the REST `api_rerun` handler.
+fn dispatch_rerun(
+    service: &SchedulerService,
+    workspace_root: &str,
+    python_path: &str,
+    workflow_id: String,
+    source_run_id: Option<String>,
+    input_override_json: Option<String>,
+    idempotency_key: Option<String>,
+) -> Result<scheduler::DispatchOutcome, String> {
     if let Some(input) = &input_override_json {
         serde_json::from_str::<serde_json::Value>(input)
             .map_err(|e| format!("Invalid input override JSON: {}", e))?;
     }
-    state
-        .service
-        .ensure_workflow_execution_allowed(&workflow_id)
-        .map_err(|e| e.to_string())?;
     let payload = serde_json::json!({
         "source_run_id": source_run_id,
-        "input_override": input_override_json.as_ref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
+        "input_override": input_override_json
+            .as_ref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
     })
     .to_string();
-    let result = scheduler::execute_workflow_with_context(
-        &state.db,
-        &state.workspace_root,
-        &state.python_path,
-        &workflow_id,
-        true,
-        true,
-        false,
-        Some("manual"),
-        Some(&payload),
-        None,
-        input_override_json.as_deref(),
-        source_run_id.as_deref(),
-        None,
-        None,
-    )?;
-    if result.completed {
-        scheduler::trigger_on_completion(
-            &state.db,
-            &state.workspace_root,
-            &state.python_path,
+    service
+        .dispatch_manual_run(
+            workspace_root,
+            python_path,
             &workflow_id,
-            &result.run_id,
-            result.success,
-            true,
-            true,
-            false,
-        );
-    }
-    Ok(result.run_id)
+            "ui_rerun",
+            idempotency_key.as_deref(),
+            Some(&payload),
+            source_run_id.as_deref(),
+            input_override_json.as_deref(),
+        )
+        .map_err(|e| e.to_string())
 }
 
 fn parse_backfill_dt(value: &str) -> Result<DateTime<Utc>, String> {
@@ -918,6 +818,44 @@ pub fn get_global_run_history(
             environment_filter.as_deref(),
             domain_filter.as_deref(),
             limit.unwrap_or(100),
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// Lean, LOG-FREE history read model backing the filtered history table + its
+/// KPI header: rows (never `stdout`/`stderr`) plus aggregate KPIs
+/// `{ total, endedOk, endedNotOk, running, p95Duration }`. Keyed by
+/// `(environmentFilter, workflowFilter, statusFilter, lookback)`, all optional
+/// (omit or `"all"` to disable a filter). The status filter scopes the ROWS
+/// only — the KPIs always report the full breakdown for the
+/// `(environment, workflow, lookback)` scope so the header is stable as the
+/// table is filtered. `lookback` accepts the shared dashboard grammar (`1d`,
+/// `3d`, `7d`, `30d`, `<n>h`, `all`) and defaults to `1d`; p95 duration is
+/// workflow-scoped whenever a workflow filter is applied. Tauri-IPC-only (no
+/// REST/SDK/MCP surface). Environment provenance is SNAPSHOTTED at run creation
+/// time (schema v13), not the current workflow env — see
+/// [`Database::history_read_model`].
+#[tauri::command]
+pub fn get_run_history_model(
+    state: State<AppState>,
+    environment_filter: Option<String>,
+    workflow_filter: Option<String>,
+    status_filter: Option<String>,
+    lookback: Option<String>,
+    limit: Option<i64>,
+) -> Result<HistoryReadModel, String> {
+    let (window_modifier, _window_seconds) = parse_lookback(lookback.as_deref())?;
+    let environment_filter = normalize_all_filter(environment_filter);
+    let workflow_filter = normalize_all_filter(workflow_filter);
+    let status_filter = normalize_all_filter(status_filter);
+    state
+        .db
+        .history_read_model(
+            Some(&environment_filter),
+            Some(&workflow_filter),
+            Some(&status_filter),
+            &window_modifier,
+            limit.unwrap_or(200),
         )
         .map_err(|e| e.to_string())
 }
@@ -1350,6 +1288,19 @@ fn normalize_time_bucket(value: Option<&str>) -> Result<String, String> {
 /// Normalize a mission-control environment filter. Environments are
 /// user-managed, so any non-empty value is passed through as the partition to
 /// filter on; empty / "all" means no environment filter.
+/// Normalize an optional `(all | <value>)` filter token: trim it, and map an
+/// empty string or a case-insensitive `"all"` to the `"all"` sentinel the read
+/// model uses to disable a filter. Used by [`get_run_history_model`] for its
+/// environment/workflow/status filters.
+fn normalize_all_filter(value: Option<String>) -> String {
+    match value {
+        Some(v) if !v.trim().is_empty() && !v.trim().eq_ignore_ascii_case("all") => {
+            v.trim().to_string()
+        }
+        _ => "all".to_string(),
+    }
+}
+
 fn normalize_mission_environment_filter(value: Option<String>, default: &str) -> String {
     let raw = value.unwrap_or_else(|| default.to_string());
     let trimmed = raw.trim();
@@ -2368,5 +2319,106 @@ pub fn send_email_alert(
     match crate::email::send_email(config, &config.alert_email, &subject, &body) {
         Ok(()) => Ok(serde_json::json!({ "success": true })),
         Err(e) => Ok(serde_json::json!({ "success": false, "error": e })),
+    }
+}
+
+#[cfg(test)]
+mod rerun_admission_tests {
+    use super::*;
+    use crate::service::{NoopNotifier, SchedulerService};
+
+    fn service_and_db() -> (SchedulerService, Arc<Database>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("chaos-rerun-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Database::new(&dir));
+        // No protected environments so the gate admits `production`.
+        let service = SchedulerService::with_protection_config(
+            db.clone(),
+            Arc::new(NoopNotifier),
+            vec![],
+            false,
+        );
+        (service, db, dir)
+    }
+
+    fn seed_dep_gated(db: &Arc<Database>) -> String {
+        db.create_workflow(
+            "Rerun Gated",
+            None,
+            "scripts/noop.py",
+            "0 0 * * *",
+            false,
+            false,
+            "UTC",
+            "production",
+            None,
+            None,
+            Some(r#"{"queue":"production-default","depends_on":["upstream-never"]}"#),
+        )
+        .unwrap()
+        .id
+    }
+
+    #[test]
+    fn rerun_queues_through_admission_when_dependency_is_unmet() {
+        let (service, db, dir) = service_and_db();
+        let id = seed_dep_gated(&db);
+
+        let outcome = dispatch_rerun(
+            &service,
+            dir.to_str().unwrap(),
+            "python3",
+            id,
+            Some("run-old".to_string()),
+            None,
+            None,
+        )
+        .expect("rerun should dispatch");
+
+        // The dependency-gated rerun must admission-QUEUE instead of spawning
+        // immediately (the pre-change command called execute_workflow_with_context,
+        // bypassing the gate).
+        assert_eq!(outcome.status, "queued");
+        assert!(outcome.queued_run_id.is_some());
+        assert!(outcome.run_id.is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rerun_reused_idempotency_key_is_duplicate_without_redispatch() {
+        let (service, db, dir) = service_and_db();
+        let id = seed_dep_gated(&db);
+
+        let first = dispatch_rerun(
+            &service,
+            dir.to_str().unwrap(),
+            "python3",
+            id.clone(),
+            Some("run-old".to_string()),
+            None,
+            Some("rerun-key".to_string()),
+        )
+        .expect("first rerun should dispatch");
+        assert_eq!(first.status, "queued");
+
+        let second = dispatch_rerun(
+            &service,
+            dir.to_str().unwrap(),
+            "python3",
+            id,
+            Some("run-old".to_string()),
+            None,
+            Some("rerun-key".to_string()),
+        )
+        .expect("second rerun should replay");
+        assert_eq!(second.status, "duplicate");
+        assert_eq!(second.queued_run_id, first.queued_run_id);
+        assert!(second.run_id.is_none());
+
+        // The reused key must not enqueue a second row.
+        assert_eq!(db.list_queued_runs(10).unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -7,11 +7,17 @@
 .dashboard-sidebar {
   width: 200px;
   flex-shrink: 0;
+  overflow: hidden;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   -webkit-app-region: drag;
+  transition: width var(--duration-fast) var(--ease-standard);
+}
+
+.dashboard-sidebar.is-collapsed {
+  width: 56px;
 }
 
 .sidebar-brand {
@@ -28,6 +34,16 @@
   align-items: center;
   justify-content: center;
   color: var(--accent);
+}
+
+.sidebar-brand-mark {
+  display: block;
+  flex-shrink: 0;
+}
+
+.brand-text,
+.sidebar-link-label {
+  white-space: nowrap;
 }
 
 .sidebar-nav {
@@ -48,7 +64,9 @@
   color: var(--text-secondary);
   font-weight: 500;
   text-align: left;
-  transition: all 0.15s;
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
 }
 
 .sidebar-link:hover {
@@ -72,12 +90,77 @@
 .sidebar-footer {
   margin-top: auto;
   padding: 12px 16px;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
   -webkit-app-region: no-drag;
+}
+
+.sidebar-footer-main {
+  flex: 1;
+  min-width: 0;
 }
 
 .sidebar-version {
   font-size: 11px;
   color: var(--text-muted);
+}
+
+.sidebar-collapse-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.sidebar-collapse-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sidebar-collapse-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.dashboard-sidebar.is-collapsed .sidebar-brand {
+  justify-content: center;
+  padding-inline: 8px;
+}
+
+.dashboard-sidebar.is-collapsed .brand-text,
+.dashboard-sidebar.is-collapsed .sidebar-link-label,
+.dashboard-sidebar.is-collapsed .sidebar-footer-main {
+  display: none;
+}
+
+.dashboard-sidebar.is-collapsed .sidebar-link {
+  justify-content: center;
+  gap: 0;
+  padding-inline: 8px;
+}
+
+.dashboard-sidebar.is-collapsed .sidebar-footer {
+  justify-content: center;
+  padding-inline: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dashboard-sidebar,
+  .sidebar-link,
+  .sidebar-collapse-toggle {
+    transition: none;
+  }
 }
 
 .dashboard-main {

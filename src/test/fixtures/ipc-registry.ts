@@ -5,14 +5,26 @@ import type {
   Workflow,
 } from "../../lib/commands";
 import {
+  dashboardMissionControlSnapshot,
   defaultEmailConfig,
   defaultMcpIntegrationStatus,
   defaultMissionControlPreferences,
   defaultQueues,
   emptyApiKeys,
-  emptyMissionControlSnapshot,
   emptySchedulerStatus,
   idleUpdateSnapshot,
+  sampleDashboardBlastRadius,
+  sampleDashboardBlockTaxonomy,
+  sampleDashboardExecutionSlots,
+  sampleDashboardFailureRecurrence,
+  sampleDashboardKpiSummary,
+  sampleDashboardKpiWow,
+  sampleDashboardQueueHealth,
+  sampleDashboardQueueUtilizationHistory,
+  sampleDashboardStatusDistribution,
+  sampleDashboardSuccessFailTrend,
+  sampleDashboardWaitRuntimeTrend,
+  sampleDashboardWorkflowBaselines,
   sampleEnvironments,
   sampleRun,
   sampleWorkflow,
@@ -41,7 +53,6 @@ export type IpcCommand =
   | "get_mcp_integration_status"
   | "provision_mcp_integration"
   | "remove_mcp_integration"
-  | "trigger_workflow"
   | "enqueue_workflow"
   | "rerun_workflow"
   | "plan_backfill"
@@ -57,6 +68,7 @@ export type IpcCommand =
   | "get_run_metrics"
   | "get_run_relationships"
   | "get_global_run_history"
+  | "get_run_history_model"
   | "cleanup_retention"
   | "get_workflow_history_buckets"
   | "get_sla_violations"
@@ -66,6 +78,18 @@ export type IpcCommand =
   | "get_mission_control_preferences"
   | "set_mission_control_preferences"
   | "get_mission_control_snapshot"
+  | "get_dashboard_kpi_summary"
+  | "get_dashboard_kpi_wow"
+  | "get_dashboard_status_distribution"
+  | "get_dashboard_success_fail_trend"
+  | "get_dashboard_wait_runtime_trend"
+  | "get_dashboard_queue_health"
+  | "get_dashboard_queue_utilization_history"
+  | "get_dashboard_workflow_baselines"
+  | "get_dashboard_execution_slots"
+  | "get_dashboard_block_taxonomy"
+  | "get_dashboard_blast_radius"
+  | "get_dashboard_failure_recurrence"
   | "get_scheduler_status"
   | "list_queues"
   | "update_queue"
@@ -122,7 +146,7 @@ function runById(runId: string): Run {
 /** Typed default fixture factory used by Playwright and Vitest IPC mocks. */
 export function createDefaultIpcRegistry(): IpcFixtureRegistry {
   const snapshot: MissionControlSnapshot = {
-    ...emptyMissionControlSnapshot,
+    ...dashboardMissionControlSnapshot,
   };
   const updateSnapshot: UpdateSnapshot = { ...idleUpdateSnapshot };
 
@@ -214,14 +238,21 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       managed_key_id: null,
       matches: false,
     }),
-    trigger_workflow: () => sampleRun.id,
     enqueue_workflow: () => ({
       workflow_id: sampleWorkflow.id,
       status: "queued",
       queued_run_id: "queue-fixture-1",
       queue_name: "default",
     }),
-    rerun_workflow: () => "run-rerun-1",
+    // Rerun routes through admission control (#263): it returns a
+    // DispatchOutcome, not a bare run-id. Default to a queued outcome to mirror
+    // the enqueue fixture and the "manual runs = queue-only" contract.
+    rerun_workflow: () => ({
+      workflow_id: sampleWorkflow.id,
+      status: "queued",
+      queued_run_id: "rerun-fixture-1",
+      queue_name: "default",
+    }),
     plan_backfill: (args) => ({
       workflow_id: String(args.workflowId),
       trigger_kind: "backfill",
@@ -285,6 +316,53 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       if (statusFilter === "all") return runs;
       return runs.filter((run) => run.status === statusFilter);
     },
+    get_run_history_model: (args) => {
+      const statusFilter = String(args.statusFilter ?? "all");
+      // Lean, log-free rows: HistoryRow shape, never stdout/stderr. Includes a
+      // poll_exhausted row so consumers exercise the canonical ended_not_ok set.
+      const baseRows = [
+        {
+          id: sampleRun.id,
+          workflow_id: sampleWorkflow.id,
+          workflow_name: sampleWorkflow.name,
+          environment: sampleWorkflow.environment,
+          status: "success",
+          started_at: sampleRun.started_at,
+          finished_at: sampleRun.finished_at,
+          exit_code: 0,
+          trigger_kind: sampleRun.trigger_kind ?? "manual",
+          duration_seconds: 42,
+        },
+        {
+          id: "run-poll-exhausted",
+          workflow_id: sampleWorkflow.id,
+          workflow_name: sampleWorkflow.name,
+          environment: sampleWorkflow.environment,
+          status: "poll_exhausted",
+          started_at: sampleRun.started_at,
+          finished_at: sampleRun.finished_at,
+          exit_code: 1,
+          trigger_kind: sampleRun.trigger_kind ?? "manual",
+          duration_seconds: 30,
+        },
+      ];
+      const rows =
+        statusFilter === "all"
+          ? baseRows
+          : baseRows.filter((row) => row.status === statusFilter);
+      // KPIs always reflect the full (environment, workflow, lookback) scope —
+      // the status filter scopes the rows only, never the header.
+      return {
+        rows,
+        kpis: {
+          total: 2,
+          ended_ok: 1,
+          ended_not_ok: 1,
+          running: 0,
+          p95_duration_seconds: 42,
+        },
+      };
+    },
     cleanup_retention: () => ({
       cutoff: sampleRun.started_at,
       candidate_runs: 0,
@@ -304,6 +382,48 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       domain_filter: String(args.domainFilter ?? "all"),
     }),
     get_mission_control_snapshot: () => snapshot,
+    // v3 Overview dashboard bindings. Fresh copies per call (real IPC always
+    // deserializes new objects; callers may rely on referential inequality).
+    get_dashboard_kpi_summary: () => ({ ...sampleDashboardKpiSummary }),
+    get_dashboard_kpi_wow: () => ({ ...sampleDashboardKpiWow }),
+    get_dashboard_status_distribution: () =>
+      sampleDashboardStatusDistribution.map((row) => ({ ...row })),
+    get_dashboard_success_fail_trend: () => ({
+      ...sampleDashboardSuccessFailTrend,
+      buckets: sampleDashboardSuccessFailTrend.buckets.map((b) => ({ ...b })),
+    }),
+    get_dashboard_wait_runtime_trend: () => ({
+      ...sampleDashboardWaitRuntimeTrend,
+      wait: sampleDashboardWaitRuntimeTrend.wait.map((b) => ({ ...b })),
+      runtime: sampleDashboardWaitRuntimeTrend.runtime.map((b) => ({ ...b })),
+    }),
+    get_dashboard_queue_health: () => ({
+      ...sampleDashboardQueueHealth,
+      queues: sampleDashboardQueueHealth.queues.map((q) => ({ ...q })),
+    }),
+    get_dashboard_queue_utilization_history: () => ({
+      ...sampleDashboardQueueUtilizationHistory,
+      buckets: sampleDashboardQueueUtilizationHistory.buckets.map((b) => ({
+        ...b,
+      })),
+    }),
+    get_dashboard_workflow_baselines: () =>
+      sampleDashboardWorkflowBaselines.map((b) => ({ ...b })),
+    get_dashboard_execution_slots: () => ({
+      ...sampleDashboardExecutionSlots,
+      queues: sampleDashboardExecutionSlots.queues.map((q) => ({ ...q })),
+    }),
+    get_dashboard_block_taxonomy: () => ({
+      ...sampleDashboardBlockTaxonomy,
+      by_reason: sampleDashboardBlockTaxonomy.by_reason.map((r) => ({ ...r })),
+      heavy_blockers: sampleDashboardBlockTaxonomy.heavy_blockers.map((b) => ({
+        ...b,
+      })),
+    }),
+    get_dashboard_blast_radius: () =>
+      sampleDashboardBlastRadius.map((r) => ({ ...r })),
+    get_dashboard_failure_recurrence: () =>
+      sampleDashboardFailureRecurrence.map((r) => ({ ...r })),
     get_scheduler_status: () => emptySchedulerStatus,
     list_queues: () => defaultQueues,
     update_queue: (args) => ({

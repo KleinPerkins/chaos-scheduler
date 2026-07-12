@@ -24,7 +24,7 @@ jobs:
       a11y: ${{ steps.filter.outputs.a11y }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -246,15 +246,17 @@ jobs:
         env:
           CI: true
 
-  # Deterministic visual-regression check. ADVISORY — intentionally NOT part of
-  # the ci-required fan-in below, so a legitimate rendering change on the
-  # parallel component track can never block a merge; it exists to SIGNAL visual
-  # drift. It renders the stable surfaces inside the SAME pinned Playwright
-  # container the baselines were generated in (v1.61.1-jammy — keep in lockstep
-  # with visual-baselines.yml) and compares against the committed `-linux`
-  # screenshots (e2e/visual/__screenshots__/*-linux.png). After an intentional
-  # UI change, refresh the baselines via the visual-baselines.yml workflow. Runs
-  # when product UI (src/**) or the harness changes.
+  # Deterministic visual-regression check. REQUIRED — a member of the ci-required
+  # fan-in below. It is safe to require because it is deterministic and stable
+  # (pinned container + workers:1 + maxDiffPixelRatio:0.01 + reduced-motion +
+  # animations disabled + frozen clock + fixed mockIPC fixtures) and path-filtered,
+  # so a PR that doesn't touch visual paths skips it without blocking. It renders
+  # the stable surfaces inside the SAME pinned Playwright container the baselines
+  # were generated in (v1.61.1-jammy — keep in lockstep with visual-baselines.yml)
+  # and compares against the committed `-linux` screenshots
+  # (e2e/visual/__screenshots__/*-linux.png). After an intentional UI change,
+  # refresh the baselines via the visual-baselines.yml workflow (a stale baseline
+  # now blocks merge). Runs when product UI (src/**) or the harness changes.
   visual:
     name: Visual regression (stable surfaces)
     needs: changes
@@ -299,9 +301,11 @@ jobs:
   # Single required status check for branch protection on `main`.
   # Configure "ci-required" as the sole required check; it fans in from every
   # other job so adding/removing jobs never requires editing branch protection.
-  # NOTE: the `visual` job is deliberately EXCLUDED from `needs` below — it is an
-  # advisory signal (baselines can legitimately drift on the component track) and
-  # must never block a merge. Do not add it here.
+  # NOTE: the `visual` job is now a REQUIRED member of `needs` below. Like the
+  # other path-filtered members (`e2e`/`a11y`/`code-connect`), a PR that doesn't
+  # touch visual paths skips it, and a skipped job's result is neither 'failure'
+  # nor 'cancelled' — so the fan-in step below stays green and the skip never
+  # blocks a merge.
   ci-required:
     name: ci-required
     if: always()
@@ -317,6 +321,7 @@ jobs:
         tokens,
         code-connect,
         a11y,
+        visual,
       ]
     runs-on: ubuntu-latest
     steps:

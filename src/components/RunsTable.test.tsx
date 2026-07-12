@@ -40,8 +40,21 @@ describe("RunsTable", () => {
       "Started",
       "Trigger",
       "Exit Code",
-      "",
+      "Actions",
     ]);
+    expect(screen.getByText("Actions")).toHaveClass("sr-only");
+  });
+
+  it("gives the table an accessible name via an sr-only caption", () => {
+    render(<RunsTable runs={[makeRun()]} onViewRun={() => {}} />);
+    // The table must be reachable by its accessible name for AT (parity with
+    // RunHistory's sr-only <caption>).
+    const table = screen.getByRole("table", { name: "Latest runs" });
+    // The caption is visually hidden (sr-only) so there is no visual change.
+    const caption = table.querySelector("caption");
+    expect(caption).not.toBeNull();
+    expect(caption).toHaveClass("sr-only");
+    expect(caption).toHaveTextContent("Latest runs");
   });
 
   it("renders one row per run, composing StatusBadge and a Details Button", () => {

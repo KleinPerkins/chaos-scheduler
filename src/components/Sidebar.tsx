@@ -1,6 +1,8 @@
-import { CalendarClock, type LucideIcon } from "lucide-react";
+import { useState } from "react";
+import { ChevronsLeft, ChevronsRight, type LucideIcon } from "lucide-react";
 import NavItem from "./NavItem";
 import ThemeToggle from "./ThemeToggle";
+import BrandMark from "./BrandMark";
 import type { ThemePreference } from "../lib/theme";
 import { PRODUCT_SHORT_NAME, APP_VERSION } from "../lib/branding";
 
@@ -31,17 +33,18 @@ export interface SidebarProps<V extends string = string> {
   themePreference: ThemePreference;
   /** Theme-change handler, forwarded to the footer `ThemeToggle`. */
   onThemeChange: (preference: ThemePreference) => void;
+  /** Controlled collapsed state. Omit to let the Sidebar manage its own state. */
+  collapsed?: boolean;
+  /** Reports collapse-toggle intent in both controlled and uncontrolled modes. */
+  onCollapsedChange?: (collapsed: boolean) => void;
 }
 
 /**
- * Dashboard sidebar navigation container. A typed, reusable extraction of the
- * sidebar block that previously lived inline in `Dashboard.tsx` — it renders
- * the exact same DOM (the `.dashboard-sidebar` aside, the `.sidebar-brand`
- * header, the `.sidebar-nav` list of `NavItem`s, and the `.sidebar-footer` with
- * the `ThemeToggle` + version), reusing the global classes in `Dashboard.css`,
- * so behavior and styling are byte-identical. Active state is derived from each
- * item's `match` list exactly as before (`item.match.includes(currentView)`)
- * and selecting an item calls `onNavigate(item.view)`.
+ * Dashboard navigation matching the Figma Sidebar master (node 305:6378).
+ * Expanded mode includes the brand, named navigation items, theme controls,
+ * version, and collapse affordance. Collapsed mode preserves every navigation
+ * button's accessible name while reducing the rail to icon-only presentation.
+ * It can be controlled by a caller or manage its own toggle state.
  */
 export default function Sidebar<V extends string = string>({
   navItems,
@@ -49,12 +52,23 @@ export default function Sidebar<V extends string = string>({
   onNavigate,
   themePreference,
   onThemeChange,
+  collapsed,
+  onCollapsedChange,
 }: SidebarProps<V>) {
+  const [internalCollapsed, setInternalCollapsed] = useState(false);
+  const isCollapsed = collapsed ?? internalCollapsed;
+
+  const toggleCollapsed = () => {
+    const next = !isCollapsed;
+    if (collapsed === undefined) setInternalCollapsed(next);
+    onCollapsedChange?.(next);
+  };
+
   return (
-    <aside className="dashboard-sidebar">
+    <aside className={`dashboard-sidebar${isCollapsed ? " is-collapsed" : ""}`}>
       <div className="sidebar-brand">
         <span className="brand-icon" aria-hidden="true">
-          <CalendarClock size={18} strokeWidth={2.25} />
+          <BrandMark size={20} title="" className="sidebar-brand-mark" />
         </span>
         <span className="brand-text">{PRODUCT_SHORT_NAME}</span>
       </div>
@@ -64,14 +78,32 @@ export default function Sidebar<V extends string = string>({
             key={item.view}
             active={item.match.includes(currentView)}
             icon={<item.Icon size={16} strokeWidth={2} />}
-            label={item.label}
+            label={<span className="sidebar-link-label">{item.label}</span>}
+            aria-label={item.label}
+            title={isCollapsed ? item.label : undefined}
             onClick={() => onNavigate(item.view)}
           />
         ))}
       </nav>
       <div className="sidebar-footer">
-        <ThemeToggle preference={themePreference} onChange={onThemeChange} />
-        <span className="sidebar-version">v{APP_VERSION}</span>
+        <div className="sidebar-footer-main">
+          <ThemeToggle preference={themePreference} onChange={onThemeChange} />
+          <span className="sidebar-version">v{APP_VERSION}</span>
+        </div>
+        <button
+          type="button"
+          className="sidebar-collapse-toggle"
+          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-expanded={!isCollapsed}
+          title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          onClick={toggleCollapsed}
+        >
+          {isCollapsed ? (
+            <ChevronsRight size={15} aria-hidden="true" />
+          ) : (
+            <ChevronsLeft size={15} aria-hidden="true" />
+          )}
+        </button>
       </div>
     </aside>
   );

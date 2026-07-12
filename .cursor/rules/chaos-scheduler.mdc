@@ -28,11 +28,14 @@ hand-writing HTTP calls.
 
 ## Conventions
 
-- **Prefer `enqueue_workflow`** over `run_workflow_now` when the scheduler should
-  manage concurrency/admission; use `run_workflow_now` only for true one-offs.
+- **Use `enqueue_workflow` for manual runs.** Every manual run is
+  admission-controlled — the scheduler manages concurrency/admission. There is no
+  immediate/queue-bypass path: `run_workflow_now` is a **deprecated** alias that
+  takes the same queued path and returns the same result, so prefer
+  `enqueue_workflow`.
 - **Always pass an `idempotency_key`** (a fresh UUID per logical action) to
-  `run_workflow_now` / `enqueue_workflow` / `dispatch_workflow` /
-  `rerun_workflow`. A reused key returns `{ "status": "duplicate", "run_id",
+  `enqueue_workflow` / `dispatch_workflow` / `rerun_workflow` (and the deprecated
+  `run_workflow_now`). A reused key returns `{ "status": "duplicate", "run_id",
   "queued_run_id" }` — treat that as success, not a new run.
 - **Inbound `dispatch_workflow` signing:** when the workflow has an inbound
   secret, pass `signature_secret` (canonical
@@ -66,5 +69,5 @@ Reusable templates: `triage_failed_run(run_id)`,
 When a run fails: read it with `get_run` or `get_run_logs` (stderr tail),
 inspect tasks via `get_run_tasks` when steps failed, inspect the owning workflow
 with `get_workflow`, propose a concrete fix, and use `rerun_workflow` (or
-`run_workflow_now` with a fresh `idempotency_key`) only if the failure looks
+`enqueue_workflow` with a fresh `idempotency_key`) only if the failure looks
 transient.
