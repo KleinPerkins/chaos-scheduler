@@ -15,10 +15,12 @@ implementations/divergences.
 
 No cell is left the literal word "unknown". Where a fact genuinely cannot be
 determined from the repo + read-only metadata yet — chiefly **live-Figma facts**
-(a master's live document version, and per-descendant `cs.*` binding / remote-
-dependency freedom) — it is marked **`pending G04 audit`** (the one-time exhaustive
-Figma plugin/API audit in roadmap `G04`, plus the `G03` live token/version readback).
-See §5 for the consolidated list.
+(a master's live document version, and node-level remote-component-instance
+freedom) — it is marked **`pending G04 audit`** (the one-time exhaustive Figma
+plugin/API audit in roadmap `G04`, plus the `G03` live token/version readback).
+The `G04` **binding-half** is now **COMPLETE** (per-descendant `cs.*` binding read
+live via `get_variable_defs`, 2026-07-12): see §5a for the evidence and §5 for the
+consolidated remaining list.
 
 ---
 
@@ -68,9 +70,13 @@ regardless of the row's primary authority.
   starting baseline (e.g. `StatusBar`, `InfoTip`, `LookbackSelect` and the chart
   primitives now exist with code + tests + CC).
 
-> **Global G04 note:** descendant `cs.*` binding freedom and remote-component-
-> dependency freedom (roadmap `G04`) are **unverified for all rows** until the
-> one-time plugin/API audit runs; this is not re-stated per row.
+> **Global G04 note:** the **binding-half** of `G04` is **COMPLETE** (live
+> `get_variable_defs` readback, 2026-07-12) — descendant `cs.*` binding freedom is
+> now audited per master: the 10 `#174` masters + bespoke chart primitives +
+> `WorkflowCard` are clean (`cs.*`-only), while the 8 earlier-extracted primitives
+> are still bound to legacy `affirm.color` (non-compliant). Node-level remote-
+> component-instance freedom remains **unverified for all rows** (residual `R01`,
+> needs a plugin-API pass). Full evidence in §5a; not re-stated per row.
 
 ---
 
@@ -298,10 +304,14 @@ determinable from repo + read-only metadata yet and are marked `pending G04 audi
    the repo and the local desktop MCP was pointed at a FigJam file this session
    (the repo semantic snapshot stores names/types/structure, not descendant node
    IDs). The `G04` plugin/API audit reads them directly.
-3. **Descendant `cs.*` binding freedom + remote-component-dependency freedom — all
-   rows (global note in §0).** Read-only metadata cannot prove every descendant is
-   bound only to `cs.*` or that every master has zero remote instances (roadmap
-   `R01`); this is exactly what the one-time `G04` plugin/API audit establishes.
+3. **Node-level remote-component-instance freedom — all rows (global note in §0).**
+   The **binding-half is now RESOLVED** (§5a): a live `get_variable_defs` readback
+   proves per-master descendant binding (10 `#174` masters + chart primitives +
+   `WorkflowCard` clean on `cs.*`; the 8 early primitives still on legacy
+   `affirm.color`). What remains is node-level proof that every descendant is a
+   zero-remote-instance node — `get_variable_defs`/`get_metadata` cannot enumerate
+   embedded `INSTANCE` descendants — so this stays **residual `R01`**, pending a
+   Figma plugin-API pass (`node.findAll` on `INSTANCE` + `mainComponent.remote`).
 4. **"Reflected in Figma?" for each `D04` accepted divergence (§3a).** Whether the
    shipped-behavior divergence has been mirrored back into the Figma master is a
    live-Figma fact confirmed during the `G04`/`G12` re-sync.
@@ -310,6 +320,62 @@ determinable from repo + read-only metadata yet and are marked `pending G04 audi
 each `*.figma.tsx`) and all frame IDs (roadmap coverage matrix); code paths and test
 paths (verified in-repo); Code Connect presence (source-tracked, and the 22 DS
 masters verified live this session); owner (consolidated under the maintainer per §0).
+
+### 5a. `G04` binding-half audit — evidence (2026-07-12)
+
+The **binding-half** of the roadmap `G04` audit is **COMPLETE**, established by a
+live `get_variable_defs` readback of file `twQmWC8dWT4tqeqIigNsRy`, page
+"Mission Control", with the `cs.*` variable collection pinned to Dark. This
+resolves the per-descendant `cs.*` **binding-freedom** question (§0 global note; §5
+item 3). The node-level remote-instance half remains residual `R01` (below).
+
+**✅ Clean — bound ONLY to `cs.*`** (`var(--…)` bindings, zero legacy paths):
+
+- The 10 new self-contained `#174` masters — verified: `C32` StatusDot `479:4257`,
+  `C33` Input `481:4257`, `C36` Field `487:4257`, `C41` Modal `493:4307`.
+- The bespoke `D07` chart primitives (§2a) — verified: `C24` Gauge `516:4262`,
+  `C20` DualAxisLine `521:4262`.
+- `C31` WorkflowCard `579:4320`.
+
+**❌ Non-compliant — still bound to LEGACY `affirm.color`** (raw legacy variable
+paths such as `text/default`, `bg/surface/primary`, `icon/brand/indigo`,
+`icon/usercomm/*`, `border/onsurface/*`, `onSurface/*` — **not** `cs.*`): all 8
+earlier-extracted primitives, which predate the retired copy-detach approach.
+
+| C-ID | Master      | Figma node |
+| ---- | ----------- | ---------- |
+| C08  | Button      | `113:526`  |
+| C04  | StatusBadge | `49:124`   |
+| C12  | StatCard    | `53:132`   |
+| C01  | NavItem     | `50:127`   |
+| C28  | Sidebar     | `305:6378` |
+| C09  | EnvSelect   | `121:540`  |
+| C30  | RunsTable   | `415:8668` |
+| C02  | ThemeToggle | `90:439`   |
+
+**Color-divergence side-effect.** The legacy bindings even differ slightly from the
+token SOT — e.g. legacy `text/default` `#f7f7f8` vs `cs` `--text-primary` `#e8eaed`;
+legacy `bg/surface/primary` `#252531` vs `cs` `--bg-secondary` `#1a1d27` /
+`--bg-tertiary` `#242736`. So the 8 early masters are **both** dependency-laden
+**and** marginally color-divergent from the shipped code.
+
+**Remediation (identified, NOT yet executed).** Rebind those 8 masters'
+fills/strokes `affirm.color → cs.*`. This is a **WRITE on published library
+masters**, so it is gated on decision **`D06` (Figma write policy)** + explicit
+operator confirmation, and was **not** executed this pass.
+
+**Remote-instance half — residual gap `R01`.** Node-level "zero remote-component
+instances per descendant" is **not provable** through the available remote Figma
+MCP tools: `get_variable_defs` returns variable bindings only, and `get_metadata`
+returns shallow top-level structure only (not embedded `INSTANCE` descendants).
+Definitive proof requires a Figma plugin-API pass (`node.findAll` on `INSTANCE` +
+`mainComponent.remote`). Proxy: the clean masters expose **zero** `affirm.color`
+bindings — a strong proxy for zero Affirm-bound remote instances there.
+
+**Corroborating (already-known, kept consistent).** `G03` token mirror **confirmed
+accurate** (live Dark `cs.*` values match `figma-tokens.json`); `G05`/`G08` Code
+Connect **live-confirmed** (Button set `113:526` → `src/components/Button.tsx`, all
+5 variants mapped).
 
 ---
 
