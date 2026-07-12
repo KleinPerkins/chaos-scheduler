@@ -271,6 +271,50 @@ test.describe("stable surfaces — menu bar popup (340x440)", () => {
   });
 
   test("popup", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__CHAOS_IPC_OVERRIDES__ = {
+        ...(window.__CHAOS_IPC_OVERRIDES__ ?? {}),
+        get_scheduler_status: () => ({
+          active_workflows: 1,
+          running_count: 0,
+          next_runs: [
+            {
+              workflow_id: "wf-demo-1",
+              workflow_name: "Nightly sync",
+              environment: "production",
+              next_time: "2026-07-04T12:30:00.000Z",
+            },
+          ],
+          recent_runs: [
+            {
+              id: "run-demo-1",
+              workflow_id: "wf-demo-1",
+              workflow_name: "Nightly sync",
+              started_at: "2026-07-04T12:00:00.000Z",
+              finished_at: "2026-07-04T12:00:00.000Z",
+              exit_code: 0,
+              stdout: "ok",
+              stderr: null,
+              result_url: null,
+              status: "succeeded",
+              trigger_kind: "manual",
+            },
+          ],
+        }),
+        get_app_update_status: () => ({
+          updater_available: true,
+          phase: "available",
+          current_version: "1.1.0",
+          latest_version: "1.2.0",
+          notes: "Bug fixes and improvements.",
+          last_checked_at: "2026-07-04T12:00:00.000Z",
+          last_error: null,
+          progress: null,
+          background_check_enabled: true,
+          skipped_version: null,
+        }),
+      };
+    });
     await page.goto("/?view=popup");
     await expect(page.getByText("Chaos Scheduler")).toBeVisible();
     await waitForFonts(page);

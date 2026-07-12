@@ -16,6 +16,7 @@ import {
   availableUpdateSnapshot,
   idleUpdateSnapshot,
 } from "../test/fixtures/data";
+import { resetWorkflowQueueRequests } from "../lib/workflowEnqueue";
 
 function installStrictIpcMocks(): void {
   const registry = createDefaultIpcRegistry();
@@ -26,9 +27,10 @@ function installStrictIpcMocks(): void {
   );
 }
 
-describe("MenuBarPopup update row", () => {
+describe("MenuBarPopup", () => {
   afterEach(async () => {
     cleanup();
+    resetWorkflowQueueRequests();
     // Let `useAppUpdate`'s async listener-cleanup microtask run before
     // clearMocks() tears down the event-plugin internals out from under it.
     await new Promise((r) => setTimeout(r, 0));
@@ -91,5 +93,65 @@ describe("MenuBarPopup update row", () => {
     fireEvent.click(updateBtn);
 
     await waitFor(() => expect(installedVersion).toBe("0.2.0"));
+  });
+
+  it("queues upcoming workflows through shared admission control", async () => {
+    const registry = createDefaultIpcRegistry();
+    const calls: Array<{
+      command: string;
+      args: Record<string, unknown>;
+    }> = [];
+    mockIPC(
+      (command, args) => {
+        const invokeArgs = (args ?? {}) as Record<string, unknown>;
+        calls.push({ command, args: invokeArgs });
+        return resolveIpcInvoke(command, invokeArgs, registry);
+      },
+      { shouldMockEvents: true },
+    );
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_scheduler_status: () => ({
+        active_workflows: 1,
+        running_count: 0,
+        next_runs: [
+          {
+            workflow_id: "wf-nightly",
+            workflow_name: "Nightly sync",
+            environment: "production",
+            next_time: "2026-07-12T08:00:00.000Z",
+          },
+        ],
+        recent_runs: [],
+      }),
+      enqueue_workflow: () => ({
+        status: "queued",
+        queued_run_id: "queued-popup-1",
+      }),
+    };
+
+    render(<MenuBarPopup />);
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Queue run Nightly sync",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(
+        calls.some(
+          ({ command, args }) =>
+            command === "enqueue_workflow" &&
+            args.id === "wf-nightly" &&
+            typeof args.idempotencyKey === "string",
+        ),
+      ).toBe(true),
+    );
+    expect(calls.some(({ command }) => command === "run_workflow_now")).toBe(
+      false,
+    );
+    expect(
+      await screen.findByText(/Waiting to start: Nightly sync/),
+    ).toBeInTheDocument();
   });
 });
