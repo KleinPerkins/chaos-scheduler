@@ -60,7 +60,6 @@ describe("ipc fixture registry", () => {
       "get_mcp_integration_status",
       "provision_mcp_integration",
       "remove_mcp_integration",
-      "trigger_workflow",
       "enqueue_workflow",
       "rerun_workflow",
       "plan_backfill",
@@ -149,6 +148,17 @@ describe("ipc fixture registry", () => {
     const tsCommands = Object.keys(createDefaultIpcRegistry());
     expect(rustCommands).toContain("get_run_history_model");
     expect(tsCommands).toContain("get_run_history_model");
+  });
+
+  // The immediate-run `trigger_workflow` command was removed: manual runs are
+  // queue-only (they route through admission control via enqueue/rerun). The
+  // dead command must be absent from the mock registry AND the Rust
+  // generate_handler! list, or a stale mock handler would mask its removal.
+  it("no longer registers the dead trigger_workflow command", () => {
+    const registry = createDefaultIpcRegistry();
+    expect(registry).not.toHaveProperty("trigger_workflow");
+    expect(Object.keys(registry)).not.toContain("trigger_workflow");
+    expect(rustRegisteredCommands()).not.toContain("trigger_workflow");
   });
 
   it("throws on unhandled commands", () => {
