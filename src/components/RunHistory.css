@@ -73,6 +73,11 @@
   background: var(--bg-tertiary);
 }
 
+.rh-heatmap-cell:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .rh-heatmap-cell.ok {
   background: rgba(var(--success-rgb), 0.2);
   color: var(--success);

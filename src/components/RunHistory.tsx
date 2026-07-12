@@ -226,6 +226,13 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
                     key={bucket.day}
                     className={`rh-heatmap-cell ${level}`}
                     role="listitem"
+                    // Heatmap cells are non-interactive, but keyboard/switch
+                    // users must reach each day's failure summary (the
+                    // accessible name) without a pointer, so the cells are
+                    // deliberately focusable (cf. GitHub's contribution graph).
+                    // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- intentional data-viz focus affordance
+                    tabIndex={0}
+                    title={`${bucket.day}: ${bucket.failed} of ${bucket.total} runs failed`}
                     aria-label={`${bucket.day}: ${bucket.failed} of ${bucket.total} runs failed`}
                   >
                     <span>{formatBucketDay(bucket.day)}</span>

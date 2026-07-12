@@ -141,4 +141,32 @@ describe("RunHistory (workflow-scoped)", () => {
     expect(screen.getByText("running")).toBeInTheDocument();
     expect(screen.getByText("1 of 3 loaded")).toBeInTheDocument();
   });
+
+  it("exposes heatmap cells to keyboard users with an accessible name", async () => {
+    installStrictIpcMocks();
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_run_history: () => runs,
+      get_workflow_history_buckets: () => [
+        { day: "2026-07-10", total: 3, failed: 1, succeeded: 2 },
+      ],
+    };
+
+    render(
+      <RunHistory
+        workflow={sampleWorkflow}
+        onBack={() => {}}
+        onViewLog={() => {}}
+      />,
+    );
+
+    // The per-day detail must be reachable by keyboard, not mouse-only: the
+    // cell is focusable (tabindex 0) and carries the failure summary as its
+    // accessible name.
+    const cell = await screen.findByRole("listitem", {
+      name: "2026-07-10: 1 of 3 runs failed",
+    });
+    expect(cell).toHaveAttribute("tabindex", "0");
+    cell.focus();
+    expect(cell).toHaveFocus();
+  });
 });
