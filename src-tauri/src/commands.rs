@@ -497,56 +497,66 @@ pub fn enqueue_workflow(
         .map_err(|e| e.to_string())
 }
 
+/// Re-run a workflow. Routed through the shared admission choke point
+/// ([`SchedulerService::dispatch_manual_run`]) so a rerun respects dependency
+/// and capacity gating (it queues instead of spawning immediately) and honors
+/// an optional idempotency key — the same policy as the desktop enqueue and the
+/// REST run/enqueue/rerun/webhook handlers.
 #[tauri::command]
 pub fn rerun_workflow(
     state: State<AppState>,
     workflow_id: String,
     source_run_id: Option<String>,
     input_override_json: Option<String>,
-) -> Result<String, String> {
+    idempotency_key: Option<String>,
+) -> Result<scheduler::DispatchOutcome, String> {
+    dispatch_rerun(
+        &state.service,
+        &state.workspace_root,
+        &state.python_path,
+        workflow_id,
+        source_run_id,
+        input_override_json,
+        idempotency_key,
+    )
+}
+
+/// Build the rerun trigger payload and route it through admission control.
+/// Extracted from the Tauri command so it is unit-testable without a
+/// `State<AppState>`. The `ui_rerun` trigger kind and the source run id
+/// (carried as `rerun_of`) mirror the REST `api_rerun` handler.
+fn dispatch_rerun(
+    service: &SchedulerService,
+    workspace_root: &str,
+    python_path: &str,
+    workflow_id: String,
+    source_run_id: Option<String>,
+    input_override_json: Option<String>,
+    idempotency_key: Option<String>,
+) -> Result<scheduler::DispatchOutcome, String> {
     if let Some(input) = &input_override_json {
         serde_json::from_str::<serde_json::Value>(input)
             .map_err(|e| format!("Invalid input override JSON: {}", e))?;
     }
-    state
-        .service
-        .ensure_workflow_execution_allowed(&workflow_id)
-        .map_err(|e| e.to_string())?;
     let payload = serde_json::json!({
         "source_run_id": source_run_id,
-        "input_override": input_override_json.as_ref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
+        "input_override": input_override_json
+            .as_ref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
     })
     .to_string();
-    let result = scheduler::execute_workflow_with_context(
-        &state.db,
-        &state.workspace_root,
-        &state.python_path,
-        &workflow_id,
-        true,
-        true,
-        false,
-        Some("manual"),
-        Some(&payload),
-        None,
-        input_override_json.as_deref(),
-        source_run_id.as_deref(),
-        None,
-        None,
-    )?;
-    if result.completed {
-        scheduler::trigger_on_completion(
-            &state.db,
-            &state.workspace_root,
-            &state.python_path,
+    service
+        .dispatch_manual_run(
+            workspace_root,
+            python_path,
             &workflow_id,
-            &result.run_id,
-            result.success,
-            true,
-            true,
-            false,
-        );
-    }
-    Ok(result.run_id)
+            "ui_rerun",
+            idempotency_key.as_deref(),
+            Some(&payload),
+            source_run_id.as_deref(),
+            input_override_json.as_deref(),
+        )
+        .map_err(|e| e.to_string())
 }
 
 fn parse_backfill_dt(value: &str) -> Result<DateTime<Utc>, String> {
@@ -2347,5 +2357,106 @@ pub fn send_email_alert(
     match crate::email::send_email(config, &config.alert_email, &subject, &body) {
         Ok(()) => Ok(serde_json::json!({ "success": true })),
         Err(e) => Ok(serde_json::json!({ "success": false, "error": e })),
+    }
+}
+
+#[cfg(test)]
+mod rerun_admission_tests {
+    use super::*;
+    use crate::service::{NoopNotifier, SchedulerService};
+
+    fn service_and_db() -> (SchedulerService, Arc<Database>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("chaos-rerun-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Database::new(&dir));
+        // No protected environments so the gate admits `production`.
+        let service = SchedulerService::with_protection_config(
+            db.clone(),
+            Arc::new(NoopNotifier),
+            vec![],
+            false,
+        );
+        (service, db, dir)
+    }
+
+    fn seed_dep_gated(db: &Arc<Database>) -> String {
+        db.create_workflow(
+            "Rerun Gated",
+            None,
+            "scripts/noop.py",
+            "0 0 * * *",
+            false,
+            false,
+            "UTC",
+            "production",
+            None,
+            None,
+            Some(r#"{"queue":"production-default","depends_on":["upstream-never"]}"#),
+        )
+        .unwrap()
+        .id
+    }
+
+    #[test]
+    fn rerun_queues_through_admission_when_dependency_is_unmet() {
+        let (service, db, dir) = service_and_db();
+        let id = seed_dep_gated(&db);
+
+        let outcome = dispatch_rerun(
+            &service,
+            dir.to_str().unwrap(),
+            "python3",
+            id,
+            Some("run-old".to_string()),
+            None,
+            None,
+        )
+        .expect("rerun should dispatch");
+
+        // The dependency-gated rerun must admission-QUEUE instead of spawning
+        // immediately (the pre-change command called execute_workflow_with_context,
+        // bypassing the gate).
+        assert_eq!(outcome.status, "queued");
+        assert!(outcome.queued_run_id.is_some());
+        assert!(outcome.run_id.is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rerun_reused_idempotency_key_is_duplicate_without_redispatch() {
+        let (service, db, dir) = service_and_db();
+        let id = seed_dep_gated(&db);
+
+        let first = dispatch_rerun(
+            &service,
+            dir.to_str().unwrap(),
+            "python3",
+            id.clone(),
+            Some("run-old".to_string()),
+            None,
+            Some("rerun-key".to_string()),
+        )
+        .expect("first rerun should dispatch");
+        assert_eq!(first.status, "queued");
+
+        let second = dispatch_rerun(
+            &service,
+            dir.to_str().unwrap(),
+            "python3",
+            id,
+            Some("run-old".to_string()),
+            None,
+            Some("rerun-key".to_string()),
+        )
+        .expect("second rerun should replay");
+        assert_eq!(second.status, "duplicate");
+        assert_eq!(second.queued_run_id, first.queued_run_id);
+        assert!(second.run_id.is_none());
+
+        // The reused key must not enqueue a second row.
+        assert_eq!(db.list_queued_runs(10).unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
