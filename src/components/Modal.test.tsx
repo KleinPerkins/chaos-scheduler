@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import Modal from "./Modal";
@@ -122,5 +123,69 @@ describe("Modal", () => {
     const dialog = screen.getByRole("dialog");
     expect(dialog.hasAttribute("aria-labelledby")).toBe(false);
     expect(dialog.hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("moves focus into the dialog on open", () => {
+    render(
+      <Modal onClose={vi.fn()}>
+        <button type="button">First</button>
+        <button type="button">Last</button>
+      </Modal>,
+    );
+    // Focus lands on the first focusable element inside the dialog, not on the
+    // background or the (outside-the-dialog) scrim close button.
+    expect(screen.getByRole("button", { name: "First" })).toHaveFocus();
+  });
+
+  it("traps Tab / Shift+Tab focus within the dialog (cycles first<->last)", () => {
+    render(
+      <Modal onClose={vi.fn()}>
+        <button type="button">First</button>
+        <button type="button">Last</button>
+      </Modal>,
+    );
+    const first = screen.getByRole("button", { name: "First" });
+    const last = screen.getByRole("button", { name: "Last" });
+
+    // Tab off the LAST focusable wraps to the first.
+    last.focus();
+    fireEvent.keyDown(last, { key: "Tab" });
+    expect(first).toHaveFocus();
+
+    // Shift+Tab off the FIRST focusable wraps to the last.
+    first.focus();
+    fireEvent.keyDown(first, { key: "Tab", shiftKey: true });
+    expect(last).toHaveFocus();
+  });
+
+  it("restores focus to the trigger element when the dialog closes", () => {
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            Open dialog
+          </button>
+          {open && (
+            <Modal onClose={() => setOpen(false)}>
+              <button type="button">Inside</button>
+            </Modal>
+          )}
+        </>
+      );
+    }
+
+    render(<Harness />);
+    const trigger = screen.getByRole("button", { name: "Open dialog" });
+    trigger.focus();
+    expect(trigger).toHaveFocus();
+
+    // Open: focus moves into the dialog.
+    fireEvent.click(trigger);
+    expect(screen.getByRole("button", { name: "Inside" })).toHaveFocus();
+
+    // Close (Escape): focus returns to the trigger that opened it.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(trigger).toHaveFocus();
   });
 });
