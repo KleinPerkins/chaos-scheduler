@@ -58,7 +58,7 @@ for (const theme of THEMES) {
       await expectAxeClean(page, { context: `run-history/${theme}` });
     });
 
-    test("run detail log tabs support keyboard roving focus", async ({
+    test("run detail passes strict axe + keyboard roving focus", async ({
       page,
     }) => {
       await openRunDetail(page);
@@ -80,15 +80,11 @@ for (const theme of THEMES) {
       await page.keyboard.press("ArrowLeft");
       await expect(stdout).toBeFocused();
 
-      // NOTE: a full-page strict axe scan is intentionally NOT asserted here.
-      // Run Detail currently has a real, pre-existing `landmark-unique`
-      // violation (moderate): the raw-logs `<section aria-labelledby=
-      // "run-logs-title">` and its inner `<div role="region"
-      // aria-labelledby="run-logs-title">` expose two region landmarks with the
-      // same accessible name ("Raw logs"). That is a component (code-lane) fix,
-      // out of scope for this test-only lane, so it is REPORTED rather than
-      // silently allowlisted. Add the strict scan here once that duplicate
-      // landmark is resolved.
+      // Full-page strict axe scan, now enabled: the previously-blocking
+      // duplicate "Raw logs" region landmark (landmark-unique) was resolved in
+      // the component (the redundant inner `role="region"` was dropped), so Run
+      // Detail is strict-clean and this is the guardrail against regression.
+      await expectAxeClean(page, { context: `run-detail/${theme}` });
     });
 
     test("rerun modal passes strict axe while open (labelled dialog + focus-in)", async ({
