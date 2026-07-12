@@ -69,6 +69,7 @@ export type IpcCommand =
   | "get_run_metrics"
   | "get_run_relationships"
   | "get_global_run_history"
+  | "get_run_history_model"
   | "cleanup_retention"
   | "get_workflow_history_buckets"
   | "get_sla_violations"
@@ -308,6 +309,53 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       const runs = [sampleRun, pollExhaustedRun];
       if (statusFilter === "all") return runs;
       return runs.filter((run) => run.status === statusFilter);
+    },
+    get_run_history_model: (args) => {
+      const statusFilter = String(args.statusFilter ?? "all");
+      // Lean, log-free rows: HistoryRow shape, never stdout/stderr. Includes a
+      // poll_exhausted row so consumers exercise the canonical ended_not_ok set.
+      const baseRows = [
+        {
+          id: sampleRun.id,
+          workflow_id: sampleWorkflow.id,
+          workflow_name: sampleWorkflow.name,
+          environment: sampleWorkflow.environment,
+          status: "success",
+          started_at: sampleRun.started_at,
+          finished_at: sampleRun.finished_at,
+          exit_code: 0,
+          trigger_kind: sampleRun.trigger_kind ?? "manual",
+          duration_seconds: 42,
+        },
+        {
+          id: "run-poll-exhausted",
+          workflow_id: sampleWorkflow.id,
+          workflow_name: sampleWorkflow.name,
+          environment: sampleWorkflow.environment,
+          status: "poll_exhausted",
+          started_at: sampleRun.started_at,
+          finished_at: sampleRun.finished_at,
+          exit_code: 1,
+          trigger_kind: sampleRun.trigger_kind ?? "manual",
+          duration_seconds: 30,
+        },
+      ];
+      const rows =
+        statusFilter === "all"
+          ? baseRows
+          : baseRows.filter((row) => row.status === statusFilter);
+      // KPIs always reflect the full (environment, workflow, lookback) scope —
+      // the status filter scopes the rows only, never the header.
+      return {
+        rows,
+        kpis: {
+          total: 2,
+          ended_ok: 1,
+          ended_not_ok: 1,
+          running: 0,
+          p95_duration_seconds: 42,
+        },
+      };
     },
     cleanup_retention: () => ({
       cutoff: sampleRun.started_at,

@@ -3,11 +3,11 @@ use crate::db::{
     DashboardKpiSummary, DashboardQueueHealthSummary, DashboardQueueUtilizationHistory,
     DashboardStatusCount, DashboardTrendSeries, DashboardWaitRuntimeTrend,
     DashboardWorkflowBaseline, DashboardWorkflowFailureCount, Database, EmailConfig, EmailProfile,
-    MissionControlNeedsAttentionItem, MissionControlPanelAvailability, MissionControlPreferences,
-    MissionControlSnapshot, MissionControlUpcomingRun, NextRun, QueueInfo, QueuedRun,
-    RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask, SchedulerAsset,
-    SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow, WorkflowHistoryBucket,
-    WorkflowResourceSample, WorkflowTokenUsageRollup,
+    HistoryReadModel, MissionControlNeedsAttentionItem, MissionControlPanelAvailability,
+    MissionControlPreferences, MissionControlSnapshot, MissionControlUpcomingRun, NextRun,
+    QueueInfo, QueuedRun, RetentionPreview, Run, RunAttempt, RunMetric, RunRelationship, RunTask,
+    SchedulerAsset, SchedulerDeadLetter, SchedulerStatus, SlaViolation, Workflow,
+    WorkflowHistoryBucket, WorkflowResourceSample, WorkflowTokenUsageRollup,
 };
 use crate::scheduler::{self, WorkflowScheduler};
 use crate::service::{SchedulerService, WorkflowDraft};
@@ -922,6 +922,43 @@ pub fn get_global_run_history(
         .map_err(|e| e.to_string())
 }
 
+/// Lean, LOG-FREE history read model backing the filtered history table + its
+/// KPI header: rows (never `stdout`/`stderr`) plus aggregate KPIs
+/// `{ total, endedOk, endedNotOk, running, p95Duration }`. Keyed by
+/// `(environmentFilter, workflowFilter, statusFilter, lookback)`, all optional
+/// (omit or `"all"` to disable a filter). The status filter scopes the ROWS
+/// only — the KPIs always report the full breakdown for the
+/// `(environment, workflow, lookback)` scope so the header is stable as the
+/// table is filtered. `lookback` accepts the shared dashboard grammar (`1d`,
+/// `3d`, `7d`, `30d`, `<n>h`, `all`) and defaults to `1d`; p95 duration is
+/// workflow-scoped whenever a workflow filter is applied. Tauri-IPC-only (no
+/// REST/SDK/MCP surface). Environment provenance is CURRENT, not a run-time
+/// snapshot — see [`Database::history_read_model`].
+#[tauri::command]
+pub fn get_run_history_model(
+    state: State<AppState>,
+    environment_filter: Option<String>,
+    workflow_filter: Option<String>,
+    status_filter: Option<String>,
+    lookback: Option<String>,
+    limit: Option<i64>,
+) -> Result<HistoryReadModel, String> {
+    let (window_modifier, _window_seconds) = parse_lookback(lookback.as_deref())?;
+    let environment_filter = normalize_all_filter(environment_filter);
+    let workflow_filter = normalize_all_filter(workflow_filter);
+    let status_filter = normalize_all_filter(status_filter);
+    state
+        .db
+        .history_read_model(
+            Some(&environment_filter),
+            Some(&workflow_filter),
+            Some(&status_filter),
+            &window_modifier,
+            limit.unwrap_or(200),
+        )
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn cleanup_retention(
     state: State<AppState>,
@@ -1350,6 +1387,19 @@ fn normalize_time_bucket(value: Option<&str>) -> Result<String, String> {
 /// Normalize a mission-control environment filter. Environments are
 /// user-managed, so any non-empty value is passed through as the partition to
 /// filter on; empty / "all" means no environment filter.
+/// Normalize an optional `(all | <value>)` filter token: trim it, and map an
+/// empty string or a case-insensitive `"all"` to the `"all"` sentinel the read
+/// model uses to disable a filter. Used by [`get_run_history_model`] for its
+/// environment/workflow/status filters.
+fn normalize_all_filter(value: Option<String>) -> String {
+    match value {
+        Some(v) if !v.trim().is_empty() && !v.trim().eq_ignore_ascii_case("all") => {
+            v.trim().to_string()
+        }
+        _ => "all".to_string(),
+    }
+}
+
 fn normalize_mission_environment_filter(value: Option<String>, default: &str) -> String {
     let raw = value.unwrap_or_else(|| default.to_string());
     let trimmed = raw.trim();

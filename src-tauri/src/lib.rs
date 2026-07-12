@@ -436,6 +436,7 @@ pub fn run() {
             commands::get_run_metrics,
             commands::get_run_relationships,
             commands::get_global_run_history,
+            commands::get_run_history_model,
             commands::cleanup_retention,
             commands::get_workflow_history_buckets,
             commands::get_sla_violations,
