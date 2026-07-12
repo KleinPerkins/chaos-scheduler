@@ -23,7 +23,10 @@ export default defineConfig({
   testDir: "./e2e/visual",
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
-  retries: 0,
+  // Required gate (see the `visual` job in .github/workflows/ci.yml): retry once
+  // in CI so a transient sub-pixel diff can't false-block a merge; 0 locally for
+  // fast feedback. Mirrors playwright.a11y.config.ts.
+  retries: process.env.CI ? 1 : 0,
   workers: 1,
   reporter: process.env.CI ? "github" : "list",
   snapshotPathTemplate: "{testDir}/__screenshots__/{arg}-{platform}{ext}",
