@@ -65,11 +65,17 @@ in [`release.yml`](../.github/workflows/release.yml), not by convention.
 > **The Release PR is a deliberate manual gate — it is NOT auto-merged.** Every
 > other non-draft, same-repo PR is auto-approved and squash-auto-merged by the
 > `chaos-scheduler-automerge` GitHub App
-> ([`app-auto-merge.yml`](../.github/workflows/app-auto-merge.yml)). The
-> release-please "chore: release main" Release PR is **intentionally excluded**
-> from that bot: its head branch `release-please--branches--main` matches the
-> `release-please--` head-branch-prefix guard in that workflow's `auto-merge`
-> `if:`. So a maintainer merges the Release PR **by hand** when they decide to
+> ([`app-auto-merge.yml`](../.github/workflows/app-auto-merge.yml)) over two
+> paths: the `auto-merge` job (on `pull_request`, for human PRs) and the
+> `auto-merge-ci` job (on `workflow_run` once CI is green, which covers Dependabot
+> PRs — a Dependabot `pull_request` run only gets Dependabot-scoped secrets and so
+> cannot mint the App token, whereas `workflow_run` runs in the base-repo context
+> with the full Actions secrets). The release-please "chore: release main" Release
+> PR is **intentionally excluded** from BOTH paths: its head branch
+> `release-please--branches--main` matches the `release-please--`
+> head-branch-prefix guard in each job's `if:`
+> (`scripts/check-auto-merge-guard.mjs` enforces the exclusion on both). So a
+> maintainer merges the Release PR **by hand** when they decide to
 > ship — that human merge is what cuts the tag(s) + Release(s). Merging it then
 > triggers the build/sign/publish [`release.yml`](../.github/workflows/release.yml),
 > which still pauses for the required-reviewer **`release` Environment** approval
