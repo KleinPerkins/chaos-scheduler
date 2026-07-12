@@ -1,15 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Play } from "lucide-react";
+import { Plus } from "lucide-react";
 import { useSchedulerStatus } from "../hooks/useSchedulerStatus";
 import { useAppUpdate } from "../hooks/useAppUpdate";
 import {
-  triggerWorkflow,
   quitApp,
   openDashboard,
   hidePopup,
   openRunDetail,
   environmentOf,
 } from "../lib/commands";
+import {
+  queueWorkflowRun,
+  formatWorkflowQueueOutcome,
+  formatWorkflowQueueError,
+} from "../lib/workflowEnqueue";
 import Button from "./Button";
 import StatusBadge from "./StatusBadge";
 import type { NextRun } from "../lib/commands";
@@ -43,7 +47,10 @@ export default function MenuBarPopup() {
   const { status, error, refresh } = useSchedulerStatus(30000);
   const { snapshot: updateSnapshot, install: installUpdate } = useAppUpdate();
   const showTime = useRef(0);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [action, setAction] = useState<{
+    text: string;
+    type: "success" | "error";
+  } | null>(null);
   const [runningWorkflowId, setRunningWorkflowId] = useState<string | null>(
     null,
   );
@@ -64,12 +71,12 @@ export default function MenuBarPopup() {
       updatePhase === "ready_to_restart");
 
   const handleUpdate = async () => {
-    setActionError(null);
+    setAction(null);
     setUpdating(true);
     try {
       await installUpdate(updateSnapshot?.latest_version ?? undefined);
     } catch (e) {
-      setActionError(`Update failed: ${String(e)}`);
+      setAction({ text: `Update failed: ${String(e)}`, type: "error" });
     } finally {
       setUpdating(false);
     }
@@ -93,14 +100,21 @@ export default function MenuBarPopup() {
     };
   }, []);
 
-  const handleRun = async (workflowId: string) => {
-    setActionError(null);
+  const handleQueue = async (workflowId: string, workflowName: string) => {
+    setAction(null);
     setRunningWorkflowId(workflowId);
     try {
-      await triggerWorkflow(workflowId);
+      const outcome = await queueWorkflowRun(workflowId);
+      setAction({
+        text: formatWorkflowQueueOutcome(workflowName, outcome),
+        type: "success",
+      });
       await refresh();
     } catch (e) {
-      setActionError(`Failed to trigger workflow: ${String(e)}`);
+      setAction({
+        text: formatWorkflowQueueError(workflowName, e),
+        type: "error",
+      });
     } finally {
       setRunningWorkflowId(null);
     }
@@ -151,7 +165,18 @@ export default function MenuBarPopup() {
       {error && (
         <div className="popup-inline-error">Status refresh failed: {error}</div>
       )}
-      {actionError && <div className="popup-inline-error">{actionError}</div>}
+      {action && (
+        <div
+          className={
+            action.type === "error"
+              ? "popup-inline-error"
+              : "popup-inline-notice"
+          }
+          role={action.type === "error" ? "alert" : "status"}
+        >
+          {action.text}
+        </div>
+      )}
 
       <div className="popup-scroll">
         <div className="popup-section">
@@ -180,15 +205,17 @@ export default function MenuBarPopup() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => handleRun(nr.workflow_id)}
+                          onClick={() =>
+                            handleQueue(nr.workflow_id, nr.workflow_name)
+                          }
                           disabled={runningWorkflowId === nr.workflow_id}
-                          title="Run now"
-                          aria-label={`Run ${nr.workflow_name} now`}
+                          title="Queue run"
+                          aria-label={`Queue ${nr.workflow_name}`}
                         >
                           {runningWorkflowId === nr.workflow_id ? (
                             "..."
                           ) : (
-                            <Play
+                            <Plus
                               size={12}
                               strokeWidth={2.5}
                               aria-hidden="true"

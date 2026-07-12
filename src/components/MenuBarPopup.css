@@ -29,6 +29,13 @@
   font-size: 12px;
 }
 
+.popup-inline-notice {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
 .popup-header {
   display: flex;
   align-items: center;
