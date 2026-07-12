@@ -5,14 +5,26 @@ import type {
   Workflow,
 } from "../../lib/commands";
 import {
+  dashboardMissionControlSnapshot,
   defaultEmailConfig,
   defaultMcpIntegrationStatus,
   defaultMissionControlPreferences,
   defaultQueues,
   emptyApiKeys,
-  emptyMissionControlSnapshot,
   emptySchedulerStatus,
   idleUpdateSnapshot,
+  sampleDashboardBlastRadius,
+  sampleDashboardBlockTaxonomy,
+  sampleDashboardExecutionSlots,
+  sampleDashboardFailureRecurrence,
+  sampleDashboardKpiSummary,
+  sampleDashboardKpiWow,
+  sampleDashboardQueueHealth,
+  sampleDashboardQueueUtilizationHistory,
+  sampleDashboardStatusDistribution,
+  sampleDashboardSuccessFailTrend,
+  sampleDashboardWaitRuntimeTrend,
+  sampleDashboardWorkflowBaselines,
   sampleEnvironments,
   sampleRun,
   sampleWorkflow,
@@ -66,6 +78,18 @@ export type IpcCommand =
   | "get_mission_control_preferences"
   | "set_mission_control_preferences"
   | "get_mission_control_snapshot"
+  | "get_dashboard_kpi_summary"
+  | "get_dashboard_kpi_wow"
+  | "get_dashboard_status_distribution"
+  | "get_dashboard_success_fail_trend"
+  | "get_dashboard_wait_runtime_trend"
+  | "get_dashboard_queue_health"
+  | "get_dashboard_queue_utilization_history"
+  | "get_dashboard_workflow_baselines"
+  | "get_dashboard_execution_slots"
+  | "get_dashboard_block_taxonomy"
+  | "get_dashboard_blast_radius"
+  | "get_dashboard_failure_recurrence"
   | "get_scheduler_status"
   | "list_queues"
   | "update_queue"
@@ -122,7 +146,7 @@ function runById(runId: string): Run {
 /** Typed default fixture factory used by Playwright and Vitest IPC mocks. */
 export function createDefaultIpcRegistry(): IpcFixtureRegistry {
   const snapshot: MissionControlSnapshot = {
-    ...emptyMissionControlSnapshot,
+    ...dashboardMissionControlSnapshot,
   };
   const updateSnapshot: UpdateSnapshot = { ...idleUpdateSnapshot };
 
@@ -304,6 +328,48 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       domain_filter: String(args.domainFilter ?? "all"),
     }),
     get_mission_control_snapshot: () => snapshot,
+    // v3 Overview dashboard bindings. Fresh copies per call (real IPC always
+    // deserializes new objects; callers may rely on referential inequality).
+    get_dashboard_kpi_summary: () => ({ ...sampleDashboardKpiSummary }),
+    get_dashboard_kpi_wow: () => ({ ...sampleDashboardKpiWow }),
+    get_dashboard_status_distribution: () =>
+      sampleDashboardStatusDistribution.map((row) => ({ ...row })),
+    get_dashboard_success_fail_trend: () => ({
+      ...sampleDashboardSuccessFailTrend,
+      buckets: sampleDashboardSuccessFailTrend.buckets.map((b) => ({ ...b })),
+    }),
+    get_dashboard_wait_runtime_trend: () => ({
+      ...sampleDashboardWaitRuntimeTrend,
+      wait: sampleDashboardWaitRuntimeTrend.wait.map((b) => ({ ...b })),
+      runtime: sampleDashboardWaitRuntimeTrend.runtime.map((b) => ({ ...b })),
+    }),
+    get_dashboard_queue_health: () => ({
+      ...sampleDashboardQueueHealth,
+      queues: sampleDashboardQueueHealth.queues.map((q) => ({ ...q })),
+    }),
+    get_dashboard_queue_utilization_history: () => ({
+      ...sampleDashboardQueueUtilizationHistory,
+      buckets: sampleDashboardQueueUtilizationHistory.buckets.map((b) => ({
+        ...b,
+      })),
+    }),
+    get_dashboard_workflow_baselines: () =>
+      sampleDashboardWorkflowBaselines.map((b) => ({ ...b })),
+    get_dashboard_execution_slots: () => ({
+      ...sampleDashboardExecutionSlots,
+      queues: sampleDashboardExecutionSlots.queues.map((q) => ({ ...q })),
+    }),
+    get_dashboard_block_taxonomy: () => ({
+      ...sampleDashboardBlockTaxonomy,
+      by_reason: sampleDashboardBlockTaxonomy.by_reason.map((r) => ({ ...r })),
+      heavy_blockers: sampleDashboardBlockTaxonomy.heavy_blockers.map((b) => ({
+        ...b,
+      })),
+    }),
+    get_dashboard_blast_radius: () =>
+      sampleDashboardBlastRadius.map((r) => ({ ...r })),
+    get_dashboard_failure_recurrence: () =>
+      sampleDashboardFailureRecurrence.map((r) => ({ ...r })),
     get_scheduler_status: () => emptySchedulerStatus,
     list_queues: () => defaultQueues,
     update_queue: (args) => ({

@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useId, useState } from "react";
 import "./InfoTip.css";
 
 /** One row of the optional glossary table (a term and its meaning). */
@@ -31,8 +31,10 @@ export interface InfoTipProps {
  * `:hover` presentation state (mirrored here with `:focus-within` so keyboard
  * users get the same affordance), never a click modal — matching the documented
  * hover-only InfoTip convention. The trigger is a real focusable `<button>`
- * described by the card via `aria-describedby`. All colors/type bind to repo
- * tokens — no raw hex. Purely presentational — not yet wired into any screen.
+ * described by the card via `aria-describedby`, and pressing `Escape` while it
+ * is focused dismisses the card without moving focus (the WAI-ARIA tooltip
+ * pattern); the dismissed state re-arms once focus leaves the trigger. All
+ * colors/type bind to repo tokens — no raw hex. Not yet wired into any screen.
  */
 export default function InfoTip({
   title,
@@ -42,7 +44,10 @@ export default function InfoTip({
   className,
 }: InfoTipProps) {
   const defId = useId();
-  const classes = ["info-tip", className].filter(Boolean).join(" ");
+  const [dismissed, setDismissed] = useState(false);
+  const classes = ["info-tip", dismissed ? "is-dismissed" : null, className]
+    .filter(Boolean)
+    .join(" ");
   const showGlossary = glossary && glossaryRows.length > 0;
 
   return (
@@ -52,6 +57,13 @@ export default function InfoTip({
         className="info-tip-trigger"
         aria-label={title}
         aria-describedby={defId}
+        onKeyDown={(e) => {
+          if (e.key === "Escape" && !dismissed) {
+            e.stopPropagation();
+            setDismissed(true);
+          }
+        }}
+        onBlur={() => setDismissed(false)}
       >
         <span aria-hidden="true">i</span>
       </button>

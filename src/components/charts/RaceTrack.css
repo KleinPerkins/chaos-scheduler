@@ -1,0 +1,70 @@
+/*
+ * RaceTrack — running-job lane view. Geometry + fills are set inline from tokens
+ * (track/overtime/finish/vehicle); text type + color bind to the shared tokens
+ * here. Motion is opt-in (`animate`) and additionally gated by reduced-motion.
+ * Never raw hex — see tokens.css / DESIGN-SYSTEM.md.
+ */
+
+.cs-racetrack {
+  width: 100%;
+  height: auto;
+}
+
+.cs-racetrack__title {
+  fill: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.cs-racetrack__lane {
+  fill: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+}
+
+.cs-racetrack__sub {
+  fill: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+}
+
+.cs-racetrack__sub--over {
+  fill: var(--error);
+}
+
+.cs-racetrack__legend {
+  fill: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  dominant-baseline: middle;
+}
+
+.cs-racetrack__empty {
+  fill: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  text-anchor: middle;
+}
+
+/*
+ * Idle "rev" bob — opt-in via `animate` and only when the user hasn't asked for
+ * reduced motion. CSS-keyframe based (no JS), so unit/visual runs stay stable
+ * whenever the flag is off (the default).
+ */
+@media (prefers-reduced-motion: no-preference) {
+  .cs-racetrack--animated .cs-racetrack__vehicle {
+    animation: cs-racetrack-rev 1.1s ease-in-out infinite;
+  }
+}
+
+@keyframes cs-racetrack-rev {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-1px);
+  }
+}

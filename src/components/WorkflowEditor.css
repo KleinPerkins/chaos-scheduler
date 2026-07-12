@@ -1,8 +1,50 @@
+.workflow-editor {
+  width: 100%;
+}
+
 .editor-form {
-  max-width: 720px;
+  width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 16px;
+}
+
+.editor-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.editor-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.editor-section-title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.editor-general-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.editor-general-grid > .editor-field:nth-child(3) {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.editor-field--wide {
+  grid-column: 1 / -1;
 }
 
 .editor-error {
@@ -45,13 +87,6 @@
   line-height: 1.4;
 }
 
-.editor-actions {
-  display: flex;
-  gap: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
-
 /* AI description button */
 .btn-ai {
   display: inline-flex;
@@ -61,7 +96,7 @@
   border-radius: var(--radius);
   font-size: 11px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--text-primary);
   background: rgba(var(--accent-rgb), 0.08);
   border: 1px solid rgba(var(--accent-rgb), 0.2);
   cursor: pointer;
@@ -139,6 +174,25 @@
 
 .editor-radio input {
   margin: 0;
+}
+
+.editor-execution-details {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.editor-execution-details > summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.editor-execution-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 14px;
 }
 
 .editor-field-row {
@@ -261,6 +315,11 @@
   padding: 14px;
 }
 
+.editor-section .editor-actions-section {
+  padding: 0;
+  border: 0;
+}
+
 .actions-editor {
   display: flex;
   flex-direction: column;
@@ -333,4 +392,16 @@
 
 .editor-advanced .editor-field {
   margin-top: 12px;
+}
+
+@media (max-width: 760px) {
+  .editor-general-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .editor-general-grid > .editor-field:nth-child(3),
+  .editor-field--wide {
+    grid-column: 1;
+    grid-row: auto;
+  }
 }

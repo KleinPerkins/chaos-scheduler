@@ -1,0 +1,42 @@
+/*
+ * Swatch — shared color key for Legend / ChartTooltip. Color arrives via the
+ * `--cs-swatch-color` custom property (set inline from a token); shape styling
+ * lives here. Never raw hex — see tokens.css / DESIGN-SYSTEM.md.
+ */
+
+.cs-swatch {
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.cs-swatch--square {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--cs-swatch-color, var(--text-muted));
+}
+
+.cs-swatch--dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--cs-swatch-color, var(--text-muted));
+}
+
+.cs-swatch--line {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--cs-swatch-color, var(--text-muted));
+}
+
+.cs-swatch--dashed {
+  width: 14px;
+  height: 3px;
+  border-radius: 1px;
+  background: repeating-linear-gradient(
+    to right,
+    var(--cs-swatch-color, var(--text-muted)) 0 4px,
+    transparent 4px 7px
+  );
+}

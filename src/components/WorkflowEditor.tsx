@@ -113,6 +113,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
   const [allWorkflows, setAllWorkflows] = useState<Workflow[]>([]);
   const [saving, setSaving] = useState(false);
   const [generatingDesc, setGeneratingDesc] = useState(false);
+  const [executionOpen, setExecutionOpen] = useState(!isEdit);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -242,7 +243,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           asyncMode: isManaged ? workflow.async_mode : asyncMode,
           emailOnFailure,
           timezone: LOCAL_TZ,
-          environment: workflow.environment,
+          environment: isManaged ? workflow.environment : environment,
           domain: workflow.domain,
           triggerConfig: isManaged
             ? workflow.trigger_config || undefined
@@ -260,8 +261,7 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           asyncMode,
           emailOnFailure,
           timezone: LOCAL_TZ,
-          // New UI workflows default to production unless the spec sets another environment.
-          environment: "production",
+          environment,
           triggerConfig: triggerConfig || undefined,
           queueConfig: queueConfig || undefined,
         });
@@ -317,19 +317,46 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
     }
     return Array.from(names).sort((a, b) => a.localeCompare(b));
   })();
+  const saveDisabled = saving || (!isManaged && !name) || !cronSchedule;
+  const saveLabel = saving
+    ? "Saving…"
+    : isEdit
+      ? "Save changes"
+      : "Create workflow";
+  const editorSubtitle =
+    isEdit && workflow
+      ? `${workflow.name} · ${environmentOf(workflow)
+          .charAt(0)
+          .toUpperCase()}${environmentOf(workflow).slice(1)}`
+      : "Configure execution, schedule, and notifications.";
 
   return (
-    <div>
+    <div className="workflow-editor">
       <PageHeader
-        title={isEdit ? "Edit Workflow" : "New Workflow"}
+        title={isEdit ? "Edit workflow" : "New workflow"}
+        subtitle={editorSubtitle}
         actions={
-          <Button variant="ghost" onClick={onCancel}>
-            Cancel
-          </Button>
+          <div className="editor-header-actions">
+            <Button variant="ghost" onClick={onCancel}>
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              form="workflow-editor-form"
+              variant="primary"
+              disabled={saveDisabled}
+            >
+              {saveLabel}
+            </Button>
+          </div>
         }
       />
 
-      <form className="editor-form" onSubmit={handleSubmit}>
+      <form
+        id="workflow-editor-form"
+        className="editor-form"
+        onSubmit={handleSubmit}
+      >
         {error && (
           <Notice variant="error" assertive>
             {error}
@@ -358,237 +385,273 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
           </div>
         )}
 
-        <div className="editor-field">
-          <label className="editor-label" htmlFor="wf-name">
-            Name
-          </label>
-          <Input
-            id="wf-name"
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Weekly Pod Status"
-            required
-            disabled={isManaged}
-          />
-        </div>
+        <section
+          className="editor-section"
+          aria-labelledby="editor-general-title"
+        >
+          <h2 id="editor-general-title" className="editor-section-title">
+            General
+          </h2>
+          <div className="editor-general-grid">
+            <div className="editor-field">
+              <label className="editor-label" htmlFor="wf-name">
+                Name
+              </label>
+              <Input
+                id="wf-name"
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. Weekly Pod Status"
+                required
+                disabled={isManaged}
+              />
+            </div>
 
-        <div className="editor-field">
-          <div className="editor-label-row">
-            <label className="editor-label" htmlFor="wf-desc">
-              Description
-            </label>
-            {kind === "generic" && scriptPath && (
-              <button
-                type="button"
-                className="btn-ai"
-                onClick={handleGenerateDescription}
-                disabled={generatingDesc || isManaged}
-                title="Use AI to generate a description based on the workflow script"
-              >
-                {generatingDesc ? (
-                  <span className="btn-ai-loading">Generating...</span>
-                ) : (
-                  <>
-                    <span className="btn-ai-icon" aria-hidden="true">
-                      <Sparkles size={13} strokeWidth={2} />
-                    </span>
-                    AI Describe
-                  </>
-                )}
-              </button>
-            )}
-          </div>
-          <Textarea
-            id="wf-desc"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="What does this workflow do?"
-            rows={2}
-            disabled={isManaged}
-          />
-        </div>
-
-        <div className="editor-field">
-          <label className="editor-label" htmlFor="wf-env">
-            Environment
-          </label>
-          <Select
-            id="wf-env"
-            value={environment}
-            onChange={(e) => setEnvironment(e.target.value)}
-            disabled={isManaged}
-          >
-            {envOptions.map((env) => (
-              <option key={env} value={env}>
-                {env.charAt(0).toUpperCase() + env.slice(1)}
-              </option>
-            ))}
-          </Select>
-          <span className="editor-hint">
-            The partition this workflow runs in. Manage environments from the
-            Environments screen.
-          </span>
-        </div>
-
-        <fieldset className="editor-field editor-kind" disabled={isManaged}>
-          <legend className="editor-label">Workflow type</legend>
-          <label className="editor-radio">
-            <input
-              type="radio"
-              name="wf-kind"
-              checked={kind === "generic"}
-              onChange={() => setKind("generic")}
-            />
-            Generic — a multi-step flow of commands / scripts
-          </label>
-          <label className="editor-radio">
-            <input
-              type="radio"
-              name="wf-kind"
-              checked={kind === "typed"}
-              onChange={() => setKind("typed")}
-            />
-            Typed — a single built-in operator (git pull, Cursor agent, …)
-          </label>
-        </fieldset>
-
-        {kind === "generic" ? (
-          <div className="editor-field">
-            <span className="editor-label">Steps</span>
-            <span className="editor-hint">
-              Each step runs a command or script. Use “Depends on” to sequence
-              steps into a DAG; independent steps run in parallel. Cycles are
-              rejected on save.
-            </span>
-            <StepFlowBuilder
-              steps={steps}
-              onChange={setSteps}
-              disabled={isManaged}
-            />
-          </div>
-        ) : (
-          <div className="editor-field">
-            <span className="editor-label">Operator</span>
-            <OperatorConfigForm
-              spec={typedSpec}
-              onChange={setTypedSpec}
-              disabled={isManaged}
-            />
-          </div>
-        )}
-
-        <div className="editor-field">
-          {isManaged ? (
-            <>
-              <span className="editor-label">Schedule</span>
-              <div className="editor-hint">
-                {cronToHuman(
-                  workflow?.cron_schedule ?? cronSchedule,
-                  workflow?.timezone,
+            <div className="editor-field editor-field--wide">
+              <div className="editor-label-row">
+                <label className="editor-label" htmlFor="wf-desc">
+                  Description
+                </label>
+                {kind === "generic" && scriptPath && (
+                  <button
+                    type="button"
+                    className="btn-ai"
+                    onClick={handleGenerateDescription}
+                    disabled={generatingDesc || isManaged}
+                    title="Use AI to generate a description based on the workflow script"
+                  >
+                    {generatingDesc ? (
+                      <span className="btn-ai-loading">Generating...</span>
+                    ) : (
+                      <>
+                        <span className="btn-ai-icon" aria-hidden="true">
+                          <Sparkles size={13} strokeWidth={2} />
+                        </span>
+                        AI Describe
+                      </>
+                    )}
+                  </button>
                 )}
               </div>
-            </>
-          ) : (
-            <ScheduleBuilder
-              value={cronSchedule}
-              onChange={setCronSchedule}
-              timezone={workflow?.timezone}
-            />
-          )}
-        </div>
-
-        {isEdit && (
-          <div className="editor-field">
-            <label className="editor-label">
-              <input
-                type="checkbox"
-                checked={enabled}
-                onChange={(e) => setEnabled(e.target.checked)}
-                style={{ marginRight: 8 }}
+              <Textarea
+                id="wf-desc"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="What does this workflow do?"
+                rows={2}
+                disabled={isManaged}
               />
-              Enabled
-            </label>
-          </div>
-        )}
+            </div>
 
-        <div className="editor-field">
-          <label className="editor-label">
-            <input
-              type="checkbox"
-              checked={asyncMode}
-              onChange={(e) => setAsyncMode(e.target.checked)}
-              disabled={isManaged}
-              style={{ marginRight: 8 }}
-            />
-            Async mode
-          </label>
-          <span className="editor-hint">
-            The step spawns a background process; the scheduler monitors the PID
-            until completion.
-          </span>
-        </div>
-
-        <div className="editor-field">
-          <label className="editor-label">
-            <input
-              type="checkbox"
-              checked={emailOnFailure}
-              onChange={(e) => setEmailOnFailure(e.target.checked)}
-              style={{ marginRight: 8 }}
-            />
-            Email on failure (legacy shortcut)
-          </label>
-          <span className="editor-hint">
-            Convenience flag preserved for compatibility. For finer control, add
-            an Email action below. Requires email alerts configured in Settings.
-          </span>
-          {emailOnFailure && (
-            <div style={{ marginTop: 10 }}>
-              <label className="editor-label" htmlFor="wf-email-profile">
-                Delivery profile
+            <div className="editor-field">
+              <label className="editor-label" htmlFor="wf-env">
+                Environment
               </label>
               <Select
-                id="wf-email-profile"
-                value={emailProfileId}
-                onChange={(e) => setEmailProfileId(e.target.value)}
+                id="wf-env"
+                value={environment}
+                onChange={(e) => setEnvironment(e.target.value)}
                 disabled={isManaged}
               >
-                <option value="">Global default (Settings)</option>
-                {emailProfiles.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                    {p.enabled ? "" : " (disabled)"}
+                {envOptions.map((env) => (
+                  <option key={env} value={env}>
+                    {env.charAt(0).toUpperCase() + env.slice(1)}
                   </option>
                 ))}
               </Select>
               <span className="editor-hint">
-                Which named email profile receives failure alerts. Manage
-                profiles in Settings → Email Profiles.
+                The partition this workflow runs in. Manage environments from
+                the Environments screen.
               </span>
             </div>
-          )}
-        </div>
+          </div>
 
-        <div className="editor-field editor-actions-section">
-          <ActionsEditor
-            title="On success"
-            hint="Actions run when a run completes successfully."
-            actions={onSuccess}
-            onChange={setOnSuccess}
-            workflows={allWorkflows}
-            disabled={isManaged}
-          />
-          <ActionsEditor
-            title="On failure"
-            hint="Actions run when a run fails. Email is the required, always-available capability."
-            actions={onFailure}
-            onChange={setOnFailure}
-            workflows={allWorkflows}
-            emailRequired
-            disabled={isManaged}
-          />
-        </div>
+          <details
+            className="editor-execution-details"
+            open={executionOpen}
+            onToggle={(event) => setExecutionOpen(event.currentTarget.open)}
+          >
+            <summary>
+              Execution details ·{" "}
+              {kind === "generic" ? "Generic step flow" : "Typed operator"}
+            </summary>
+            <div className="editor-execution-body">
+              <fieldset
+                className="editor-field editor-kind"
+                disabled={isManaged}
+              >
+                <legend className="editor-label">Workflow type</legend>
+                <label className="editor-radio">
+                  <input
+                    type="radio"
+                    name="wf-kind"
+                    checked={kind === "generic"}
+                    onChange={() => setKind("generic")}
+                  />
+                  Generic — a multi-step flow of commands / scripts
+                </label>
+                <label className="editor-radio">
+                  <input
+                    type="radio"
+                    name="wf-kind"
+                    checked={kind === "typed"}
+                    onChange={() => setKind("typed")}
+                  />
+                  Typed — a single built-in operator (git pull, Cursor agent, …)
+                </label>
+              </fieldset>
+
+              {kind === "generic" ? (
+                <div className="editor-field">
+                  <span className="editor-label">Steps</span>
+                  <span className="editor-hint">
+                    Each step runs a command or script. Use “Depends on” to
+                    sequence steps into a DAG; independent steps run in
+                    parallel. Cycles are rejected on save.
+                  </span>
+                  <StepFlowBuilder
+                    steps={steps}
+                    onChange={setSteps}
+                    disabled={isManaged}
+                  />
+                </div>
+              ) : (
+                <div className="editor-field">
+                  <span className="editor-label">Operator</span>
+                  <OperatorConfigForm
+                    spec={typedSpec}
+                    onChange={setTypedSpec}
+                    disabled={isManaged}
+                  />
+                </div>
+              )}
+            </div>
+          </details>
+        </section>
+
+        <section className="editor-section" aria-label="Schedule">
+          <div className="editor-field">
+            {isManaged ? (
+              <>
+                <span className="editor-label">Schedule</span>
+                <div className="editor-hint">
+                  {cronToHuman(
+                    workflow?.cron_schedule ?? cronSchedule,
+                    workflow?.timezone,
+                  )}
+                </div>
+              </>
+            ) : (
+              <ScheduleBuilder
+                value={cronSchedule}
+                onChange={setCronSchedule}
+                timezone={workflow?.timezone}
+              />
+            )}
+          </div>
+
+          {isEdit && (
+            <div className="editor-field">
+              <label className="editor-label">
+                <input
+                  type="checkbox"
+                  checked={enabled}
+                  onChange={(e) => setEnabled(e.target.checked)}
+                  style={{ marginRight: 8 }}
+                />
+                Enabled
+              </label>
+            </div>
+          )}
+        </section>
+
+        <section
+          className="editor-section"
+          aria-labelledby="editor-runtime-title"
+        >
+          <h2 id="editor-runtime-title" className="editor-section-title">
+            Runtime and notifications
+          </h2>
+          <div className="editor-field">
+            <label className="editor-label">
+              <input
+                type="checkbox"
+                checked={asyncMode}
+                onChange={(e) => setAsyncMode(e.target.checked)}
+                disabled={isManaged}
+                style={{ marginRight: 8 }}
+              />
+              Async mode
+            </label>
+            <span className="editor-hint">
+              The step spawns a background process; the scheduler monitors the
+              PID until completion.
+            </span>
+          </div>
+
+          <div className="editor-field">
+            <label className="editor-label">
+              <input
+                type="checkbox"
+                checked={emailOnFailure}
+                onChange={(e) => setEmailOnFailure(e.target.checked)}
+                style={{ marginRight: 8 }}
+              />
+              Email on failure (legacy shortcut)
+            </label>
+            <span className="editor-hint">
+              Convenience flag preserved for compatibility. For finer control,
+              add an Email action below. Requires email alerts configured in
+              Settings.
+            </span>
+            {emailOnFailure && (
+              <div style={{ marginTop: 10 }}>
+                <label className="editor-label" htmlFor="wf-email-profile">
+                  Delivery profile
+                </label>
+                <Select
+                  id="wf-email-profile"
+                  value={emailProfileId}
+                  onChange={(e) => setEmailProfileId(e.target.value)}
+                  disabled={isManaged}
+                >
+                  <option value="">Global default (Settings)</option>
+                  {emailProfiles.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                      {p.enabled ? "" : " (disabled)"}
+                    </option>
+                  ))}
+                </Select>
+                <span className="editor-hint">
+                  Which named email profile receives failure alerts. Manage
+                  profiles in Settings → Email Profiles.
+                </span>
+              </div>
+            )}
+          </div>
+
+          <div className="editor-field editor-actions-section">
+            <ActionsEditor
+              title="On success"
+              hint="Actions run when a run completes successfully."
+              actions={onSuccess}
+              onChange={setOnSuccess}
+              workflows={allWorkflows}
+              disabled={isManaged}
+            />
+            <ActionsEditor
+              title="On failure"
+              hint="Actions run when a run fails. Email is the required, always-available capability."
+              actions={onFailure}
+              onChange={setOnFailure}
+              workflows={allWorkflows}
+              emailRequired
+              disabled={isManaged}
+            />
+          </div>
+        </section>
 
         <details className="editor-advanced">
           <summary>Advanced trigger &amp; queue metadata (JSON)</summary>
@@ -654,19 +717,6 @@ export default function WorkflowEditor({ workflow, onSaved, onCancel }: Props) {
             </div>
           </details>
         )}
-
-        <div className="editor-actions">
-          <Button
-            type="submit"
-            variant="primary"
-            disabled={saving || (!isManaged && !name) || !cronSchedule}
-          >
-            {saving ? "Saving..." : isEdit ? "Save Changes" : "Create Workflow"}
-          </Button>
-          <Button type="button" variant="ghost" onClick={onCancel}>
-            Cancel
-          </Button>
-        </div>
       </form>
     </div>
   );

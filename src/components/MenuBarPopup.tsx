@@ -1,20 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Play } from "lucide-react";
 import { useSchedulerStatus } from "../hooks/useSchedulerStatus";
 import { useAppUpdate } from "../hooks/useAppUpdate";
 import {
-  triggerWorkflow,
   quitApp,
   openDashboard,
   hidePopup,
   openRunDetail,
   environmentOf,
 } from "../lib/commands";
+import {
+  queueWorkflowRun,
+  formatWorkflowQueueOutcome,
+  formatWorkflowQueueError,
+} from "../lib/workflowEnqueue";
 import Button from "./Button";
 import StatusBadge from "./StatusBadge";
 import type { NextRun } from "../lib/commands";
 import { PRODUCT_SHORT_NAME } from "../lib/branding";
-import { formatRunStatusLabel } from "../lib/runStatus";
+import { formatRunStatusLabel, statusKey } from "../lib/runStatus";
 import "./MenuBarPopup.css";
 
 function envLabel(name: string): string {
@@ -43,8 +46,11 @@ export default function MenuBarPopup() {
   const { status, error, refresh } = useSchedulerStatus(30000);
   const { snapshot: updateSnapshot, install: installUpdate } = useAppUpdate();
   const showTime = useRef(0);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [runningWorkflowId, setRunningWorkflowId] = useState<string | null>(
+  const [actionFeedback, setActionFeedback] = useState<{
+    text: string;
+    type: "success" | "error";
+  } | null>(null);
+  const [queueingWorkflowId, setQueueingWorkflowId] = useState<string | null>(
     null,
   );
   const [updating, setUpdating] = useState(false);
@@ -64,12 +70,15 @@ export default function MenuBarPopup() {
       updatePhase === "ready_to_restart");
 
   const handleUpdate = async () => {
-    setActionError(null);
+    setActionFeedback(null);
     setUpdating(true);
     try {
       await installUpdate(updateSnapshot?.latest_version ?? undefined);
     } catch (e) {
-      setActionError(`Update failed: ${String(e)}`);
+      setActionFeedback({
+        text: `Update failed: ${String(e)}`,
+        type: "error",
+      });
     } finally {
       setUpdating(false);
     }
@@ -93,16 +102,23 @@ export default function MenuBarPopup() {
     };
   }, []);
 
-  const handleRun = async (workflowId: string) => {
-    setActionError(null);
-    setRunningWorkflowId(workflowId);
+  const handleQueue = async (workflowId: string, workflowName: string) => {
+    setActionFeedback(null);
+    setQueueingWorkflowId(workflowId);
     try {
-      await triggerWorkflow(workflowId);
+      const outcome = await queueWorkflowRun(workflowId);
+      setActionFeedback({
+        text: formatWorkflowQueueOutcome(workflowName, outcome),
+        type: "success",
+      });
       await refresh();
     } catch (e) {
-      setActionError(`Failed to trigger workflow: ${String(e)}`);
+      setActionFeedback({
+        text: formatWorkflowQueueError(workflowName, e),
+        type: "error",
+      });
     } finally {
-      setRunningWorkflowId(null);
+      setQueueingWorkflowId(null);
     }
   };
 
@@ -121,18 +137,23 @@ export default function MenuBarPopup() {
 
   if (!status) {
     return (
-      <div className="popup">
+      <main className="popup" aria-labelledby="popup-title">
+        <h1 id="popup-title" className="sr-only">
+          {PRODUCT_SHORT_NAME}
+        </h1>
         <div className={error ? "popup-loading popup-error" : "popup-loading"}>
           {error ? `Status failed to load: ${error}` : "Loading..."}
         </div>
-      </div>
+      </main>
     );
   }
 
   return (
-    <div className="popup">
+    <main className="popup" aria-labelledby="popup-title">
       <div className="popup-header">
-        <span className="popup-title">{PRODUCT_SHORT_NAME}</span>
+        <h1 id="popup-title" className="popup-title">
+          {PRODUCT_SHORT_NAME}
+        </h1>
         <span className="popup-meta">
           {status.active_workflows} active
           {status.running_count > 0 && (
@@ -144,13 +165,27 @@ export default function MenuBarPopup() {
         </span>
       </div>
       {error && (
-        <div className="popup-inline-error">Status refresh failed: {error}</div>
+        <div className="popup-inline-error" role="alert">
+          Status refresh failed: {error}
+        </div>
       )}
-      {actionError && <div className="popup-inline-error">{actionError}</div>}
+      {actionFeedback && (
+        <div
+          className={`popup-inline-message ${actionFeedback.type}`}
+          role={actionFeedback.type === "error" ? "alert" : "status"}
+        >
+          {actionFeedback.text}
+        </div>
+      )}
 
       <div className="popup-scroll">
-        <div className="popup-section">
-          <div className="popup-section-title">Next Runs</div>
+        <section
+          className="popup-section"
+          aria-labelledby="popup-next-runs-title"
+        >
+          <h2 className="popup-section-title" id="popup-next-runs-title">
+            Next Runs
+          </h2>
           {status.next_runs.length === 0 ? (
             <div className="popup-empty">No scheduled workflows</div>
           ) : (
@@ -175,20 +210,16 @@ export default function MenuBarPopup() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => handleRun(nr.workflow_id)}
-                          disabled={runningWorkflowId === nr.workflow_id}
-                          title="Run now"
-                          aria-label={`Run ${nr.workflow_name} now`}
+                          onClick={() =>
+                            handleQueue(nr.workflow_id, nr.workflow_name)
+                          }
+                          disabled={queueingWorkflowId === nr.workflow_id}
+                          title="Queue run"
+                          aria-label={`Queue run ${nr.workflow_name}`}
                         >
-                          {runningWorkflowId === nr.workflow_id ? (
-                            "..."
-                          ) : (
-                            <Play
-                              size={12}
-                              strokeWidth={2.5}
-                              aria-hidden="true"
-                            />
-                          )}
+                          {queueingWorkflowId === nr.workflow_id
+                            ? "Queueing…"
+                            : "Queue run"}
                         </Button>
                       </div>
                     ))}
@@ -197,10 +228,15 @@ export default function MenuBarPopup() {
               ))}
             </>
           )}
-        </div>
+        </section>
 
-        <div className="popup-section">
-          <div className="popup-section-title">Recent Results</div>
+        <section
+          className="popup-section"
+          aria-labelledby="popup-recent-results-title"
+        >
+          <h2 className="popup-section-title" id="popup-recent-results-title">
+            Recent Results
+          </h2>
           {status.recent_runs.length === 0 ? (
             <div className="popup-empty">No runs yet</div>
           ) : (
@@ -212,7 +248,10 @@ export default function MenuBarPopup() {
                   onClick={() => openRunDetail(run.id, run.workflow_id)}
                 >
                   <div className="popup-item-info">
-                    <span className={`popup-dot ${run.status}`} />
+                    <span
+                      className={`popup-dot ${statusKey(run.status)}`}
+                      aria-hidden="true"
+                    />
                     <span className="popup-item-name">
                       {run.workflow_name ?? run.workflow_id.slice(0, 8)}
                     </span>
@@ -227,12 +266,13 @@ export default function MenuBarPopup() {
               ))}
             </div>
           )}
-        </div>
+        </section>
       </div>
 
       {showUpdateRow && (
-        <div
+        <aside
           className="popup-update-row"
+          aria-label="Application update"
           aria-busy={updateDownloading || undefined}
         >
           <span className="popup-update-text">
@@ -248,17 +288,17 @@ export default function MenuBarPopup() {
           >
             {updateDownloading ? "Updating…" : "Update"}
           </Button>
-        </div>
+        </aside>
       )}
 
-      <div className="popup-footer">
+      <footer className="popup-footer">
         <Button variant="primary" size="sm" onClick={() => openDashboard()}>
           Open Mission Control
         </Button>
         <Button variant="ghost" size="sm" onClick={() => quitApp()}>
           Quit
         </Button>
-      </div>
-    </div>
+      </footer>
+    </main>
   );
 }

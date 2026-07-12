@@ -14,23 +14,25 @@ import Sidebar from "./Sidebar";
  * Figma Code Connect mapping for the `Sidebar` component set
  * (node 305:6378, file twQmWC8dWT4tqeqIigNsRy).
  *
- * The Figma master's only variant is a presentation `Layout` (Expanded /
- * Collapsed) together with a collapse-toggle affordance the code sidebar does
- * not implement (it always renders the expanded layout), so nothing maps to a
- * code prop and `props` is intentionally omitted. The primitive is driven by
- * its `navItems` + `currentView` + `onNavigate` data seam and its
- * `themePreference` + `onThemeChange` theme seam; the example mirrors the
- * master's expanded content with Home active, and the composed `NavItem`s
- * resolve through their own Code Connect mapping. Consumed by the `figma` CLI,
- * not Vite: excluded from tsconfig.app.json and ESLint so it never enters the
- * app build.
+ * The `Layout` variant maps to the component's controlled `collapsed` prop.
+ * Production may omit that prop to use Sidebar's internal toggle state. The
+ * remaining data/theme seams are represented by the example; composed
+ * `NavItem`s resolve through their own Code Connect mapping. Consumed by the
+ * `figma` CLI, not Vite.
  */
 figma.connect(
   Sidebar,
   "https://www.figma.com/design/twQmWC8dWT4tqeqIigNsRy/Chaos-Scheduler?node-id=305-6378",
   {
-    example: () => (
+    props: {
+      collapsed: figma.enum("Layout", {
+        Expanded: false,
+        Collapsed: true,
+      }),
+    },
+    example: ({ collapsed }) => (
       <Sidebar
+        collapsed={collapsed}
         navItems={[
           { view: "mission", label: "Home", Icon: Gauge, match: ["mission"] },
           {

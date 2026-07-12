@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useId, useState } from "react";
 import Select from "./Select";
 import "./ScheduleBuilder.css";
 
@@ -181,16 +181,17 @@ function shiftDayName(day: string, shift: number): string {
 }
 
 export function cronToHuman(cron: string, timezone?: string): string {
-  if (cron.includes(";")) {
-    const parts = cron
-      .split(";")
-      .map((c) => cronToHuman(c.trim(), timezone))
-      .filter(Boolean);
-    return parts.join(" and ");
-  }
+  const isMultiSchedule = cron.includes(";");
   const needsConvert = timezone && timezone !== LOCAL_TZ;
   const state = stateFromCron(cron, timezone);
   if (!state) {
+    if (isMultiSchedule) {
+      return cron
+        .split(";")
+        .map((part) => cronToHuman(part.trim(), timezone))
+        .filter(Boolean)
+        .join(" and ");
+    }
     const normalized = normalizeCron(cron);
     const parts = normalized.trim().split(/\s+/);
     if (parts.length >= 6) {
@@ -490,7 +491,11 @@ function validateRawCron(cron: string): string | null {
 }
 
 export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
-  const parsed = stateFromCron(value, timezone);
+  const builderId = useId();
+  // Editing always preserves the workflow's source-timezone fields. Converting
+  // the builder state to the viewer's timezone would silently rewrite the cron
+  // expression when they switch modes or save without changing the schedule.
+  const parsed = stateFromCron(value);
   const [isAdvanced, setIsAdvanced] = useState(!parsed && !!value);
   const [state, setState] = useState<ScheduleState>(parsed ?? DEFAULT_STATE);
   const [rawCron, setRawCron] = useState(value);
@@ -541,12 +546,6 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
     [onChange],
   );
 
-  useEffect(() => {
-    if (!isAdvanced) {
-      onChange(cronFromState(state));
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
   const handleAdvancedToggle = () => {
     if (isAdvanced) {
       const parsed = stateFromCron(rawCron);
@@ -585,18 +584,22 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
     updateState({ selectedDays: ordered });
   };
 
-  const preview = isAdvanced
-    ? cronToHuman(rawCron, timezone)
-    : humanFromState(state);
+  const preview = isAdvanced ? cronToHuman(rawCron) : humanFromState(state);
   const nextRun = isAdvanced ? null : getNextRun(state);
 
   return (
-    <div className="sched-builder">
-      <span className="editor-label">Schedule</span>
+    <div
+      className="sched-builder"
+      role="group"
+      aria-labelledby={`${builderId}-label`}
+    >
+      <span className="editor-label" id={`${builderId}-label`}>
+        Schedule
+      </span>
 
       {!isAdvanced && (
         <>
-          <div className="sched-freq-bar">
+          <div className="sched-freq-bar" role="group" aria-label="Frequency">
             {(
               [
                 "hourly",
@@ -610,6 +613,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                 key={f}
                 type="button"
                 className={`sched-freq-btn ${state.frequency === f ? "active" : ""}`}
+                aria-pressed={state.frequency === f}
                 onClick={() => updateState({ frequency: f })}
               >
                 {f.charAt(0).toUpperCase() + f.slice(1)}
@@ -623,6 +627,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                 <span className="sched-label">Every</span>
                 <Select
                   value={state.interval}
+                  aria-label="Hour interval"
                   onChange={(e) =>
                     updateState({ interval: parseInt(e.target.value) })
                   }
@@ -640,12 +645,14 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
             )}
 
             {state.frequency === "weekly" && (
-              <div className="sched-days">
+              <div className="sched-days" role="group" aria-label="Days">
                 {DAYS_OF_WEEK.map((d, i) => (
                   <button
                     key={d.key}
                     type="button"
                     className={`sched-day-pill ${state.selectedDays.includes(d.key) ? "active" : ""}`}
+                    aria-label={DAY_NAMES_LONG[d.key]}
+                    aria-pressed={state.selectedDays.includes(d.key)}
                     onClick={() => toggleDay(d.key)}
                     title={DAY_NAMES_LONG[d.key]}
                   >
@@ -663,6 +670,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                 <span className="sched-label">On day</span>
                 <Select
                   value={state.dayOfMonth}
+                  aria-label="Day of month"
                   onChange={(e) =>
                     updateState({ dayOfMonth: parseInt(e.target.value) })
                   }
@@ -683,6 +691,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                     <span className="sched-label">At</span>
                     <Select
                       value={t.hour}
+                      aria-label={`Time ${idx + 1} hour`}
                       onChange={(e) =>
                         updateTimeAt(idx, { hour: parseInt(e.target.value) })
                       }
@@ -696,6 +705,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                     <span className="sched-colon">:</span>
                     <Select
                       value={t.minute}
+                      aria-label={`Time ${idx + 1} minute`}
                       onChange={(e) =>
                         updateTimeAt(idx, { minute: parseInt(e.target.value) })
                       }
@@ -706,10 +716,15 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                         </option>
                       ))}
                     </Select>
-                    <div className="sched-ampm-toggle">
+                    <div
+                      className="sched-ampm-toggle"
+                      role="group"
+                      aria-label={`Time ${idx + 1} period`}
+                    >
                       <button
                         type="button"
                         className={`sched-ampm-btn ${t.ampm === "AM" ? "active" : ""}`}
+                        aria-pressed={t.ampm === "AM"}
                         onClick={() => updateTimeAt(idx, { ampm: "AM" })}
                       >
                         AM
@@ -717,6 +732,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                       <button
                         type="button"
                         className={`sched-ampm-btn ${t.ampm === "PM" ? "active" : ""}`}
+                        aria-pressed={t.ampm === "PM"}
                         onClick={() => updateTimeAt(idx, { ampm: "PM" })}
                       >
                         PM
@@ -726,6 +742,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
                       <button
                         type="button"
                         className="sched-time-remove"
+                        aria-label={`Remove time ${idx + 1}`}
                         onClick={() => removeTime(idx)}
                         title="Remove this time"
                       >
@@ -752,12 +769,19 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
           <input
             type="text"
             value={rawCron}
+            aria-label="Cron expression"
+            aria-invalid={rawError ? "true" : undefined}
+            aria-describedby={`${builderId}-cron-hint${rawError ? ` ${builderId}-cron-error` : ""}`}
             onChange={(e) => handleRawChange(e.target.value)}
             placeholder="sec min hour day month weekday year"
             className={rawError ? "sched-input-error" : ""}
           />
-          {rawError && <span className="sched-error">{rawError}</span>}
-          <span className="editor-hint">
+          {rawError && (
+            <span className="sched-error" id={`${builderId}-cron-error`}>
+              {rawError}
+            </span>
+          )}
+          <span className="editor-hint" id={`${builderId}-cron-hint`}>
             7-field cron: sec min hour day month weekday year. Use ; to separate
             multiple schedules.
             {timezone && timezone !== LOCAL_TZ
@@ -767,7 +791,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
         </div>
       )}
 
-      <div className="sched-preview">
+      <div className="sched-preview" aria-live="polite">
         <span className="sched-preview-text">{preview}</span>
         {nextRun && (
           <span className="sched-preview-next">
@@ -779,6 +803,7 @@ export default function ScheduleBuilder({ value, onChange, timezone }: Props) {
       <button
         type="button"
         className="sched-toggle-link"
+        aria-expanded={isAdvanced}
         onClick={handleAdvancedToggle}
       >
         {isAdvanced ? "Use visual builder" : "Edit cron expression"}

@@ -1,8 +1,8 @@
 import { ChevronDown } from "lucide-react";
+import { LOOKBACK_PRESETS, type Lookback } from "../lib/lookback";
 import "./LookbackSelect.css";
 
-/** A lookback window: one of the presets or the `custom` (date-range) sentinel. */
-export type Lookback = "1d" | "3d" | "7d" | "30d" | "custom";
+export type { Lookback };
 
 export interface LookbackSelectProps {
   /** Currently-selected lookback window. */
@@ -20,7 +20,7 @@ export interface LookbackSelectProps {
   className?: string;
 }
 
-const DEFAULT_OPTIONS: Lookback[] = ["1d", "3d", "7d", "30d"];
+const DEFAULT_OPTIONS: Lookback[] = [...LOOKBACK_PRESETS];
 
 const LABELS: Record<Lookback, string> = {
   "1d": "1d",

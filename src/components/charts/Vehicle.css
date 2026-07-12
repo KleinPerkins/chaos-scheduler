@@ -1,0 +1,11 @@
+/*
+ * Vehicle — flat race-view car glyph. Every fill is set inline from a token var
+ * (body/glass/tire/hub/headlight); this file only owns box behavior so the glyph
+ * can overflow its viewBox (large wheels) without clipping. Never raw hex — see
+ * tokens.css / DESIGN-SYSTEM.md.
+ */
+
+.cs-vehicle {
+  display: block;
+  overflow: visible;
+}
