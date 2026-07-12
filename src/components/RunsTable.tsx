@@ -27,11 +27,13 @@ function formatDate(iso: string): string {
 
 /**
  * Shared runs table primitive. A typed extraction of the cross-workflow
- * `.rh-table` (see `RunHistory.css` / DESIGN-SYSTEM.md) — it renders the exact
- * same `<table>` markup the Global History call site used before, composing the
+ * `.rh-table` (see `RunHistory.css` / DESIGN-SYSTEM.md) — it renders the same
+ * `<table>` markup the Global History call site used before, composing the
  * shared `StatusBadge` and `Button` primitives in the cells, so behavior and
- * styling are unchanged. When `runs` is empty it renders the same `.rh-empty`
- * placeholder the call site rendered, using `emptyLabel`.
+ * styling are unchanged. It carries an sr-only `<caption>` (visually hidden,
+ * matching RunHistory's) so the table has an accessible name for assistive
+ * tech. When `runs` is empty it renders the same `.rh-empty` placeholder the
+ * call site rendered, using `emptyLabel`.
  */
 export default function RunsTable({
   runs,
@@ -44,6 +46,7 @@ export default function RunsTable({
 
   return (
     <table className="rh-table">
+      <caption className="sr-only">Latest runs</caption>
       <thead>
         <tr>
           <th>Status</th>
