@@ -1772,6 +1772,36 @@ mod tests {
     }
 
     #[test]
+    fn open_url_allows_only_http_https_cursor_and_rejects_flag_injection() {
+        // Allowlisted schemes (case-insensitive).
+        assert!(validate_open_url("https://cursor.com").is_ok());
+        assert!(validate_open_url("HTTP://localhost:9618/x").is_ok());
+        assert!(validate_open_url("cursor://file/Users/me/script.py").is_ok());
+
+        // Blocked schemes — the renderer allowlist is bypassable, so these
+        // must be rejected server-side.
+        for blocked in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "ftp://host/x",
+            "vscode://anything",
+            "data:text/html,x",
+        ] {
+            assert!(
+                validate_open_url(blocked).is_err(),
+                "expected {blocked} to be blocked"
+            );
+        }
+
+        // Flag-injection and malformed inputs.
+        assert!(validate_open_url("-e").is_err());
+        assert!(validate_open_url("--reveal").is_err());
+        assert!(validate_open_url("").is_err());
+        assert!(validate_open_url("   ").is_err());
+        assert!(validate_open_url("not-a-url").is_err());
+    }
+
+    #[test]
     fn parse_lookback_maps_grammar_to_modifier_and_seconds() {
         assert_eq!(
             parse_lookback(Some("1d")).unwrap(),
@@ -1925,9 +1955,52 @@ pub fn hide_popup(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Extract and lowercase the URL scheme (the substring before the first `:`),
+/// validating it against the RFC 3986 scheme grammar
+/// (`ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`). Returns `None` for a missing
+/// or malformed scheme. Dependency-free (no `url` crate), mirroring the manual
+/// parsing style in `operators.rs`.
+fn open_url_scheme(url: &str) -> Option<String> {
+    let idx = url.find(':')?;
+    let scheme = &url[..idx];
+    let mut chars = scheme.chars();
+    let first = chars.next()?;
+    if !first.is_ascii_alphabetic() {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.') {
+        return None;
+    }
+    Some(scheme.to_ascii_lowercase())
+}
+
+/// Server-side scheme allowlist for [`open_url`]. Allows ONLY `http`, `https`,
+/// and `cursor`, and rejects a leading `-` (flag injection into `open`). The
+/// renderer-side allowlist (`src/lib/openExternalSafe.ts`) is UX-only and
+/// bypassable, so this is the authoritative gate.
+fn validate_open_url(url: &str) -> Result<(), String> {
+    if url.trim().is_empty() {
+        return Err("open_url: URL must not be empty".into());
+    }
+    // A leading '-' would be parsed by `open` as an option even before the
+    // positional `--` separator is reached during arg construction.
+    if url.starts_with('-') {
+        return Err("open_url: URL must not begin with '-'".into());
+    }
+    match open_url_scheme(url).as_deref() {
+        Some("http") | Some("https") | Some("cursor") => Ok(()),
+        Some(other) => Err(format!("open_url: blocked URL scheme '{other}'")),
+        None => Err("open_url: URL has no valid scheme".into()),
+    }
+}
+
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
+    validate_open_url(&url)?;
+    // `--` stops `open` from interpreting the URL as an option flag (belt and
+    // suspenders on top of the leading-'-' rejection above).
     std::process::Command::new("open")
+        .arg("--")
         .arg(&url)
         .spawn()
         .map_err(|e| format!("Failed to open URL: {}", e))?;
