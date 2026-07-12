@@ -17,7 +17,7 @@
  *   cron_schedule: "0 6 * * *",
  *   environment: "production",
  * });
- * const outcome = await client.runWorkflow(wf.id, { idempotencyKey: crypto.randomUUID() });
+ * const outcome = await client.enqueueWorkflow(wf.id, { idempotencyKey: crypto.randomUUID() });
  * ```
  */
 

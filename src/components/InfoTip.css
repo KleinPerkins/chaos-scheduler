@@ -20,7 +20,13 @@
   border: 1px solid var(--border-strong);
   border-radius: 50%;
   background: var(--bg-tertiary);
-  color: var(--accent);
+  /*
+   * `--accent` on `--bg-tertiary` is only ~2.82:1 in dark mode (fails WCAG AA
+   * 1.4.3): the brand accent is too dark to be legible small text on a dark
+   * surface (it maxes at ~3.99:1 even on pure black). Use the secondary text
+   * token, which clears AA in both themes (see src/styles/figma-tokens.test.ts).
+   */
+  color: var(--text-secondary);
   font-family: var(--font-sans);
   font-size: var(--font-size-xs);
   font-weight: 600;

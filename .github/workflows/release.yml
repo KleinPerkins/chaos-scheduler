@@ -127,7 +127,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-mcp:
     name: npm publish @chaos-scheduler/mcp-server
-    if: ${{ inputs.mcp_tag != '' && (needs.publish-sdk.result == 'success' || needs.publish-sdk.result == 'skipped') }}
+    if: ${{ !cancelled() && inputs.mcp_tag != '' && (needs.publish-sdk.result == 'success' || needs.publish-sdk.result == 'skipped') }}
     needs: [publish-sdk]
     runs-on: ubuntu-latest
     environment: release
@@ -180,7 +180,7 @@ jobs:
   # ---------------------------------------------------------------------------
   mcp-consumer-smoke:
     name: Consumer-install smoke (@chaos-scheduler/mcp-server)
-    if: ${{ (inputs.desktop_tag != '' || inputs.mcp_tag != '') && (needs.publish-mcp.result == 'success' || needs.publish-mcp.result == 'skipped') }}
+    if: ${{ !cancelled() && (inputs.desktop_tag != '' || inputs.mcp_tag != '') && (needs.publish-mcp.result == 'success' || needs.publish-mcp.result == 'skipped') }}
     needs: [publish-sdk, publish-mcp]
     runs-on: ubuntu-latest
     outputs:
@@ -216,7 +216,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-macos:
     name: macOS desktop (signed + notarized, universal)
-    if: ${{ inputs.desktop_tag != '' && needs.mcp-consumer-smoke.result == 'success' && needs.guard-latest-before-desktop-release.result == 'success' }}
+    if: ${{ !cancelled() && inputs.desktop_tag != '' && needs.mcp-consumer-smoke.result == 'success' && needs.guard-latest-before-desktop-release.result == 'success' }}
     needs: [mcp-consumer-smoke, guard-latest-before-desktop-release]
     runs-on: macos-14
     environment: release

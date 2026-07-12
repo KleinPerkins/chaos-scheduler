@@ -38,8 +38,8 @@ const wf = await client.registerWorkflow({
   environment: "production",
 });
 
-// 2) Run it now, safely retryable via an idempotency key (scope: write)
-const outcome = await client.runWorkflow(wf.id, {
+// 2) Enqueue a run, safely retryable via an idempotency key (scope: write)
+const outcome = await client.enqueueWorkflow(wf.id, {
   idempotencyKey: crypto.randomUUID(),
 });
 
@@ -90,7 +90,7 @@ scheduler process is started with
 ```ts
 import { isDuplicateDispatch } from "@chaos-scheduler/sdk";
 
-const res = await client.runWorkflow(id, { idempotencyKey: key });
+const res = await client.enqueueWorkflow(id, { idempotencyKey: key });
 if (isDuplicateDispatch(res)) {
   // replay: res.run_id or res.queued_run_id points at the first request
 } else {
@@ -194,6 +194,11 @@ Client methods (all return typed models):
 | `deleteEmailProfile(id)`                 | `DELETE /api/v1/email-profiles/{id}`        | write |
 | `setWorkflowEmailProfile(id, profileId)` | `POST /api/v1/workflows/{id}/email-profile` | write |
 | `waitForRun(runId, opts)`                | polls `GET /api/v1/runs/{id}`               | read  |
+
+> **Deprecated:** `runWorkflow` (`POST /api/v1/workflows/{id}/run`) is an alias of
+> `enqueueWorkflow`. Manual runs are admission-controlled — `/run` does **not**
+> execute immediately or bypass the queue, it shares the same admission path as
+> `/enqueue` — so prefer `enqueueWorkflow`. `runWorkflow` keeps working unchanged.
 
 Email-profile `smtp_password` values are masked (`••••••••`, exported as
 `MASKED_SECRET`) on read; echo the mask back on update to preserve the stored

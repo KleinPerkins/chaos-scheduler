@@ -33,10 +33,8 @@ describe("WorkflowDetail manual execution", () => {
 
   it("queues through admission control and reports the queued-run identity", async () => {
     installStrictIpcMocks();
-    const triggerWorkflow = vi.fn();
     let enqueueArgs: Record<string, unknown> | undefined;
     window.__CHAOS_IPC_OVERRIDES__ = {
-      trigger_workflow: triggerWorkflow,
       enqueue_workflow: (args) => {
         enqueueArgs = args;
         return {
@@ -70,7 +68,6 @@ describe("WorkflowDetail manual execution", () => {
         screen.getByText(/Waiting to start: Nightly sync.*queued-d/),
       ).toBeInTheDocument(),
     );
-    expect(triggerWorkflow).not.toHaveBeenCalled();
     expect(enqueueArgs?.idempotencyKey).toMatch(/^ui-enqueue:wf-demo-1:/);
   });
 

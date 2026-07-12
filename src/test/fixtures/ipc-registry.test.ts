@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import {
@@ -6,6 +8,28 @@ import {
   type IpcCommand,
 } from "./ipc-registry";
 import { defaultMcpIntegrationStatus } from "./data";
+
+/** Parse the command identifiers out of the `tauri::generate_handler![ ... ]`
+ * block in `src-tauri/src/lib.rs` — the authoritative Rust IPC registration. */
+function rustRegisteredCommands(): string[] {
+  // Vitest runs from the repo root, so resolve the Rust entrypoint relative to
+  // `process.cwd()` (the jsdom environment gives `import.meta.url` an http:
+  // scheme, which `fileURLToPath` rejects).
+  const libRs = readFileSync(
+    resolve(process.cwd(), "src-tauri/src/lib.rs"),
+    "utf8",
+  );
+  const start = libRs.indexOf("generate_handler![");
+  const end = libRs.indexOf("])", start);
+  if (start === -1 || end === -1) {
+    throw new Error("could not locate generate_handler! block in lib.rs");
+  }
+  const block = libRs.slice(start, end);
+  const commands = [...block.matchAll(/commands::([a-z0-9_]+)/g)].map(
+    (match) => match[1],
+  );
+  return [...new Set(commands)].sort();
+}
 
 describe("ipc fixture registry", () => {
   afterEach(() => {
@@ -36,7 +60,6 @@ describe("ipc fixture registry", () => {
       "get_mcp_integration_status",
       "provision_mcp_integration",
       "remove_mcp_integration",
-      "trigger_workflow",
       "enqueue_workflow",
       "rerun_workflow",
       "plan_backfill",
@@ -52,6 +75,7 @@ describe("ipc fixture registry", () => {
       "get_run_metrics",
       "get_run_relationships",
       "get_global_run_history",
+      "get_run_history_model",
       "cleanup_retention",
       "get_workflow_history_buckets",
       "get_sla_violations",
@@ -107,6 +131,34 @@ describe("ipc fixture registry", () => {
       );
     }
     expect(Object.keys(registry)).toHaveLength(commands.length);
+  });
+
+  // Strict cross-language parity: the TS fixture registry and the Rust
+  // `generate_handler!` list must be identical. Fails loudly if either side
+  // adds/removes a command without the other — the drift that silently breaks
+  // real IPC calls or leaves dead mock handlers.
+  it("stays in strict parity with the Rust generate_handler! command list", () => {
+    const rustCommands = rustRegisteredCommands();
+    const tsCommands = Object.keys(createDefaultIpcRegistry()).sort();
+    expect(tsCommands).toEqual(rustCommands);
+  });
+
+  it("registers get_run_history_model in BOTH the Rust list and the TS registry", () => {
+    const rustCommands = rustRegisteredCommands();
+    const tsCommands = Object.keys(createDefaultIpcRegistry());
+    expect(rustCommands).toContain("get_run_history_model");
+    expect(tsCommands).toContain("get_run_history_model");
+  });
+
+  // The immediate-run `trigger_workflow` command was removed: manual runs are
+  // queue-only (they route through admission control via enqueue/rerun). The
+  // dead command must be absent from the mock registry AND the Rust
+  // generate_handler! list, or a stale mock handler would mask its removal.
+  it("no longer registers the dead trigger_workflow command", () => {
+    const registry = createDefaultIpcRegistry();
+    expect(registry).not.toHaveProperty("trigger_workflow");
+    expect(Object.keys(registry)).not.toContain("trigger_workflow");
+    expect(rustRegisteredCommands()).not.toContain("trigger_workflow");
   });
 
   it("throws on unhandled commands", () => {

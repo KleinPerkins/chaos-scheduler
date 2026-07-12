@@ -143,7 +143,7 @@ export default function GlobalHistory({ onViewRun }: Props) {
       </div>
 
       {error ? (
-        <div className="rh-error">
+        <div className="rh-error" role="alert">
           <span>History failed to load: {error}</span>
           <Button
             variant="ghost"

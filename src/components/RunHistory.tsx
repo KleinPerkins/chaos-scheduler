@@ -117,8 +117,16 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
     setRerunning(rerunTarget.id);
     setRerunError(null);
     try {
-      await rerunWorkflow(workflow.id, rerunTarget.id, input);
+      // Rerun routes through admission control now, so it may QUEUE (or replay
+      // as a duplicate) rather than start immediately. Surface the same
+      // outcome feedback the "Queue run" path shows so a queued rerun is not
+      // silently invisible to the user.
+      const outcome = await rerunWorkflow(workflow.id, rerunTarget.id, input);
       setRerunTarget(null);
+      setNotice({
+        text: formatWorkflowQueueOutcome(workflow.name, outcome),
+        type: "success",
+      });
       await refreshRuns();
     } catch (e) {
       setRerunError(String(e));
@@ -187,7 +195,7 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
       {loading ? (
         <div className="rh-loading">Loading...</div>
       ) : error ? (
-        <div className="rh-error">
+        <div className="rh-error" role="alert">
           <span>Run history failed to load: {error}</span>
           <Button variant="ghost" size="sm" onClick={() => void refreshRuns()}>
             Retry

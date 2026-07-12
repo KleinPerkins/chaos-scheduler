@@ -280,9 +280,15 @@ export class ChaosSchedulerClient {
   // --- Dispatch (write) ---
 
   /**
-   * `POST /api/v1/workflows/{id}/run` — dispatch a run now (scope: write).
+   * `POST /api/v1/workflows/{id}/run` — request a manual run (scope: write).
    * Supply `idempotencyKey` for safe retries; a reused key returns
    * `{ status: "duplicate", run_id }`.
+   *
+   * The `/run` route takes the *same* admission-controlled path as `/enqueue`
+   * (it does not bypass the queue or execute immediately); the two differ only
+   * in the recorded trigger label, so the return shape is identical.
+   *
+   * @deprecated Use enqueueWorkflow — manual runs are admission-controlled; this is an alias.
    */
   async runWorkflow(
     id: string,

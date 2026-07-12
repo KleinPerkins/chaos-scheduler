@@ -326,6 +326,17 @@ describe("Chaos MCP server", () => {
     expect(JSON.parse(textOf(result)).run_id).toBe("r1");
   });
 
+  it("marks run_workflow_now deprecated in its description (steers to enqueue_workflow)", async () => {
+    const { client } = await connectedPair();
+    const { tools } = await client.listTools();
+    const runNow = tools.find((t) => t.name === "run_workflow_now");
+    expect(runNow).toBeDefined();
+    // Manual runs are admission-controlled; run_workflow_now is a deprecated
+    // alias that still works but should steer callers to enqueue_workflow.
+    expect(runNow!.description ?? "").toMatch(/deprecated/i);
+    expect(runNow!.description ?? "").toMatch(/enqueue_workflow/);
+  });
+
   it("blocks writes to a protected environment (guardrail)", async () => {
     const { client } = await connectedPair({
       CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "production",

@@ -46,3 +46,19 @@ export async function openRunDetail(
     .getByRole("region", { name: `${name} run detail` })
     .waitFor({ state: "visible" });
 }
+
+/**
+ * Navigate to the cross-workflow Global History surface. Mirrors the other
+ * openers by awaiting the named surface region (the `<section>` labelled
+ * "Global History") rather than just the sidebar's `aria-current` state, so
+ * callers can proceed as soon as the surface has actually mounted. The region
+ * is present in both the loaded and the load-error states, so this helper is
+ * safe to use ahead of either assertion.
+ */
+export async function openGlobalHistory(page: Page): Promise<void> {
+  await gotoDashboard(page);
+  await openSidebar(page, "History");
+  await page
+    .getByRole("region", { name: "Global History" })
+    .waitFor({ state: "visible" });
+}

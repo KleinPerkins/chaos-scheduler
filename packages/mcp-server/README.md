@@ -112,6 +112,10 @@ Each write tool passes through the protected-environment guardrail; all tools
 count against the optional tool-call budget. Dispatch tools forward `idempotency_key`;
 replays return the original `run_id` or `queued_run_id`.
 
+`run_workflow_now` is **deprecated** — manual runs are admission-controlled, so it
+is an alias of `enqueue_workflow` (same queued path, same result). It keeps working
+unchanged, but prefer `enqueue_workflow`.
+
 ### Resources
 
 `chaos://version`, `chaos://environments`, `chaos://workflows`,

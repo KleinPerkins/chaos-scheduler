@@ -9,8 +9,10 @@ import StatusDot from "./StatusDot";
  * code props: `Base` → `variant` (the `status-dot` / `mc-dot` indicator class)
  * and `Status` → the raw status token appended as the `.<variant>.<status>`
  * modifier class (matching the sibling `StatusBadge`; "Warning" → the canonical
- * `poll_exhausted` warning tier). Consumed by the `figma` CLI, not Vite:
- * excluded from tsconfig.app.json and ESLint so it never enters the app build.
+ * `poll_exhausted` warning tier, which now renders on the shared `--warning`
+ * color for BOTH the `status-dot` and `mc-dot` variants per the Figma D04
+ * mapping). Consumed by the `figma` CLI, not Vite: excluded from
+ * tsconfig.app.json and ESLint so it never enters the app build.
  */
 figma.connect(
   StatusDot,

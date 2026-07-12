@@ -328,7 +328,7 @@ pub fn run() {
                 WebviewUrl::App("index.html?view=popup".into()),
             )
             .title(branding::POPUP_TITLE)
-            .inner_size(340.0, 440.0)
+            .inner_size(384.0, 590.0)
             .resizable(false)
             .visible(false)
             .decorations(false)
@@ -371,7 +371,7 @@ pub fn run() {
                                 let icon_w = phys_size.width / scale;
                                 let icon_h = phys_size.height / scale;
 
-                                let popup_width = 340.0_f64;
+                                let popup_width = 384.0_f64;
                                 let x = icon_x + (icon_w / 2.0) - (popup_width / 2.0);
                                 let y = icon_y + icon_h;
 
@@ -420,7 +420,6 @@ pub fn run() {
             commands::get_mcp_integration_status,
             commands::provision_mcp_integration,
             commands::remove_mcp_integration,
-            commands::trigger_workflow,
             commands::enqueue_workflow,
             commands::rerun_workflow,
             commands::plan_backfill,
@@ -436,6 +435,7 @@ pub fn run() {
             commands::get_run_metrics,
             commands::get_run_relationships,
             commands::get_global_run_history,
+            commands::get_run_history_model,
             commands::cleanup_retention,
             commands::get_workflow_history_buckets,
             commands::get_sla_violations,
