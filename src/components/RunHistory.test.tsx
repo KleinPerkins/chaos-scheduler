@@ -142,6 +142,28 @@ describe("RunHistory (workflow-scoped)", () => {
     expect(screen.getByText("1 of 3 loaded")).toBeInTheDocument();
   });
 
+  it("announces a run-history load failure as an alert", async () => {
+    installStrictIpcMocks();
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_run_history: () => {
+        throw new Error("db locked");
+      },
+    };
+
+    render(
+      <RunHistory
+        workflow={sampleWorkflow}
+        onBack={() => {}}
+        onViewLog={() => {}}
+      />,
+    );
+
+    // A failed async load must be announced to assistive tech, not shown as a
+    // silent div.
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/Run history failed to load/i);
+  });
+
   it("exposes heatmap cells to keyboard users with an accessible name", async () => {
     installStrictIpcMocks();
     window.__CHAOS_IPC_OVERRIDES__ = {

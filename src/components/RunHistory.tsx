@@ -187,7 +187,7 @@ export default function RunHistory({ workflow, onBack, onViewLog }: Props) {
       {loading ? (
         <div className="rh-loading">Loading...</div>
       ) : error ? (
-        <div className="rh-error">
+        <div className="rh-error" role="alert">
           <span>Run history failed to load: {error}</span>
           <Button variant="ghost" size="sm" onClick={() => void refreshRuns()}>
             Retry

@@ -68,6 +68,22 @@ describe("GlobalHistory", () => {
     expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
   });
 
+  it("announces a load failure as an alert", async () => {
+    installStrictIpcMocks();
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_global_run_history: () => {
+        throw new Error("db locked");
+      },
+    };
+
+    render(<GlobalHistory onViewRun={() => {}} />);
+
+    // A failed async load must be announced to assistive tech, not shown as a
+    // silent div.
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/History failed to load/i);
+  });
+
   it("search refines only the loaded rows without refetching", async () => {
     installStrictIpcMocks();
     let fetchCount = 0;

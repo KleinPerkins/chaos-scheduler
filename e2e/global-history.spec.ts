@@ -17,6 +17,10 @@ test.describe("Global History", () => {
     await expect(
       page.getByRole("heading", { name: "Global History" }),
     ).toBeVisible();
+    // The failed async load must be announced as an alert, not a silent div.
+    await expect(page.getByRole("alert")).toContainText(
+      /History failed to load/,
+    );
     await expect(page.getByText(/index unavailable/)).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
     await expectNoAxeViolations(page, "global history error");
