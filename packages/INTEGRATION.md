@@ -66,8 +66,10 @@ if (!isDuplicateDispatch(res) && res.run_id) {
 }
 ```
 
-- `runWorkflow` dispatches immediately; `enqueueWorkflow` lets the scheduler
-  manage admission/concurrency.
+- `enqueueWorkflow` queues a run through admission control (the scheduler manages
+  concurrency). `runWorkflow` is a **deprecated** alias: it posts to `/run` but
+  takes the same admission-controlled path — it does **not** dispatch immediately
+  or bypass the queue — so prefer `enqueueWorkflow`.
 - `dispatchWorkflow` triggers a workflow's inbound `webhook` trigger with a raw
   payload (optionally HMAC-signed — see below).
 
