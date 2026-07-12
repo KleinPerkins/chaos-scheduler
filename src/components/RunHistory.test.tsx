@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   cleanup,
   fireEvent,
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import RunHistory from "./RunHistory";
@@ -45,11 +46,13 @@ describe("RunHistory (workflow-scoped)", () => {
     delete window.__CHAOS_IPC_OVERRIDES__;
   });
 
-  it("queues a run through admission control and confirms the outcome", async () => {
+  it("queues a run through admission control, never the fire-now trigger", async () => {
     installStrictIpcMocks();
     let enqueued = 0;
+    const trigger = vi.fn(() => sampleRun.id);
     window.__CHAOS_IPC_OVERRIDES__ = {
       get_run_history: () => runs,
+      trigger_workflow: trigger,
       enqueue_workflow: () => {
         enqueued += 1;
         return {
@@ -73,6 +76,90 @@ describe("RunHistory (workflow-scoped)", () => {
 
     await waitFor(() => expect(enqueued).toBe(1));
     expect(await screen.findByText(/Waiting to start/)).toBeInTheDocument();
+    // Manual runs are admission-controlled: the fire-immediately trigger path
+    // must never be used.
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it("reruns a specific past run via rerun_workflow, never enqueue or trigger", async () => {
+    installStrictIpcMocks();
+    const rerun = vi.fn(() => "run-rerun-xyz");
+    const enqueue = vi.fn(() => ({
+      workflow_id: sampleWorkflow.id,
+      status: "queued",
+      queued_run_id: "queued-unused",
+      queue_name: "default",
+    }));
+    const trigger = vi.fn(() => sampleRun.id);
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_run_history: () => runs,
+      rerun_workflow: rerun,
+      enqueue_workflow: enqueue,
+      trigger_workflow: trigger,
+    };
+
+    render(
+      <RunHistory
+        workflow={sampleWorkflow}
+        onBack={() => {}}
+        onViewLog={() => {}}
+      />,
+    );
+
+    // Open the rerun modal for the FAILED row (run-bad-1).
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /Rerun failed run started/i,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /Rerun Nightly sync/i,
+    });
+
+    // Submit the default "{}" override.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Rerun" }));
+
+    await waitFor(() => expect(rerun).toHaveBeenCalledTimes(1));
+    const args = rerun.mock.calls[0][0] as Record<string, unknown>;
+    expect(args.workflowId).toBe(sampleWorkflow.id);
+    // Rerun re-runs a SPECIFIC past run, identified by its source run id.
+    expect(args.sourceRunId).toBe("run-bad-1");
+    // It targets a past run — it must not fire-now or enqueue a fresh run.
+    expect(trigger).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it("drills into a run's detail and exposes a named runs table", async () => {
+    installStrictIpcMocks();
+    window.__CHAOS_IPC_OVERRIDES__ = { get_run_history: () => runs };
+    const onViewLog = vi.fn();
+
+    render(
+      <RunHistory
+        workflow={sampleWorkflow}
+        onBack={() => {}}
+        onViewLog={onViewLog}
+      />,
+    );
+
+    // The runs render inside a named region + a table with an accessible name
+    // (its sr-only <caption>).
+    expect(
+      await screen.findByRole("region", { name: "Latest runs" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("table", {
+        name: `Latest runs for ${sampleWorkflow.name}`,
+      }),
+    ).toBeInTheDocument();
+
+    const detailButtons = screen.getAllByRole("button", {
+      name: /View details for .* run started/i,
+    });
+    fireEvent.click(detailButtons[0]);
+    expect(onViewLog).toHaveBeenCalledTimes(1);
+    // First row is the succeeded run (run-ok-1).
+    expect(onViewLog).toHaveBeenCalledWith("run-ok-1");
   });
 
   it("renders bounded failure history and filters only the loaded rows", async () => {

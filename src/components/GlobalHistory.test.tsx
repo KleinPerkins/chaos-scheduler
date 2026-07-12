@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   cleanup,
   fireEvent,
@@ -66,6 +66,76 @@ describe("GlobalHistory", () => {
     expect(screen.getByLabelText("Trigger")).toBeInTheDocument();
     expect(screen.getByText("Latest 100")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
+  });
+
+  it("exposes the results as a named region and reports the loaded count", async () => {
+    installStrictIpcMocks();
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_global_run_history: () => loadedRuns,
+    };
+
+    render(<GlobalHistory onViewRun={() => {}} />);
+
+    await screen.findByText("Nightly sync");
+    // The runs live inside a named region (aria-labelledby the "Latest runs"
+    // heading) nested within the outer "Global History" surface region.
+    expect(
+      screen.getByRole("region", { name: "Latest runs" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(`${loadedRuns.length} loaded · newest first`),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Ledger reconcile")).toBeInTheDocument();
+    expect(screen.getByText("Cursor triage")).toBeInTheDocument();
+  });
+
+  it("drills into a run when its Details action is pressed", async () => {
+    installStrictIpcMocks();
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_global_run_history: () => loadedRuns,
+    };
+    const onViewRun = vi.fn();
+
+    render(<GlobalHistory onViewRun={onViewRun} />);
+
+    await screen.findByText("Nightly sync");
+    const detailButtons = screen.getAllByRole("button", { name: "Details" });
+    expect(detailButtons).toHaveLength(loadedRuns.length);
+    // Second row is "Ledger reconcile" (run-bravo).
+    fireEvent.click(detailButtons[1]);
+
+    expect(onViewRun).toHaveBeenCalledTimes(1);
+    expect(onViewRun.mock.calls[0][0]).toMatchObject({ id: "run-bravo" });
+  });
+
+  it("re-queries the bounded backend window when the status filter changes", async () => {
+    installStrictIpcMocks();
+    const statusCalls: string[] = [];
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_global_run_history: (args) => {
+        const status = String(args.statusFilter);
+        statusCalls.push(status);
+        // The status filter is BACKEND-scoped: the query re-runs and returns a
+        // narrower set, unlike the client-side search refinement.
+        return status === "failed" ? [loadedRuns[1]] : loadedRuns;
+      },
+    };
+
+    render(<GlobalHistory onViewRun={() => {}} />);
+
+    await screen.findByText("Nightly sync");
+    expect(statusCalls).toEqual(["all"]);
+
+    fireEvent.change(screen.getByLabelText("Status"), {
+      target: { value: "failed" },
+    });
+
+    await waitFor(() => expect(statusCalls).toContain("failed"));
+    await waitFor(() =>
+      expect(screen.queryByText("Nightly sync")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("Ledger reconcile")).toBeInTheDocument();
+    expect(screen.getByText("1 loaded · newest first")).toBeInTheDocument();
   });
 
   it("announces a load failure as an alert", async () => {
