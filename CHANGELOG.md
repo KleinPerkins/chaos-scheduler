@@ -1,5 +1,96 @@
 # Changelog
 
+## [1.3.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.2.0...chaos-scheduler-v1.3.0) (2026-07-12)
+
+
+### Features
+
+* **charts:** add DualAxisLine, ImpactBars, and QueueLine ([#211](https://github.com/KleinPerkins/chaos-scheduler/issues/211)) ([36ded44](https://github.com/KleinPerkins/chaos-scheduler/commit/36ded442fd8a9d46d5e2f815d77dbc1109911984))
+* **charts:** add Gauge and StatusDonut radial charts ([#210](https://github.com/KleinPerkins/chaos-scheduler/issues/210)) ([66f9f24](https://github.com/KleinPerkins/chaos-scheduler/commit/66f9f2477a29a61cf4917d8842af93ed5be5e9b5))
+* **charts:** add RaceTrack + Vehicle race-view primitives + Vehicle Code Connect ([#212](https://github.com/KleinPerkins/chaos-scheduler/issues/212)) ([40a8511](https://github.com/KleinPerkins/chaos-scheduler/commit/40a851127ea9f960a3f40f748402ecc3ffa76ee8))
+* **charts:** add SVG chart primitive foundation + d3 deps ([#209](https://github.com/KleinPerkins/chaos-scheduler/issues/209)) ([3495ac0](https://github.com/KleinPerkins/chaos-scheduler/commit/3495ac015451a4668b0472525c8c149e06ddce74))
+* **components:** add BrandMark orbital-8 logo component ([#182](https://github.com/KleinPerkins/chaos-scheduler/issues/182)) ([8226086](https://github.com/KleinPerkins/chaos-scheduler/commit/8226086cdbad45ea2e7b26abc77290c979f05094))
+* **components:** add InfoTip hover/focus definition affordance ([#181](https://github.com/KleinPerkins/chaos-scheduler/issues/181)) ([3efe3d2](https://github.com/KleinPerkins/chaos-scheduler/commit/3efe3d24d0de9f3cb9307fecf9004ee76303a2cb))
+* **components:** add LookbackSelect segmented window selector ([#180](https://github.com/KleinPerkins/chaos-scheduler/issues/180)) ([39d5109](https://github.com/KleinPerkins/chaos-scheduler/commit/39d510937af8b0b1ca581846c180f97f189c4667))
+* **components:** add StatusBar status-distribution primitive ([#178](https://github.com/KleinPerkins/chaos-scheduler/issues/178)) ([70f1820](https://github.com/KleinPerkins/chaos-scheduler/commit/70f1820fed48579e949601537fd84eb2ca2a1a37))
+* **components:** dismiss InfoTip on Escape (keyboard a11y) ([#208](https://github.com/KleinPerkins/chaos-scheduler/issues/208)) ([1264e39](https://github.com/KleinPerkins/chaos-scheduler/commit/1264e396f91ec7f0fc587b18ca5abd5271b969f9))
+* **dashboard:** add global FilterBar + custom-lookback wire format ([#213](https://github.com/KleinPerkins/chaos-scheduler/issues/213)) ([a95a58d](https://github.com/KleinPerkins/chaos-scheduler/commit/a95a58d3e13f01fba29b9baacb33d212850402c8))
+* **dashboard:** add Needs Attention drill-down to Mission Control ([#215](https://github.com/KleinPerkins/chaos-scheduler/issues/215)) ([7babac0](https://github.com/KleinPerkins/chaos-scheduler/commit/7babac0a3e2db5324fcf44b4eb335aa96b321406))
+* **dashboard:** add Operational Health drill-down to Mission Control ([#217](https://github.com/KleinPerkins/chaos-scheduler/issues/217)) ([c955ae6](https://github.com/KleinPerkins/chaos-scheduler/commit/c955ae6865a0237582cf0cc60d1df6dce27e3c8a))
+* **dashboard:** add Resources drill-down to Mission Control ([#219](https://github.com/KleinPerkins/chaos-scheduler/issues/219)) ([574ba4d](https://github.com/KleinPerkins/chaos-scheduler/commit/574ba4de51176f628989c1adc43531873eb777c7))
+* **dashboard:** blocked/waiting reason taxonomy + heavy-blocker Σ-wait ([#194](https://github.com/KleinPerkins/chaos-scheduler/issues/194)) ([328ae2e](https://github.com/KleinPerkins/chaos-scheduler/commit/328ae2e463ffb27935e9c18aefb5f3c1156fcc16))
+* **dashboard:** compose Mission Control Overview vNext on real data ([#214](https://github.com/KleinPerkins/chaos-scheduler/issues/214)) ([a63d08b](https://github.com/KleinPerkins/chaos-scheduler/commit/a63d08be0fb0682e78e979fe54ebeef7af232022))
+* **dashboard:** downstream blast-radius (chain count + depth) per workflow ([#197](https://github.com/KleinPerkins/chaos-scheduler/issues/197)) ([5066530](https://github.com/KleinPerkins/chaos-scheduler/commit/5066530b88bd1a1f5ae0a114be0283455a342b01))
+* **dashboard:** execution slots (running vs configured capacity) per queue + global ([#196](https://github.com/KleinPerkins/chaos-scheduler/issues/196)) ([4699dcc](https://github.com/KleinPerkins/chaos-scheduler/commit/4699dcc6fade2e3cb8dc4595df2912af958a3007))
+* **dashboard:** failure-recurrence per workflow + queue-health signals ([#191](https://github.com/KleinPerkins/chaos-scheduler/issues/191)) ([264f1cf](https://github.com/KleinPerkins/chaos-scheduler/commit/264f1cf648836bf5967e4fac39babbb17b55316f))
+* **dashboard:** queue-utilization history sampler + (env, lookback) series ([#195](https://github.com/KleinPerkins/chaos-scheduler/issues/195)) ([650f2f8](https://github.com/KleinPerkins/chaos-scheduler/commit/650f2f8e1ff23cc0d76a20343e35e5c8bba223e4))
+* **dashboard:** reconcile Activity feed into Mission Control IA ([#220](https://github.com/KleinPerkins/chaos-scheduler/issues/220)) ([8d124d5](https://github.com/KleinPerkins/chaos-scheduler/commit/8d124d5ec2133582315f24947d51d0d9e0f894e0))
+* **dashboard:** rolling per-workflow p50 + mean runtime baselines ([#192](https://github.com/KleinPerkins/chaos-scheduler/issues/192)) ([ef283f7](https://github.com/KleinPerkins/chaos-scheduler/commit/ef283f7008da6d41fcf0e8421838807a3ebefcc8))
+* **dashboard:** status-distribution counts keyed by (environment, lookback) ([#188](https://github.com/KleinPerkins/chaos-scheduler/issues/188)) ([b951bce](https://github.com/KleinPerkins/chaos-scheduler/commit/b951bcebaa9a3c1ea4232d9f533586508303f116))
+* **dashboard:** success/fail trend buckets keyed by (environment, lookback) ([#189](https://github.com/KleinPerkins/chaos-scheduler/issues/189)) ([7fb79e8](https://github.com/KleinPerkins/chaos-scheduler/commit/7fb79e8a7d641eebbe786f64254c3fe31580aa7b))
+* **dashboard:** wait+runtime trend buckets with 30-day trailing baseline ([#190](https://github.com/KleinPerkins/chaos-scheduler/issues/190)) ([9b579d0](https://github.com/KleinPerkins/chaos-scheduler/commit/9b579d0925003a28220ae372f2e8ef55484f7ed2))
+* **dashboard:** week-over-week KPI deltas (current vs prior equal window) ([#193](https://github.com/KleinPerkins/chaos-scheduler/issues/193)) ([0b4a82a](https://github.com/KleinPerkins/chaos-scheduler/commit/0b4a82a09969b4f60d35a4967d5c59707cf7fbca))
+* **dashboard:** windowed KPI summary keyed by (environment, lookback) ([#187](https://github.com/KleinPerkins/chaos-scheduler/issues/187)) ([94f7ec5](https://github.com/KleinPerkins/chaos-scheduler/commit/94f7ec549cd118fce03f37bb2b2e8bd3f6508d4e))
+* **history:** add lean filtered log-free run-history read model ([#247](https://github.com/KleinPerkins/chaos-scheduler/issues/247)) ([c9db657](https://github.com/KleinPerkins/chaos-scheduler/commit/c9db657d9756ffabc7d8635af0121aedd08c1a60))
+* **history:** lighten global history with bounded search ([#233](https://github.com/KleinPerkins/chaos-scheduler/issues/233)) ([01a1d73](https://github.com/KleinPerkins/chaos-scheduler/commit/01a1d73291472a707ab8f3f7daf49321ff0696f5))
+* **history:** lighten workflow run history ([#235](https://github.com/KleinPerkins/chaos-scheduler/issues/235)) ([f07ac21](https://github.com/KleinPerkins/chaos-scheduler/commit/f07ac214a207451c8c1febe3f60e80a10a7e4f22))
+* **history:** snapshot run-time environment provenance (schema v13) ([#251](https://github.com/KleinPerkins/chaos-scheduler/issues/251)) ([d88e928](https://github.com/KleinPerkins/chaos-scheduler/commit/d88e9284dbb39ede28b0c6ad9b90c136c6211e44))
+* **lib:** add shared Lookback contract (type, presets, range resolver) ([#207](https://github.com/KleinPerkins/chaos-scheduler/issues/207)) ([3e31f7b](https://github.com/KleinPerkins/chaos-scheduler/commit/3e31f7b972b3640b458d36cdf4b15e069c2a4a37))
+* **mcp-server:** deprecate run_workflow_now in favor of enqueue_workflow ([#267](https://github.com/KleinPerkins/chaos-scheduler/issues/267)) ([081ed6f](https://github.com/KleinPerkins/chaos-scheduler/commit/081ed6f6c9c9b627fd7cc50da0bf80d9f41b0750))
+* **popup:** complete semantic and visual parity ([#238](https://github.com/KleinPerkins/chaos-scheduler/issues/238)) ([9d45f11](https://github.com/KleinPerkins/chaos-scheduler/commit/9d45f11d537e5a2155ad6125547c7a42687151c9))
+* **popup:** complete tray mini-dashboard at 384x590 ([#269](https://github.com/KleinPerkins/chaos-scheduler/issues/269)) ([9fc45c8](https://github.com/KleinPerkins/chaos-scheduler/commit/9fc45c81ad78c9de3c51ec7edb9ea9e9c602b292))
+* **popup:** queue upcoming runs via admission control ([#237](https://github.com/KleinPerkins/chaos-scheduler/issues/237)) ([6e0bbd3](https://github.com/KleinPerkins/chaos-scheduler/commit/6e0bbd3e22ad3091445015214395928ebf19a0af))
+* **runs:** prioritize run observability ([#236](https://github.com/KleinPerkins/chaos-scheduler/issues/236)) ([a4e3cf2](https://github.com/KleinPerkins/chaos-scheduler/commit/a4e3cf204d65552db74299915ff568cbe284e839))
+* **scheduler:** route rerun_workflow through admission control ([#263](https://github.com/KleinPerkins/chaos-scheduler/issues/263)) ([1ec0649](https://github.com/KleinPerkins/chaos-scheduler/commit/1ec064973de581b8d26d6801004cfec28df1be51))
+* **sdk:** deprecate runWorkflow in favor of enqueueWorkflow ([#265](https://github.com/KleinPerkins/chaos-scheduler/issues/265)) ([4894ec5](https://github.com/KleinPerkins/chaos-scheduler/commit/4894ec5d6bfd5b8f77b4fd47336d077ef106bf70))
+* **sidebar:** add collapsible navigation rail ([#223](https://github.com/KleinPerkins/chaos-scheduler/issues/223)) ([7238015](https://github.com/KleinPerkins/chaos-scheduler/commit/7238015cb942a24d736b8a70a9c0d6fb110ab1ea))
+* **tokens:** add categorical data-viz color palette (8 hues, dark+light) ([#205](https://github.com/KleinPerkins/chaos-scheduler/issues/205)) ([75e2f55](https://github.com/KleinPerkins/chaos-scheduler/commit/75e2f553cc1ceede82c28f7c231baa4884640a72))
+* **ui:** surface admission outcome when rerunning a run ([#264](https://github.com/KleinPerkins/chaos-scheduler/issues/264)) ([4780502](https://github.com/KleinPerkins/chaos-scheduler/commit/4780502bc94621a8fa5facc7da5cdd31ef56cdaa))
+* **workflows:** add searchable workflow cards ([#230](https://github.com/KleinPerkins/chaos-scheduler/issues/230)) ([499681c](https://github.com/KleinPerkins/chaos-scheduler/commit/499681c63f97b5a4dfff63fb78a448baf0dbb72c))
+* **workflows:** lighten workflow detail hierarchy ([#231](https://github.com/KleinPerkins/chaos-scheduler/issues/231)) ([77df0e5](https://github.com/KleinPerkins/chaos-scheduler/commit/77df0e565427651a4f2fcb5d2cad51c20e913248))
+* **workflows:** lighten workflow editor hierarchy ([#232](https://github.com/KleinPerkins/chaos-scheduler/issues/232)) ([ab541e0](https://github.com/KleinPerkins/chaos-scheduler/commit/ab541e0afdbf2f4cb66d619e4fd6ba3046e66d4f))
+
+
+### Bug Fixes
+
+* **a11y:** announce async load failures with role=alert ([#248](https://github.com/KleinPerkins/chaos-scheduler/issues/248)) ([ddc5759](https://github.com/KleinPerkins/chaos-scheduler/commit/ddc5759f96a586f8475730cc9f485a32caf23e05))
+* **a11y:** enforce status badge contrast ([#222](https://github.com/KleinPerkins/chaos-scheduler/issues/222)) ([2a09ddc](https://github.com/KleinPerkins/chaos-scheduler/commit/2a09ddc9a8dff2babdd05ff69062abd58c0601ac))
+* **a11y:** name the Global History runs table ([#259](https://github.com/KleinPerkins/chaos-scheduler/issues/259)) ([da6034e](https://github.com/KleinPerkins/chaos-scheduler/commit/da6034efe5690847328e8849f4d65ec8bef03c2e))
+* **a11y:** prevent low-contrast theme transitions ([#225](https://github.com/KleinPerkins/chaos-scheduler/issues/225)) ([c38f157](https://github.com/KleinPerkins/chaos-scheduler/commit/c38f15772b8b84bb0e76107496cbb070ea930fb9))
+* **a11y:** remove duplicate Run Detail logs landmark ([#257](https://github.com/KleinPerkins/chaos-scheduler/issues/257)) ([cf11f68](https://github.com/KleinPerkins/chaos-scheduler/commit/cf11f688c001efbd57fe0d602ab52d291f10c97d))
+* **a11y:** remove history and popup structure exceptions ([#221](https://github.com/KleinPerkins/chaos-scheduler/issues/221)) ([e49d29b](https://github.com/KleinPerkins/chaos-scheduler/commit/e49d29b3120dde96ac356ec85d9a93afcad02abf))
+* **a11y:** trap focus in the shared Modal ([#261](https://github.com/KleinPerkins/chaos-scheduler/issues/261)) ([0df1501](https://github.com/KleinPerkins/chaos-scheduler/commit/0df1501d35f727d5b46b5b571af02e9dc12e0449))
+* **history:** make failure-heatmap cells keyboard-accessible ([#244](https://github.com/KleinPerkins/chaos-scheduler/issues/244)) ([98adeff](https://github.com/KleinPerkins/chaos-scheduler/commit/98adeffae694dd5631a7ae311ae92e6885d166e8))
+* **infotip:** dismiss on Escape regardless of how the tip opened ([#246](https://github.com/KleinPerkins/chaos-scheduler/issues/246)) ([2362046](https://github.com/KleinPerkins/chaos-scheduler/commit/236204653090947a19bf1f6a587ad55af64b4e49))
+* **infotip:** raise glyph contrast to WCAG AA and un-suppress axe ([#249](https://github.com/KleinPerkins/chaos-scheduler/issues/249)) ([e78d0eb](https://github.com/KleinPerkins/chaos-scheduler/commit/e78d0ebdab870b2dfdcc322c9d7a251146380c04))
+* **mission-control:** map warning status dot to the warning color (D04) ([#240](https://github.com/KleinPerkins/chaos-scheduler/issues/240)) ([1279117](https://github.com/KleinPerkins/chaos-scheduler/commit/12791172aef43d6041a37805b956d5e4df33ea3f))
+* **release:** lift skip-cascade so partial releases still build+publish ([#250](https://github.com/KleinPerkins/chaos-scheduler/issues/250)) ([c1a6b9c](https://github.com/KleinPerkins/chaos-scheduler/commit/c1a6b9c3eafa441e7b9cce0d4d3de7dc771c2b68))
+* **run-detail:** expose completed task status to assistive tech ([#239](https://github.com/KleinPerkins/chaos-scheduler/issues/239)) ([8dd93d3](https://github.com/KleinPerkins/chaos-scheduler/commit/8dd93d3d8b64f8077fb6477eef80328d03730793))
+* **schedule:** stabilize builder contract ([#228](https://github.com/KleinPerkins/chaos-scheduler/issues/228)) ([cb69ad5](https://github.com/KleinPerkins/chaos-scheduler/commit/cb69ad57299bb87164bc1182a5c119aec02a3211))
+* **status:** align dot semantics and styling ([#224](https://github.com/KleinPerkins/chaos-scheduler/issues/224)) ([8bf6f11](https://github.com/KleinPerkins/chaos-scheduler/commit/8bf6f11caa8ecb433b06ac8b363e4fb91133b6b0))
+* **status:** unify run-status canonicalization across KPIs and scheduler gates ([#242](https://github.com/KleinPerkins/chaos-scheduler/issues/242)) ([3b000c9](https://github.com/KleinPerkins/chaos-scheduler/commit/3b000c90ae448bb9e200030bcdf70b3a7269b9f3))
+* **theme:** synchronize preference consumers ([#226](https://github.com/KleinPerkins/chaos-scheduler/issues/226)) ([cc2f957](https://github.com/KleinPerkins/chaos-scheduler/commit/cc2f95722cea234b512e91cc6b4f8b8498870d07))
+* **workflows:** persist selected environment ([#227](https://github.com/KleinPerkins/chaos-scheduler/issues/227)) ([0f3715b](https://github.com/KleinPerkins/chaos-scheduler/commit/0f3715ba2ca588e8678b1beb540dfb7a1d100566))
+* **workflows:** unify manual queue execution ([#229](https://github.com/KleinPerkins/chaos-scheduler/issues/229)) ([e463168](https://github.com/KleinPerkins/chaos-scheduler/commit/e4631688989b82ed7912e5d76ec5e87b4430b9f9))
+
+
+### Refactors
+
+* remove dead trigger_workflow command ([#266](https://github.com/KleinPerkins/chaos-scheduler/issues/266)) ([190f709](https://github.com/KleinPerkins/chaos-scheduler/commit/190f709226d87c21fea1020996db8cd328a07d6c))
+* **scheduler:** add dispatch_manual_run admission choke point ([#262](https://github.com/KleinPerkins/chaos-scheduler/issues/262)) ([3112c63](https://github.com/KleinPerkins/chaos-scheduler/commit/3112c63692ec08b366582f00e1a3bdc2bae1d770))
+* **ui:** consolidate run/task duration formatting into shared util ([#206](https://github.com/KleinPerkins/chaos-scheduler/issues/206)) ([4dc45fd](https://github.com/KleinPerkins/chaos-scheduler/commit/4dc45fd8ffc0b9015689bcac2ba8868a5839429a))
+
+
+### Documentation
+
+* **agents:** record bespoke in-repo SVG chart architecture (D07) ([#243](https://github.com/KleinPerkins/chaos-scheduler/issues/243)) ([2dae8a5](https://github.com/KleinPerkins/chaos-scheduler/commit/2dae8a54bb14883c3c26ebed17a64843f105bd21))
+* **design-system:** correct stale Code Connect + cs.* mirror claims ([#245](https://github.com/KleinPerkins/chaos-scheduler/issues/245)) ([12ffd9f](https://github.com/KleinPerkins/chaos-scheduler/commit/12ffd9f2b8dfa9984b45838d3fa50b4b2f3684e0))
+* **design:** add G01 divergence ledger ([#241](https://github.com/KleinPerkins/chaos-scheduler/issues/241)) ([2935ff0](https://github.com/KleinPerkins/chaos-scheduler/commit/2935ff002666c3b7f455f0da06ab5ff0e0542bf5))
+* **design:** refresh divergence ledger for landed P4/P5 work ([#252](https://github.com/KleinPerkins/chaos-scheduler/issues/252)) ([19995da](https://github.com/KleinPerkins/chaos-scheduler/commit/19995da8c69aa33276da973664810951b5816712))
+* **ledger:** record G04 binding audit evidence ([#258](https://github.com/KleinPerkins/chaos-scheduler/issues/258)) ([9329508](https://github.com/KleinPerkins/chaos-scheduler/commit/9329508a8e61dbb9222c7ad74ade6c7095a0e262))
+* **ledger:** record popup 384x590 ([#269](https://github.com/KleinPerkins/chaos-scheduler/issues/269)) + decision-3 completion ([#270](https://github.com/KleinPerkins/chaos-scheduler/issues/270)) ([df6525f](https://github.com/KleinPerkins/chaos-scheduler/commit/df6525fb7c9a23b4a6d72ca4817047896aab0137))
+* reword manual-run guidance to queue-only (prefer enqueue) ([#268](https://github.com/KleinPerkins/chaos-scheduler/issues/268)) ([f43f173](https://github.com/KleinPerkins/chaos-scheduler/commit/f43f17394c87bdfaefa69557a252c6587bf3ac70))
+
 ## [1.2.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.1.0...chaos-scheduler-v1.2.0) (2026-07-10)
 
 
