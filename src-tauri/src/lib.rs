@@ -420,7 +420,6 @@ pub fn run() {
             commands::get_mcp_integration_status,
             commands::provision_mcp_integration,
             commands::remove_mcp_integration,
-            commands::trigger_workflow,
             commands::enqueue_workflow,
             commands::rerun_workflow,
             commands::plan_backfill,

@@ -53,7 +53,6 @@ export type IpcCommand =
   | "get_mcp_integration_status"
   | "provision_mcp_integration"
   | "remove_mcp_integration"
-  | "trigger_workflow"
   | "enqueue_workflow"
   | "rerun_workflow"
   | "plan_backfill"
@@ -239,7 +238,6 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       managed_key_id: null,
       matches: false,
     }),
-    trigger_workflow: () => sampleRun.id,
     enqueue_workflow: () => ({
       workflow_id: sampleWorkflow.id,
       status: "queued",

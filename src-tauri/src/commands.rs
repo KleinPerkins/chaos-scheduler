@@ -436,44 +436,6 @@ pub fn create_api_key(
 }
 
 #[tauri::command]
-pub fn trigger_workflow(state: State<AppState>, id: String) -> Result<String, String> {
-    state
-        .service
-        .ensure_workflow_execution_allowed(&id)
-        .map_err(|e| e.to_string())?;
-    let result = scheduler::execute_workflow_with_context(
-        &state.db,
-        &state.workspace_root,
-        &state.python_path,
-        &id,
-        true,
-        true,
-        false,
-        Some("manual"),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )?;
-    if result.completed {
-        scheduler::trigger_on_completion(
-            &state.db,
-            &state.workspace_root,
-            &state.python_path,
-            &id,
-            &result.run_id,
-            result.success,
-            true,
-            true,
-            false,
-        );
-    }
-    Ok(result.run_id)
-}
-
-#[tauri::command]
 pub fn enqueue_workflow(
     state: State<AppState>,
     id: String,

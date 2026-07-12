@@ -920,10 +920,6 @@ export function deleteWorkflow(id: string): Promise<void> {
   return invoke("delete_workflow", { id });
 }
 
-export function triggerWorkflow(id: string): Promise<string> {
-  return invoke("trigger_workflow", { id });
-}
-
 export function enqueueWorkflow(
   id: string,
   idempotencyKey?: string,

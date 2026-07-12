@@ -49,10 +49,8 @@ describe("RunHistory (workflow-scoped)", () => {
   it("queues a run through admission control, never the fire-now trigger", async () => {
     installStrictIpcMocks();
     let enqueued = 0;
-    const trigger = vi.fn(() => sampleRun.id);
     window.__CHAOS_IPC_OVERRIDES__ = {
       get_run_history: () => runs,
-      trigger_workflow: trigger,
       enqueue_workflow: () => {
         enqueued += 1;
         return {
@@ -76,12 +74,12 @@ describe("RunHistory (workflow-scoped)", () => {
 
     await waitFor(() => expect(enqueued).toBe(1));
     expect(await screen.findByText(/Waiting to start/)).toBeInTheDocument();
-    // Manual runs are admission-controlled: the fire-immediately trigger path
-    // must never be used.
-    expect(trigger).not.toHaveBeenCalled();
+    // Manual runs are admission-controlled via enqueue. The fire-immediately
+    // trigger command has been removed, so it has no mock handler — any
+    // accidental call would throw "Unhandled IPC invoke" and fail this test.
   });
 
-  it("reruns a specific past run via rerun_workflow, never enqueue or trigger", async () => {
+  it("reruns a specific past run via rerun_workflow, never enqueue", async () => {
     installStrictIpcMocks();
     // Rerun routes through admission control (#263): it resolves to a
     // DispatchOutcome, not a bare run-id string.
@@ -97,12 +95,10 @@ describe("RunHistory (workflow-scoped)", () => {
       queued_run_id: "queued-unused",
       queue_name: "default",
     }));
-    const trigger = vi.fn(() => sampleRun.id);
     window.__CHAOS_IPC_OVERRIDES__ = {
       get_run_history: () => runs,
       rerun_workflow: rerun,
       enqueue_workflow: enqueue,
-      trigger_workflow: trigger,
     };
 
     render(
@@ -131,8 +127,7 @@ describe("RunHistory (workflow-scoped)", () => {
     expect(args.workflowId).toBe(sampleWorkflow.id);
     // Rerun re-runs a SPECIFIC past run, identified by its source run id.
     expect(args.sourceRunId).toBe("run-bad-1");
-    // It targets a past run — it must not fire-now or enqueue a fresh run.
-    expect(trigger).not.toHaveBeenCalled();
+    // It targets a past run — it must not enqueue a fresh run.
     expect(enqueue).not.toHaveBeenCalled();
   });
 
@@ -153,12 +148,10 @@ describe("RunHistory (workflow-scoped)", () => {
       queued_run_id: "queued-unused",
       queue_name: "default",
     }));
-    const trigger = vi.fn(() => sampleRun.id);
     window.__CHAOS_IPC_OVERRIDES__ = {
       get_run_history: () => runs,
       rerun_workflow: rerun,
       enqueue_workflow: enqueue,
-      trigger_workflow: trigger,
     };
 
     render(
@@ -187,9 +180,8 @@ describe("RunHistory (workflow-scoped)", () => {
       await screen.findByText(/Waiting to start: Nightly sync.*rerun-qu/),
     ).toBeInTheDocument();
 
-    // Still a rerun-through-admission — never the dead fire-now trigger nor a
-    // fresh enqueue.
-    expect(trigger).not.toHaveBeenCalled();
+    // Still a rerun-through-admission — never a fresh enqueue. (The dead
+    // fire-now trigger command has no handler; a call would throw.)
     expect(enqueue).not.toHaveBeenCalled();
   });
 

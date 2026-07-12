@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   cleanup,
   fireEvent,
@@ -57,9 +57,7 @@ describe("WorkflowList", () => {
   it("uses the scheduler queue as its only manual execution path", async () => {
     installStrictIpcMocks();
     const enqueueArgs: Record<string, unknown>[] = [];
-    const triggerWorkflow = vi.fn();
     window.__CHAOS_IPC_OVERRIDES__ = {
-      trigger_workflow: triggerWorkflow,
       enqueue_workflow: (args) => {
         enqueueArgs.push(args);
         return {
@@ -95,7 +93,6 @@ describe("WorkflowList", () => {
         screen.getByText(/Waiting to start: Nightly sync/),
       ).toBeInTheDocument(),
     );
-    expect(triggerWorkflow).not.toHaveBeenCalled();
     expect(enqueueArgs).toHaveLength(1);
     expect(enqueueArgs[0]?.idempotencyKey).toMatch(/^ui-enqueue:wf-demo-1:/);
   });
