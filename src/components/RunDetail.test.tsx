@@ -183,6 +183,35 @@ describe("RunDetail", () => {
     ).toBeInTheDocument();
   });
 
+  it("exposes a completed task's status to assistive tech in the timeline", async () => {
+    installStrictIpcMocks();
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_run_log: () => ({ ...sampleRun }),
+      get_run_tasks: () => [
+        {
+          id: "task-record-1",
+          run_id: sampleRun.id,
+          task_id: "extract",
+          status: "succeeded",
+          started_at: sampleRun.started_at,
+          finished_at: sampleRun.finished_at,
+          attempt_number: 1,
+        },
+      ],
+    };
+
+    render(<RunDetail runId={sampleRun.id} onBack={() => {}} />);
+
+    // A completed task renders its DURATION in the bar, so the status is
+    // otherwise conveyed only by the color-coded dot. The dot must therefore
+    // expose the status as an accessible name (role=img + label) for AT.
+    const statusIndicator = await screen.findByRole("img", {
+      name: /succeeded/i,
+    });
+    expect(statusIndicator).toBeInTheDocument();
+    expect(statusIndicator).toHaveClass("status-dot", "succeeded");
+  });
+
   it("keeps failure analysis conditional and actionable", async () => {
     installStrictIpcMocks();
     window.__CHAOS_IPC_OVERRIDES__ = {
