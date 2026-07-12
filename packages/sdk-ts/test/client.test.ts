@@ -148,6 +148,39 @@ describe("ChaosSchedulerClient", () => {
     if (!isDuplicateDispatch(res)) expect(res.status).toBe("admitted");
   });
 
+  it("deprecated runWorkflow aliases enqueueWorkflow: identical DispatchResult, own route", async () => {
+    // `runWorkflow` is deprecated but must keep working unchanged: it returns the
+    // same admission handle as `enqueueWorkflow` (both are admission-controlled)
+    // and still posts to its own `/run` route (the route is NOT re-pointed).
+    const body = {
+      workflow_id: "w1",
+      status: "admitted",
+      run_id: "r1",
+      queued_run_id: null,
+      queue_name: "production-default",
+    };
+    const run = fakeFetch(() => ({ status: 200, json: body }));
+    const enqueue = fakeFetch(() => ({ status: 200, json: body }));
+    const runClient = new ChaosSchedulerClient({
+      baseUrl: BASE,
+      apiKey: "id.secret",
+      fetch: run.fetch,
+    });
+    const enqueueClient = new ChaosSchedulerClient({
+      baseUrl: BASE,
+      apiKey: "id.secret",
+      fetch: enqueue.fetch,
+    });
+    const runRes = await runClient.runWorkflow("w1", { idempotencyKey: "k" });
+    const enqueueRes = await enqueueClient.enqueueWorkflow("w1", {
+      idempotencyKey: "k",
+    });
+    expect(runRes).toEqual(enqueueRes);
+    expect(run.calls[0]!.method).toBe("POST");
+    expect(run.calls[0]!.url).toBe(`${BASE}/api/v1/workflows/w1/run`);
+    expect(enqueue.calls[0]!.url).toBe(`${BASE}/api/v1/workflows/w1/enqueue`);
+  });
+
   it("recognizes the duplicate-dispatch replay shape", async () => {
     const { fetch } = fakeFetch(() => ({
       status: 200,
