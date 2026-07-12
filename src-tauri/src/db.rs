@@ -221,8 +221,9 @@ pub struct HistoryRow {
     pub id: String,
     pub workflow_id: String,
     pub workflow_name: Option<String>,
-    /// The owning workflow's CURRENT environment (via the `workflows` join), NOT
-    /// a snapshot of where the run executed. See [`Database::history_read_model`].
+    /// The run's environment SNAPSHOTTED at creation time (`runs.run_environment`,
+    /// schema v13), NOT the owning workflow's current environment — so re-homing
+    /// a workflow never re-buckets its history. See [`Database::history_read_model`].
     pub environment: String,
     pub status: String,
     pub started_at: String,
@@ -1091,7 +1092,7 @@ pub enum IdempotencyReservation {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 12;
+pub const CURRENT_SCHEMA_VERSION: i64 = 13;
 
 pub struct Database {
     path: String,
@@ -1174,7 +1175,8 @@ impl Database {
                 process_started_at TEXT,
                 stdout_truncated INTEGER NOT NULL DEFAULT 0,
                 stderr_truncated INTEGER NOT NULL DEFAULT 0,
-                task_events_truncated INTEGER NOT NULL DEFAULT 0
+                task_events_truncated INTEGER NOT NULL DEFAULT 0,
+                run_environment TEXT
             );
             CREATE TABLE IF NOT EXISTS workflow_trigger_state (
                 workflow_id TEXT NOT NULL,
@@ -1568,7 +1570,42 @@ impl Database {
             (10, Self::migrate_v10_rename_mission_filter_key),
             (11, Self::migrate_v11_production_sandbox_environments),
             (12, Self::migrate_v12_queue_occupancy_samples),
+            (13, Self::migrate_v13_run_environment_snapshot),
         ]
+    }
+
+    /// v13: snapshot each run's environment at creation time. Adds a NULLABLE
+    /// `run_environment` column to `runs` so a run's historical environment is
+    /// preserved even after its workflow is re-homed to a different environment
+    /// (the read model previously derived a run's environment from the CURRENT
+    /// workflow env, which retroactively re-bucketed history — decision 4).
+    ///
+    /// Additive and idempotent: the `ALTER` is a no-op when the column already
+    /// exists (fresh DBs get it from the base `runs` schema in `init`), and the
+    /// backfill only touches rows that are still NULL. The backfill is
+    /// BEST-EFFORT: the true run-time environment of pre-existing rows is
+    /// unknown, so we seed them from their workflow's CURRENT environment (the
+    /// same value the old read model would have shown). New runs get the exact
+    /// run-time snapshot from the run-creation write paths.
+    fn migrate_v13_run_environment_snapshot(conn: &Connection) -> rusqlite::Result<()> {
+        // Additive column; ignore the duplicate-column error when a fresh DB
+        // already created it via the base schema (mirrors migrate_v8).
+        let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN run_environment TEXT;");
+        // Best-effort backfill: pre-existing rows have no recorded run-time env,
+        // so approximate it with the workflow's current environment. Uses the
+        // same canonical COALESCE the read model applies so buckets stay stable.
+        conn.execute_batch(
+            "UPDATE runs
+                SET run_environment = COALESCE(
+                    NULLIF(
+                        (SELECT w.environment FROM workflows w WHERE w.id = runs.workflow_id),
+                        ''
+                    ),
+                    'production'
+                )
+              WHERE run_environment IS NULL;",
+        )?;
+        Ok(())
     }
 
     /// v12: add the `queue_occupancy_samples` table for the queue-utilization
@@ -2674,8 +2711,12 @@ impl Database {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn()?;
+        // Snapshot the workflow's environment AT CREATION TIME so the run's
+        // historical environment survives a later workflow re-home (schema v13).
         conn.execute(
-            "INSERT INTO runs (id, workflow_id, started_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id) VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO runs (id, workflow_id, started_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id, run_environment)
+             VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8,
+                     (SELECT COALESCE(NULLIF(environment, ''), 'production') FROM workflows WHERE id = ?2))",
             params![id, workflow_id, now, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id],
         )?;
         self.get_run(&id)
@@ -2695,8 +2736,11 @@ impl Database {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn()?;
+        // Snapshot the workflow's environment AT CREATION TIME (schema v13).
         conn.execute(
-            "INSERT INTO runs (id, workflow_id, started_at, finished_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id) VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO runs (id, workflow_id, started_at, finished_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id, run_environment)
+             VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                     (SELECT COALESCE(NULLIF(environment, ''), 'production') FROM workflows WHERE id = ?2))",
             params![id, workflow_id, now, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id],
         )?;
         self.get_run(&id)
@@ -2821,9 +2865,12 @@ impl Database {
             }
         }
 
+        // Snapshot the workflow's environment AT ADMISSION TIME (schema v13) so
+        // re-homing the workflow later never retroactively re-buckets this run.
         tx.execute(
-            "INSERT INTO runs (id, workflow_id, started_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id)
-             VALUES (?1, ?2, ?3, 'admitted', ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO runs (id, workflow_id, started_at, status, trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id, run_environment)
+             VALUES (?1, ?2, ?3, 'admitted', ?4, ?5, ?6, ?7, ?8,
+                     (SELECT COALESCE(NULLIF(environment, ''), 'production') FROM workflows WHERE id = ?2))",
             params![
                 id,
                 workflow_id,
@@ -3746,13 +3793,14 @@ impl Database {
     /// therefore workflow-scoped whenever a workflow filter is applied. Every
     /// count derives from the canonical [`run_status`] sets.
     ///
-    /// ENVIRONMENT PROVENANCE — CURRENT, NOT HISTORICAL: a row's `environment`
-    /// (and the environment filter) reflect the owning workflow's environment
-    /// *now* — via the same `workflows` join the `get_workflow` path uses — not
-    /// a snapshot of where the run executed. Re-homing a workflow retroactively
-    /// re-buckets its history. This is an accepted, ledger-tracked limitation;
-    /// a run-time environment snapshot column is a separate, operator-gated
-    /// decision and is out of scope for this read model.
+    /// ENVIRONMENT PROVENANCE — SNAPSHOTTED (schema v13, decision 4): a row's
+    /// `environment` (and the environment filter) reflect the run's environment
+    /// AS RECORDED AT CREATION TIME via the `runs.run_environment` snapshot, NOT
+    /// the owning workflow's environment *now*. Re-homing a workflow therefore
+    /// no longer retroactively re-buckets its historical runs. Pre-v13 rows were
+    /// backfilled best-effort from the workflow's environment (true run-time env
+    /// unknown); the `COALESCE` falls back to the current workflow env only for
+    /// a row whose snapshot is somehow absent.
     pub fn history_read_model(
         &self,
         environment_filter: Option<&str>,
@@ -3771,14 +3819,14 @@ impl Database {
         let rows = {
             let mut stmt = conn.prepare(
                 "SELECT r.id, r.workflow_id, w.name,
-                        COALESCE(NULLIF(w.environment, ''), 'production') AS env,
+                        COALESCE(NULLIF(r.run_environment, ''), NULLIF(w.environment, ''), 'production') AS env,
                         r.status, r.started_at, r.finished_at, r.exit_code, r.trigger_kind,
                         CASE WHEN r.finished_at IS NOT NULL
                              THEN (julianday(r.finished_at) - julianday(r.started_at)) * 86400.0
                              END AS duration_seconds
                  FROM runs r
                  LEFT JOIN workflows w ON w.id = r.workflow_id
-                 WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
+                 WHERE (?1 = 'all' OR COALESCE(NULLIF(r.run_environment, ''), NULLIF(w.environment, ''), 'production') = ?1)
                    AND (?2 = 'all' OR r.workflow_id = ?2)
                    AND (?3 = 'all' OR r.status = ?3)
                    AND datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?4)
@@ -3822,7 +3870,7 @@ impl Database {
                         SUM(CASE WHEN r.status IN ({running}) THEN 1 ELSE 0 END)
                  FROM runs r
                  LEFT JOIN workflows w ON w.id = r.workflow_id
-                 WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
+                 WHERE (?1 = 'all' OR COALESCE(NULLIF(r.run_environment, ''), NULLIF(w.environment, ''), 'production') = ?1)
                    AND (?2 = 'all' OR r.workflow_id = ?2)
                    AND datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?3)",
                 ended_ok = run_status::ended_ok_sql(),
@@ -3849,7 +3897,7 @@ impl Database {
                  FROM runs r
                  LEFT JOIN workflows w ON w.id = r.workflow_id
                  WHERE r.finished_at IS NOT NULL
-                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
+                   AND (?1 = 'all' OR COALESCE(NULLIF(r.run_environment, ''), NULLIF(w.environment, ''), 'production') = ?1)
                    AND (?2 = 'all' OR r.workflow_id = ?2)
                    AND datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?3)
                  ORDER BY secs ASC",
@@ -7148,7 +7196,7 @@ mod tests {
         // Tripwire: refresh this fixture (seed schema + asserted columns) the
         // next time a migration lands so the newest N-1 -> N paths stay covered.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 12,
+            CURRENT_SCHEMA_VERSION, 13,
             "add a v(N-1)->v(N) fixture when a new migration ships"
         );
 
@@ -7230,7 +7278,7 @@ mod tests {
             assert_eq!(v, 7);
         }
 
-        // Apply the pending v8–v12 migrations.
+        // Apply the pending v8–v13 migrations.
         let conn = db.conn().unwrap();
         db.run_migrations(&conn, 7).unwrap();
 
@@ -7268,6 +7316,25 @@ mod tests {
                 "v8 migration should add `{expected}` to runs"
             );
         }
+
+        // v13 adds the run-time environment snapshot column and backfills
+        // pre-existing rows best-effort from their workflow's current env.
+        assert!(
+            run_cols.contains("run_environment"),
+            "v13 migration should add `run_environment` to runs"
+        );
+        let snap_env: Option<String> = conn
+            .query_row(
+                "SELECT run_environment FROM runs WHERE id = 'run-mig'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            snap_env.as_deref(),
+            Some("staging"),
+            "v13 backfill seeds run_environment from the workflow's environment"
+        );
 
         // v9 drops the vestigial corpus column but keeps environment.
         let wf_cols = workflow_columns(&conn);
@@ -10284,6 +10351,166 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert!(
             (sp95 - 200.0).abs() < 1.0,
             "workflow-scoped p95 ~200s, got {sp95}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migrate_v13_adds_run_environment_column_and_backfills_from_workflow_env() {
+        // (a) The v13 migration adds the NULLABLE `run_environment` column to an
+        // existing (pre-v13) DB and backfills existing rows best-effort from the
+        // owning workflow's environment (true run-time env of old rows unknown).
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        let db = Database {
+            path: db_path.to_string_lossy().to_string(),
+        };
+
+        // Seed a pre-v13 shape: `runs` WITHOUT the snapshot column, a workflow
+        // in sandbox, and a run for it. Stamp v12 so ONLY v13 is pending. We
+        // drive `run_migrations` directly (no base `init`) to isolate the v13
+        // transition.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runs (
+                    id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    status TEXT DEFAULT 'running'
+                );
+                CREATE TABLE workflows (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    environment TEXT
+                );
+                INSERT INTO workflows (id, name, environment)
+                    VALUES ('wf-a', 'A', 'sandbox');
+                INSERT INTO runs (id, workflow_id, started_at, status)
+                    VALUES ('run-a', 'wf-a', '2026-01-01T00:00:00Z', 'success');
+                PRAGMA user_version = 12;",
+            )
+            .unwrap();
+            assert!(
+                !runs_columns(&conn).contains("run_environment"),
+                "pre-v13 fixture must not already carry the snapshot column"
+            );
+        }
+
+        let conn = db.conn().unwrap();
+        db.run_migrations(&conn, 12).unwrap();
+
+        assert!(
+            runs_columns(&conn).contains("run_environment"),
+            "v13 must add the run_environment column"
+        );
+        let backfilled: Option<String> = conn
+            .query_row(
+                "SELECT run_environment FROM runs WHERE id = 'run-a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            backfilled.as_deref(),
+            Some("sandbox"),
+            "v13 backfills the run's environment from its owning workflow"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn history_read_model_snapshots_run_environment_and_survives_workflow_rehome() {
+        // (b)+(c) Core provenance guarantee (schema v13, decision 4): a run
+        // created while its workflow is in environment X STILL reports X in
+        // history after the workflow is later re-homed to Y. The read model
+        // returns the creation-time snapshot, never the workflow's current env.
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        // Workflow starts in production; create a run under it.
+        let wf = db
+            .create_workflow(
+                "Rehome WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let run = db
+            .create_run_with_context(&wf.id, Some("manual"), None, None, None, None)
+            .unwrap();
+
+        // Run creation snapshotted the workflow's environment AT THAT MOMENT.
+        let snap: Option<String> = db
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT run_environment FROM runs WHERE id = ?1",
+                params![run.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            snap.as_deref(),
+            Some("production"),
+            "run creation must snapshot the workflow's environment"
+        );
+
+        // Re-home the workflow to sandbox AFTER the run was created.
+        db.conn()
+            .unwrap()
+            .execute(
+                "UPDATE workflows SET environment = 'sandbox' WHERE id = ?1",
+                params![wf.id],
+            )
+            .unwrap();
+        let now_env: String = db
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT environment FROM workflows WHERE id = ?1",
+                params![wf.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(now_env, "sandbox", "sanity: the workflow really moved");
+
+        // History STILL reports the run under production (its snapshot), NOT
+        // sandbox (the workflow's current env).
+        let prod = db
+            .history_read_model(Some("production"), None, None, "-1 day", 100)
+            .unwrap();
+        assert_eq!(
+            prod.rows.len(),
+            1,
+            "the run stays in its creation-time environment (production)"
+        );
+        assert_eq!(prod.rows[0].id, run.id);
+        assert_eq!(
+            prod.rows[0].environment, "production",
+            "read model returns the SNAPSHOT, not the current workflow env"
+        );
+
+        // Filtering by the workflow's NEW env must NOT surface the old run.
+        let sandbox = db
+            .history_read_model(Some("sandbox"), None, None, "-1 day", 100)
+            .unwrap();
+        assert!(
+            sandbox.rows.iter().all(|r| r.id != run.id),
+            "a re-homed workflow must not retroactively re-bucket its old runs"
         );
 
         let _ = std::fs::remove_dir_all(dir);

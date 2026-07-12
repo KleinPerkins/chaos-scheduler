@@ -744,9 +744,10 @@ export interface RetentionPreview {
 
 /** One lean, LOG-FREE history row from {@link getRunHistoryModel}. Mirrors
  * `db::HistoryRow` — deliberately has NO `stdout`/`stderr` (fetch a single
- * run's logs via {@link getRunLog} instead). `environment` is the owning
- * workflow's CURRENT environment (via the `get_workflow` join), NOT a snapshot
- * of where the run executed — an accepted, ledger-tracked limitation. */
+ * run's logs via {@link getRunLog} instead). `environment` is the run's
+ * environment SNAPSHOTTED at creation time (`runs.run_environment`, schema
+ * v13), NOT the owning workflow's current environment — so re-homing a
+ * workflow never re-buckets its history. */
 export interface HistoryRow {
   id: string;
   workflow_id: string;

@@ -932,8 +932,9 @@ pub fn get_global_run_history(
 /// table is filtered. `lookback` accepts the shared dashboard grammar (`1d`,
 /// `3d`, `7d`, `30d`, `<n>h`, `all`) and defaults to `1d`; p95 duration is
 /// workflow-scoped whenever a workflow filter is applied. Tauri-IPC-only (no
-/// REST/SDK/MCP surface). Environment provenance is CURRENT, not a run-time
-/// snapshot — see [`Database::history_read_model`].
+/// REST/SDK/MCP surface). Environment provenance is SNAPSHOTTED at run creation
+/// time (schema v13), not the current workflow env — see
+/// [`Database::history_read_model`].
 #[tauri::command]
 pub fn get_run_history_model(
     state: State<AppState>,
