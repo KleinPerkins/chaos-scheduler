@@ -8,6 +8,7 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     include: [
       "src/**/*.test.{ts,tsx}",
+      "scripts/check-auto-merge-guard.test.mjs",
       "scripts/check-release-gating.test.mjs",
     ],
     restoreMocks: true,

@@ -62,6 +62,21 @@ in [`release.yml`](../.github/workflows/release.yml), not by convention.
      `packages/*/package.json`, and per-component `CHANGELOG.md`;
    - creates the git tag(s) and the GitHub Release(s).
 
+> **The Release PR is a deliberate manual gate — it is NOT auto-merged.** Every
+> other non-draft, same-repo PR is auto-approved and squash-auto-merged by the
+> `chaos-scheduler-automerge` GitHub App
+> ([`app-auto-merge.yml`](../.github/workflows/app-auto-merge.yml)). The
+> release-please "chore: release main" Release PR is **intentionally excluded**
+> from that bot: its head branch `release-please--branches--main` matches the
+> `release-please--` head-branch-prefix guard in that workflow's `auto-merge`
+> `if:`. So a maintainer merges the Release PR **by hand** when they decide to
+> ship — that human merge is what cuts the tag(s) + Release(s). Merging it then
+> triggers the build/sign/publish [`release.yml`](../.github/workflows/release.yml),
+> which still pauses for the required-reviewer **`release` Environment** approval
+> before anything is built or published (see below). Nothing about the guard
+> changes that environment gate; it only stops the merge itself from happening
+> automatically.
+
 ## Gating the downstream release build (important)
 
 `release.yml` is a **reusable workflow** invoked by `release-please.yml` in the

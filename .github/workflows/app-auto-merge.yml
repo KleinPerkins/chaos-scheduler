@@ -6,10 +6,16 @@ permissions:
   contents: read
 jobs:
   auto-merge:
+    # The release-please "chore: release main" PR (head branch
+    # `release-please--branches--main`) is deliberately EXCLUDED so cutting a
+    # release stays a manual human merge — see docs/RELEASING.md. Match by the
+    # `release-please--` head-branch prefix so any future target branch is
+    # covered too. Every other non-draft, same-repo PR still auto-merges.
     if: >-
       github.event.pull_request.draft == false &&
       github.repository == 'KleinPerkins/chaos-scheduler' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !startsWith(github.event.pull_request.head.ref, 'release-please--')
     runs-on: ubuntu-latest
     steps:
       - name: Mint GitHub App token
