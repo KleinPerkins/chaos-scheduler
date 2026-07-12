@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v1.4.0...chaos-scheduler-tauri-v1.5.0) (2026-07-12)
+
+
+### Features
+
+* **cursor:** add dispatch_fix_agent service + command with spend/safety gates ([#279](https://github.com/KleinPerkins/chaos-scheduler/issues/279)) ([5f69c6f](https://github.com/KleinPerkins/chaos-scheduler/commit/5f69c6fd0050e20c74a8c5a91a18fdff49c13541))
+* **cursor:** thread ui_fix_agent prompt overlay through the operator seam ([#281](https://github.com/KleinPerkins/chaos-scheduler/issues/281)) ([77c94f1](https://github.com/KleinPerkins/chaos-scheduler/commit/77c94f1270df79de4db03971f488b662b5657213))
+
 ## [1.4.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v1.3.0...chaos-scheduler-tauri-v1.4.0) (2026-07-12)
 
 

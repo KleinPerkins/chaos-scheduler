@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "chaos-labs-scheduler"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "axum",
  "base64 0.22.1",

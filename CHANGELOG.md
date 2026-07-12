@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.4.0...chaos-scheduler-v1.5.0) (2026-07-12)
+
+
+### Features
+
+* **cursor:** add dispatch_fix_agent service + command with spend/safety gates ([#279](https://github.com/KleinPerkins/chaos-scheduler/issues/279)) ([5f69c6f](https://github.com/KleinPerkins/chaos-scheduler/commit/5f69c6fd0050e20c74a8c5a91a18fdff49c13541))
+* **cursor:** thread ui_fix_agent prompt overlay through the operator seam ([#281](https://github.com/KleinPerkins/chaos-scheduler/issues/281)) ([77c94f1](https://github.com/KleinPerkins/chaos-scheduler/commit/77c94f1270df79de4db03971f488b662b5657213))
+
+
+### Documentation
+
+* **ledger:** record G04 binding-half rebind + D05 backend foundation ([#283](https://github.com/KleinPerkins/chaos-scheduler/issues/283)) ([2150fbb](https://github.com/KleinPerkins/chaos-scheduler/commit/2150fbba01d2ebd69fc6bb04b68cf754d90b535c))
+
 ## [1.4.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.3.0...chaos-scheduler-v1.4.0) (2026-07-12)
 
 
