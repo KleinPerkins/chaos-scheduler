@@ -19,8 +19,11 @@ determined from the repo + read-only metadata yet — chiefly **live-Figma facts
 freedom) — it is marked **`pending G04 audit`** (the one-time exhaustive Figma
 plugin/API audit in roadmap `G04`, plus the `G03` live token/version readback).
 The `G04` **binding-half** is now **COMPLETE** (per-descendant `cs.*` binding read
-live via `get_variable_defs`, 2026-07-12): see §5a for the evidence and §5 for the
-consolidated remaining list.
+live via `get_variable_defs`, 2026-07-12) — and the 8 earlier-extracted masters
+the audit found on legacy `affirm.color`/`radius` have since been **rebound to
+`cs.*`** (structure-preserving, screenshot-verified, non-destructive): see §5a for
+the evidence and §5 for the consolidated remaining list. The distinct
+remote-icon-**instance** residual (`R01`) stays open.
 
 ---
 
@@ -72,11 +75,16 @@ regardless of the row's primary authority.
 
 > **Global G04 note:** the **binding-half** of `G04` is **COMPLETE** (live
 > `get_variable_defs` readback, 2026-07-12) — descendant `cs.*` binding freedom is
-> now audited per master: the 10 `#174` masters + bespoke chart primitives +
-> `WorkflowCard` are clean (`cs.*`-only), while the 8 earlier-extracted primitives
-> are still bound to legacy `affirm.color` (non-compliant). Node-level remote-
-> component-instance freedom remains **unverified for all rows** (residual `R01`,
-> needs a plugin-API pass). Full evidence in §5a; not re-stated per row.
+> now audited per master, and the 8 earlier-extracted primitives the audit found on
+> legacy `affirm.color`/`radius` have since been **rebound to `cs.*`**
+> (structure-preserving, screenshot-verified, non-destructive; verified 0 remote
+> color + 0 remote radius bindings on each master's own nodes). They now join the
+> 10 `#174` masters + bespoke chart primitives + `WorkflowCard` as `cs.*`-only on
+> their own nodes. Node-level remote-component-**instance** freedom is a separate,
+> still-open residual (`R01`): 36 remote Affirm icon-glyph instances remain embedded
+> in `NavItem`/`Sidebar`/`ThemeToggle` (88 icon-interior remote bindings), and
+> per-descendant instance enumeration is still pending for the remaining rows. Full
+> evidence in §5a; not re-stated per row.
 
 ---
 
@@ -96,12 +104,12 @@ demo/transient states = 24.
 | F07 | Workflows list                    | `207:1303`  | Figma            | `src/components/WorkflowList.tsx`, `src/components/WorkflowCard.tsx`                                   | `src/components/WorkflowList.test.tsx`, `e2e/workflows-errors.spec.ts`                                                 | via `WorkflowCard`                 | Partial: env/frequency grouping, searchable cards + Active/Disabled status filter (#230), and actions exist; manual runs enter admission control (#229; manual-run standardization completed #263/#266); compact rows, tz note, collapsible groups pending (unify in code, D04)                                                                                                                                                                                         | Delete action lives on list, not editor (D04 accept)                                                                     | KP·Tabs | Pre-P1 — pending G04 audit |
 | F08 | Workflow detail                   | `224:1376`  | Figma            | `src/components/WorkflowDetail.tsx`                                                                    | `src/components/WorkflowDetail.test.tsx`, `e2e/workflow-detail.spec.ts`                                                | —                                  | Partial/close: config, heatmap (keyboard-accessible cells, #244), recent runs, drill-downs exist; designed KPI set incomplete                                                                                                                                                                                                                                                                                                                                           | — (DR02 redesign)                                                                                                        | KP·Tabs | Pre-P1 — pending G04 audit |
 | F09 | Workflow builder / New            | `213:1303`  | shipped-behavior | `src/components/WorkflowEditor.tsx`, `src/components/ScheduleBuilder.tsx`, `src/components/workflow/*` | `src/components/WorkflowEditor.test.tsx`, `e2e/workflow-editor.spec.ts`                                                | via `ScheduleBuilder` (`581:4321`) | Implemented (richer) than design                                                                                                                                                                                                                                                                                                                                                                                                                                        | Editor richer than Figma (shipped)                                                                                       | KP·Tabs | Pre-P1 — pending G04 audit |
-| F10 | Run detail                        | `213:3035`  | Figma            | `src/components/RunDetail.tsx`                                                                         | `src/components/RunDetail.test.tsx`, `e2e/run-detail.spec.ts`                                                          | —                                  | Partial (richer): timeline, logs, metrics, lineage, AI diagnosis exist; completed-task status is exposed to assistive tech (#239); the rerun path is now admission-controlled with a visible queued/admitted/duplicate outcome (#263/#264); per-step logs/copy + fix-agent actions pending (D05)                                                                                                                                                                        | Agent actions gated on safe backend (D05)                                                                                | KP·Tabs | Pre-P1 — pending G04 audit |
+| F10 | Run detail                        | `213:3035`  | Figma            | `src/components/RunDetail.tsx`                                                                         | `src/components/RunDetail.test.tsx`, `e2e/run-detail.spec.ts`                                                          | —                                  | Partial (richer): timeline, logs, metrics, lineage, AI diagnosis exist; completed-task status is exposed to assistive tech (#239); the rerun path is now admission-controlled with a visible queued/admitted/duplicate outcome (#263/#264); the safe opt-in fix-agent **backend contract shipped disabled-by-default** across 5 PRs (#275/#277/#278/#279/#281), no UI surface yet; per-step logs/copy + fix-agent action UI pending (D05)                               | Agent actions: safe backend shipped, disabled-by-default; UI pending (D05)                                               | KP·Tabs | Pre-P1 — pending G04 audit |
 | F11 | Global History                    | `228:1303`  | Figma            | `src/components/GlobalHistory.tsx`                                                                     | `src/components/GlobalHistory.test.tsx`, `e2e/global-history.spec.ts`                                                  | —                                  | Partial; scope-expanded (D03): bounded search + status/env/trigger filters + drill-down exist; async load failures announce via role=alert (#248); the lean log-free read model (#247) and snapshotted run_environment (schema v13, Decision-4, #251) land at the DB/read-model layer but are not yet wired to this surface; sticky Lookback/KPIs/env+duration cols + rehomed F06 charts pending                                                                        | Hosts rehomed F06 aggregate metrics (D03)                                                                                | KP·Tabs | Pre-P1 — pending G04 audit |
 | F12 | Queues                            | `213:3441`  | shipped-behavior | `src/components/QueueView.tsx`                                                                         | `e2e/enqueue.spec.ts` (no dedicated unit spec)                                                                         | —                                  | Implemented (richer)                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Richer than Figma (shipped)                                                                                              | KP·Tabs | Pre-P1 — pending G04 audit |
 | F13 | Environments                      | `213:3845`  | shipped-behavior | `src/components/Environments.tsx`, `src/components/EnvironmentBadge.tsx`                               | `e2e/dashboard-navigation.spec.ts` (no dedicated unit spec)                                                            | —                                  | Implemented                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Dynamic environments (D04 accept)                                                                                        | KP·Tabs | Pre-P1 — pending G04 audit |
 | F14 | Integrations                      | `213:4245`  | shipped-behavior | `src/components/Integrations.tsx`                                                                      | `src/components/Integrations.test.tsx`                                                                                 | —                                  | Implemented, **deliberate divergence**                                                                                                                                                                                                                                                                                                                                                                                                                                  | App-owned pinned MCP provisioning (D04 accept)                                                                           | KP·Tabs | Pre-P1 — pending G04 audit |
-| F15 | Settings                          | `213:5050`  | shipped-behavior | `src/components/Settings.tsx`                                                                          | `src/components/Settings.test.tsx`                                                                                     | via form masters                   | Implemented (richer)                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Richer than Figma (shipped)                                                                                              | KP·Tabs | Pre-P1 — pending G04 audit |
+| F15 | Settings                          | `213:5050`  | shipped-behavior | `src/components/Settings.tsx`                                                                          | `src/components/Settings.test.tsx`                                                                                     | via form masters                   | Implemented (richer); **mirrored code→design into Figma as v1** (G00 first bless/mirror surface — frame `633:5682`, page `0:1`, from `cs.*`-bound master instances, verified vs the committed `settings-linux.png` baseline)                                                                                                                                                                                                                                            | Richer than Figma (shipped)                                                                                              | KP·Tabs | Pre-P1 — pending G04 audit |
 | F16 | Agent Activity                    | `213:4646`  | shipped-behavior | `src/components/missionControl/AgentActivity.tsx`, `agentActivityData.ts`                              | `src/components/missionControl/agentActivityData.test.ts`, `e2e/visual/mission-control-activity.spec.ts`               | —                                  | Partial/merged into MC Activity tab; no standalone route or agent-kind badge                                                                                                                                                                                                                                                                                                                                                                                            | Merged into Mission Control (D04 accept)                                                                                 | KP·MC   | Pre-P1 — pending G04 audit |
 | F17 | Tray popup                        | `231:1303`  | shipped-behavior | `src/components/MenuBarPopup.tsx`                                                                      | `src/components/MenuBarPopup.test.tsx`, `e2e/popup.spec.ts`                                                            | —                                  | Shipped the **384×590 mini-dashboard** (#269): BrandMark branding + connection status + running/queued/failed summary chips + ACTIVE/UPCOMING/RECENT run rows, the admission-control "Queue run" preserved on upcoming rows, the update aside CTA relabeled "Install" (was "Update") + Skip, no "Pause all", sourced only from the existing `get_mission_control_snapshot` + `list_queued_runs` (no new DB/IPC), with a regenerated deterministic Linux visual baseline | 384×590 mini-dashboard ADOPTED per operator decision (D02; supersedes the earlier 340×440 glance-and-act recommendation) | KP·Tabs | Pre-P1 — pending G04 audit |
 | F18 | Workflow-scoped Run History       | `296:2863`  | Figma            | `src/components/RunHistory.tsx`                                                                        | `src/components/RunHistory.test.tsx`, `e2e/workflow-history.spec.ts`                                                   | —                                  | Partial: heatmap (keyboard-accessible cells, #244) + table + search/status filter + rerun exist; workflow-level manual run enters admission control (#229; manual-run standardization completed #263/#266); async load failures announce via role=alert (#248); rows surface snapshotted run_environment (schema v13); sticky Lookback/KPIs pending                                                                                                                     | — (DR02 redesign)                                                                                                        | KP·Tabs | Pre-P1 — pending G04 audit |
@@ -134,6 +142,26 @@ demo/transient states = 24.
   `run_workflow_now` is marked deprecated (`#267`), both already enqueueing
   underneath — and the false "dispatches immediately" docs were corrected
   (`#268`).
+- **D05 (`F10` run-detail agent actions) — safe opt-in backend SHIPPED,
+  disabled-by-default; UI pending:** the plan-first-reviewed backend contract for the
+  run-detail "agent actions" ("Open in Cursor / Dispatch fix agent") is merged &
+  green on `main` across 5 PRs (`#275`/`#277`/`#278`/`#279`/`#281`), with the feature
+  **disabled by default and no UI surface yet**. Every safety invariant carries a
+  biting failing-first test: backend `open_url` scheme guard (allow only
+  `http`/`https`/`cursor`, reject a leading `-`), symlink-safe path confinement
+  anchored to the app `workspace_root`, prompt-fencing of untrusted `stderr` + secret
+  non-leak (`error_analysis` dropped), forced `auto_create_pr=false` for UI-initiated
+  fixes, a non-production repo/env gate, a mandatory dispatch rate cap, a namespaced
+  idempotency key, no-hijack of `rerun`/`backfill`, and a per-dispatch audit row. UI
+  exposure (Settings "Cursor integration" section + RunDetail actions + consent
+  `Modal`) is **pending**; operator decisions locked: block designated-production
+  only (allow non-prod envs), hard-guard duplicate dispatch, Figma-mock-first then
+  code.
+- **G00 (hybrid) — first bless/mirror surface landed:** `F15 Settings` was mirrored
+  **code→design as v1** in Figma (frame `633:5682`, page `0:1`), built from
+  `cs.*`-bound master instances and verified against the committed
+  `settings-linux.png` baseline. This is the first G00 bless/mirror surface; further
+  shipped surfaces remain in progress (G00 otherwise still open).
 - **Repo is ahead of the roadmap baseline** for the Mission Control surfaces: the
   `D07` chart primitives are already composed into `Overview` (race-track,
   status donut, dual-axis trend), `OperationalHealth` (dual-axis), `NeedsAttention`
@@ -284,17 +312,17 @@ Figma before `G12` can pass; none may remain an informal exception. The
 
 Context for the authority classifications above (full text: roadmap §5).
 
-| Decision                     | State          | Bearing on this ledger                                                                                                                                                           |
-| ---------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D00 Sequencing               | resolved       | Staged overlap; MC design approved before MC code; lighter tabs serial                                                                                                           |
-| D01 Main viewport            | recommend      | Keep 960×680 default; 1280 as wide responsive — sets `G07` screenshot geometry                                                                                                   |
-| D02 Popup role               | resolved       | Operator adopted the 384×590 mini-dashboard (shipped #269); the earlier 340×440 recommendation is superseded — `F17` is now the 384×590 mini-dashboard, not a 340×440 divergence |
-| D03 Mission Control depth    | resolved       | NA + OH as MC drill-downs; **Resources stays**; `F06`→`F11` consolidation                                                                                                        |
-| D04 Divergence disposition   | recommend      | Defines the §3a accepted-final set vs unify-in-code set (`G12`)                                                                                                                  |
-| D05 Run-detail agent actions | open           | `F10` "Open in Cursor/Dispatch fix agent" only with safe backend, else remove                                                                                                    |
-| D06 Figma write policy       | recommend      | Automate non-destructive post-merge token create/update behind protected env + readback (`G03/G13`)                                                                              |
-| D07 Charting architecture    | resolved       | Bespoke in-repo SVG on `d3-scale`/`d3-shape`; the §2a primitive set                                                                                                              |
-| D08 Experimental viz         | resolved: ship | Race-track front-and-center on `F01`; needs reduced-motion + per-job expected-runtime metric                                                                                     |
+| Decision                     | State          | Bearing on this ledger                                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D00 Sequencing               | resolved       | Staged overlap; MC design approved before MC code; lighter tabs serial                                                                                                                                                                                                                                                                                                                                          |
+| D01 Main viewport            | recommend      | Keep 960×680 default; 1280 as wide responsive — sets `G07` screenshot geometry                                                                                                                                                                                                                                                                                                                                  |
+| D02 Popup role               | resolved       | Operator adopted the 384×590 mini-dashboard (shipped #269); the earlier 340×440 recommendation is superseded — `F17` is now the 384×590 mini-dashboard, not a 340×440 divergence                                                                                                                                                                                                                                |
+| D03 Mission Control depth    | resolved       | NA + OH as MC drill-downs; **Resources stays**; `F06`→`F11` consolidation                                                                                                                                                                                                                                                                                                                                       |
+| D04 Divergence disposition   | recommend      | Defines the §3a accepted-final set vs unify-in-code set (`G12`)                                                                                                                                                                                                                                                                                                                                                 |
+| D05 Run-detail agent actions | in progress    | Resolved toward a **safe opt-in backend**, now **shipped disabled-by-default** for `F10` "Open in Cursor/Dispatch fix agent" (#275/#277/#278/#279/#281; every safety invariant carries a failing-first test — see §1 notes); UI (Settings + RunDetail + consent `Modal`) pending. Operator decisions locked: block designated-production only (allow non-prod), hard-guard duplicate dispatch, Figma-mock-first |
+| D06 Figma write policy       | recommend      | Automate non-destructive post-merge token create/update behind protected env + readback (`G03/G13`)                                                                                                                                                                                                                                                                                                             |
+| D07 Charting architecture    | resolved       | Bespoke in-repo SVG on `d3-scale`/`d3-shape`; the §2a primitive set                                                                                                                                                                                                                                                                                                                                             |
+| D08 Experimental viz         | resolved: ship | Race-track front-and-center on `F01`; needs reduced-motion + per-job expected-runtime metric                                                                                                                                                                                                                                                                                                                    |
 
 ---
 
@@ -320,12 +348,16 @@ determinable from repo + read-only metadata yet and are marked `pending G04 audi
    IDs). The `G04` plugin/API audit reads them directly.
 3. **Node-level remote-component-instance freedom — all rows (global note in §0).**
    The **binding-half is now RESOLVED** (§5a): a live `get_variable_defs` readback
-   proves per-master descendant binding (10 `#174` masters + chart primitives +
-   `WorkflowCard` clean on `cs.*`; the 8 early primitives still on legacy
-   `affirm.color`). What remains is node-level proof that every descendant is a
-   zero-remote-instance node — `get_variable_defs`/`get_metadata` cannot enumerate
-   embedded `INSTANCE` descendants — so this stays **residual `R01`**, pending a
-   Figma plugin-API pass (`node.findAll` on `INSTANCE` + `mainComponent.remote`).
+   proves per-master descendant binding, and the 8 earlier primitives have since
+   been rebound `affirm.color`/`radius` → `cs.*` — so the 10 `#174` masters + chart
+   primitives + `WorkflowCard` + those 8 are all `cs.*`-only on their own nodes.
+   What remains is node-level proof that every descendant is a
+   zero-remote-**instance** node — `get_variable_defs`/`get_metadata` cannot
+   enumerate embedded `INSTANCE` descendants — so this stays **residual `R01`**. A
+   Figma plugin-API pass (`node.findAll` on `INSTANCE` + `mainComponent.remote`) has
+   already quantified part of it: 36 remote Affirm icon-glyph instances embedded in
+   `NavItem`/`Sidebar`/`ThemeToggle` (88 icon-interior remote bindings); the
+   remaining rows still need the same pass.
 4. **"Reflected in Figma?" for each `D04` accepted divergence (§3a).** Whether the
    shipped-behavior divergence has been mirrored back into the Figma master is a
    live-Figma fact confirmed during the `G04`/`G12` re-sync.
@@ -335,13 +367,15 @@ each `*.figma.tsx`) and all frame IDs (roadmap coverage matrix); code paths and 
 paths (verified in-repo); Code Connect presence (source-tracked, and the 22 DS
 masters verified live this session); owner (consolidated under the maintainer per §0).
 
-### 5a. `G04` binding-half audit — evidence (2026-07-12)
+### 5a. `G04` binding-half audit + rebind — evidence (2026-07-12)
 
 The **binding-half** of the roadmap `G04` audit is **COMPLETE**, established by a
 live `get_variable_defs` readback of file `twQmWC8dWT4tqeqIigNsRy`, page
 "Mission Control", with the `cs.*` variable collection pinned to Dark. This
 resolves the per-descendant `cs.*` **binding-freedom** question (§0 global note; §5
-item 3). The node-level remote-instance half remains residual `R01` (below).
+item 3). The 8 earlier-extracted primitives the readback found on legacy
+`affirm.color`/`radius` have since been **rebound to `cs.*`** (remediation executed
+— see below). The node-level remote-instance half remains residual `R01` (below).
 
 **✅ Clean — bound ONLY to `cs.*`** (`var(--…)` bindings, zero legacy paths):
 
@@ -351,40 +385,54 @@ item 3). The node-level remote-instance half remains residual `R01` (below).
   `C20` DualAxisLine `521:4262`.
 - `C31` WorkflowCard `579:4320`.
 
-**❌ Non-compliant — still bound to LEGACY `affirm.color`** (raw legacy variable
-paths such as `text/default`, `bg/surface/primary`, `icon/brand/indigo`,
-`icon/usercomm/*`, `border/onsurface/*`, `onSurface/*` — **not** `cs.*`): all 8
-earlier-extracted primitives, which predate the retired copy-detach approach.
+**✅ Rebound this pass — LEGACY `affirm.color`/`radius` → `cs.*`** (2026-07-12). All
+8 earlier-extracted primitives — which predated the retired copy-detach approach and
+which the audit had found on raw legacy paths such as `text/default`,
+`bg/surface/primary`, `icon/brand/indigo`, `icon/usercomm/*`, `border/onsurface/*`,
+`onSurface/*` (**not** `cs.*`) — were rebound off the remote
+`affirm.color`/`affirm.radius`/`radius` collections onto the local `cs.*`
+collection. The rebind was **structure-preserving, screenshot-verified, and
+non-destructive**, and re-read live to confirm **0 remote color + 0 remote radius**
+variable bindings on each master's own nodes. `StatCard`, `ThemeToggle`, and
+`Sidebar` additionally had remote radius rebound to `cs.radius`.
 
-| C-ID | Master      | Figma node |
-| ---- | ----------- | ---------- |
-| C08  | Button      | `113:526`  |
-| C04  | StatusBadge | `49:124`   |
-| C12  | StatCard    | `53:132`   |
-| C01  | NavItem     | `50:127`   |
-| C28  | Sidebar     | `305:6378` |
-| C09  | EnvSelect   | `121:540`  |
-| C30  | RunsTable   | `415:8668` |
-| C02  | ThemeToggle | `90:439`   |
+| C-ID | Master      | Figma node | Radius → `cs.radius` |
+| ---- | ----------- | ---------- | -------------------- |
+| C08  | Button      | `113:526`  | —                    |
+| C04  | StatusBadge | `49:124`   | —                    |
+| C12  | StatCard    | `53:132`   | ✓                    |
+| C01  | NavItem     | `50:127`   | —                    |
+| C28  | Sidebar     | `305:6378` | ✓                    |
+| C09  | EnvSelect   | `121:540`  | —                    |
+| C30  | RunsTable   | `415:8668` | —                    |
+| C02  | ThemeToggle | `90:439`   | ✓                    |
 
-**Color-divergence side-effect.** The legacy bindings even differ slightly from the
-token SOT — e.g. legacy `text/default` `#f7f7f8` vs `cs` `--text-primary` `#e8eaed`;
-legacy `bg/surface/primary` `#252531` vs `cs` `--bg-secondary` `#1a1d27` /
-`--bg-tertiary` `#242736`. So the 8 early masters are **both** dependency-laden
-**and** marginally color-divergent from the shipped code.
+**Color-divergence side-effect — RESOLVED by the rebind.** The legacy bindings had
+also differed slightly from the token SOT — e.g. legacy `text/default` `#f7f7f8` vs
+`cs` `--text-primary` `#e8eaed`; legacy `bg/surface/primary` `#252531` vs `cs`
+`--bg-secondary` `#1a1d27` / `--bg-tertiary` `#242736`. Rebinding these 8 masters'
+own-node fills/strokes onto `cs.*` removes that marginal color divergence together
+with the external dependency.
 
-**Remediation (identified, NOT yet executed).** Rebind those 8 masters'
-fills/strokes `affirm.color → cs.*`. This is a **WRITE on published library
-masters**, so it is gated on decision **`D06` (Figma write policy)** + explicit
-operator confirmation, and was **not** executed this pass.
+**Remediation — EXECUTED (2026-07-12).** Those 8 masters' fills/strokes were rebound
+`affirm.color`/`radius` → `cs.*`. Because this was a **WRITE on published library
+masters**, it was gated on decision **`D06` (Figma write policy)** + explicit
+operator confirmation; it was carried out structure-preserving and non-destructive,
+then re-read live to confirm 0 remote color + 0 remote radius variable bindings
+remain on each master's own nodes, with a per-master screenshot check.
 
-**Remote-instance half — residual gap `R01`.** Node-level "zero remote-component
-instances per descendant" is **not provable** through the available remote Figma
-MCP tools: `get_variable_defs` returns variable bindings only, and `get_metadata`
-returns shallow top-level structure only (not embedded `INSTANCE` descendants).
-Definitive proof requires a Figma plugin-API pass (`node.findAll` on `INSTANCE` +
-`mainComponent.remote`). Proxy: the clean masters expose **zero** `affirm.color`
-bindings — a strong proxy for zero Affirm-bound remote instances there.
+**Remote-instance half — residual gap `R01` (still OPEN, distinct from the
+binding-half above).** A master can still embed **remote Affirm icon-glyph
+`INSTANCE`s**, whose interior bindings the fill/stroke rebind above cannot touch. A
+Figma plugin-API pass has now quantified part of this: **36 remote Affirm icon-glyph
+instances** remain embedded — `NavItem` (3), `Sidebar` (52 interior), `ThemeToggle`
+(33) — i.e. **88 icon-interior remote bindings**. Closing this requires replacing
+those instances with **local vector copies**; that is a structural change, is
+**operator-gated**, and is **NOT yet done** — so `R01` stays open. Full
+per-descendant enumeration for the remaining masters still needs the same pass
+(`node.findAll` on `INSTANCE` + `mainComponent.remote`). Proxy for the binding-half:
+the rebound + clean masters now expose **zero** `affirm.color` bindings on their own
+nodes.
 
 **Corroborating (already-known, kept consistent).** `G03` token mirror **confirmed
 accurate** (live Dark `cs.*` values match `figma-tokens.json`); `G05`/`G08` Code
