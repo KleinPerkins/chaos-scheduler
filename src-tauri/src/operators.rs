@@ -212,12 +212,18 @@ fn validate_git_ref(name: &str) -> Result<(), String> {
 /// the workspace root. The deepest existing ancestor is canonicalized (so a
 /// symlink cannot redirect outside the root) and any not-yet-created tail (the
 /// clone target) is re-appended.
-fn confine_path_under_root(workspace_root: &str, requested: &str) -> Result<PathBuf, String> {
+/// Shared, operation-agnostic path confinement (used by `git_pull` and the
+/// Cursor "open in editor" command). Error strings are intentionally NOT
+/// namespaced to a single operator so callers can surface them directly.
+pub(crate) fn confine_path_under_root(
+    workspace_root: &str,
+    requested: &str,
+) -> Result<PathBuf, String> {
     if workspace_root.trim().is_empty() {
-        return Err("git_pull: workspace_root is not configured".into());
+        return Err("workspace_root is not configured".into());
     }
     let root = std::fs::canonicalize(workspace_root)
-        .map_err(|e| format!("git_pull: invalid workspace_root '{workspace_root}': {e}"))?;
+        .map_err(|e| format!("invalid workspace_root '{workspace_root}': {e}"))?;
     let requested_path = Path::new(requested);
     let absolute = if requested_path.is_absolute() {
         requested_path.to_path_buf()
@@ -229,9 +235,7 @@ fn confine_path_under_root(workspace_root: &str, requested: &str) -> Result<Path
     if resolved == root || resolved.starts_with(&root) {
         Ok(resolved)
     } else {
-        Err(format!(
-            "git_pull: path '{requested}' escapes workspace_root"
-        ))
+        Err(format!("path '{requested}' escapes workspace_root"))
     }
 }
 
@@ -268,8 +272,8 @@ fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf, String> {
             None => break,
         }
     }
-    let mut resolved = std::fs::canonicalize(&existing)
-        .map_err(|e| format!("git_pull: cannot resolve path prefix: {e}"))?;
+    let mut resolved =
+        std::fs::canonicalize(&existing).map_err(|e| format!("cannot resolve path prefix: {e}"))?;
     for name in tail.iter().rev() {
         resolved.push(name);
     }

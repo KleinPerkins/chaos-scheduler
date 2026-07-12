@@ -1802,6 +1802,80 @@ mod tests {
     }
 
     #[test]
+    fn resolve_local_script_confines_under_workspace_root() {
+        let root = std::env::temp_dir().join(format!("chaos-cursor-open-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(root.join("scripts/ok.py"), b"# noop\n").unwrap();
+        let root_str = root.to_str().unwrap();
+
+        // A confined, existing script resolves.
+        let resolved = resolve_local_script(root_str, "scripts/ok.py").expect("should resolve");
+        assert!(resolved.ends_with("scripts/ok.py"));
+
+        // Traversal / absolute paths escaping the root are rejected — this
+        // reuses the shared canonicalizing, symlink-safe confinement, NOT a
+        // weaker lexical `..` check.
+        assert!(resolve_local_script(root_str, "../../../../etc/passwd").is_none());
+        assert!(resolve_local_script(root_str, "/etc/passwd").is_none());
+
+        // A confined but non-existent path (e.g. a cloud-only workflow) → None.
+        assert!(resolve_local_script(root_str, "scripts/missing.py").is_none());
+        // Empty script path → None.
+        assert!(resolve_local_script(root_str, "  ").is_none());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_cursor_file_link_uses_guarded_cursor_scheme() {
+        let link = build_cursor_file_link(std::path::Path::new("/Users/me/project/x.py"));
+        assert_eq!(link, "cursor://file/Users/me/project/x.py");
+        // The generated link must pass the server-side open_url scheme guard.
+        assert!(validate_open_url(&link).is_ok());
+    }
+
+    #[test]
+    fn run_is_failed_classifies_terminal_states() {
+        let base = Run {
+            id: "r".into(),
+            workflow_id: "w".into(),
+            started_at: "2026-07-12T00:00:00Z".into(),
+            finished_at: None,
+            exit_code: None,
+            stdout: None,
+            stderr: None,
+            result_url: None,
+            status: "running".into(),
+            workflow_name: None,
+            summary: None,
+            error_analysis: None,
+            trigger_kind: None,
+            trigger_payload: None,
+            upstream_run_id: None,
+            input_json: None,
+            rerun_of_run_id: None,
+        };
+        assert!(!run_is_failed(&base)); // running, no exit code
+        assert!(run_is_failed(&Run {
+            status: "failed".into(),
+            ..base.clone()
+        }));
+        assert!(run_is_failed(&Run {
+            status: "poll_exhausted".into(),
+            ..base.clone()
+        }));
+        assert!(run_is_failed(&Run {
+            exit_code: Some(1),
+            ..base.clone()
+        }));
+        assert!(!run_is_failed(&Run {
+            status: "success".into(),
+            exit_code: Some(0),
+            ..base.clone()
+        }));
+    }
+
+    #[test]
     fn parse_lookback_maps_grammar_to_modifier_and_seconds() {
         assert_eq!(
             parse_lookback(Some("1d")).unwrap(),
@@ -2005,6 +2079,95 @@ pub fn open_url(url: String) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("Failed to open URL: {}", e))?;
     Ok(())
+}
+
+/// Build a Cursor "open file" deep link for an absolute local path. Cursor
+/// (VS Code-derived) uses `cursor://file/{absolute-path}` where the URL
+/// authority is exactly `file`; since `abs` is a confined absolute path (leading
+/// `/`), concatenation yields e.g. `cursor://file/Users/me/x.py`.
+fn build_cursor_file_link(abs: &std::path::Path) -> String {
+    format!("cursor://file{}", abs.to_string_lossy())
+}
+
+/// Whether the Cursor desktop app appears installed (macOS), so the UI can
+/// hide/disable "Open in Cursor" when the `cursor://` handler is absent.
+fn cursor_installed() -> bool {
+    if std::path::Path::new("/Applications/Cursor.app").exists() {
+        return true;
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if std::path::Path::new(&format!("{home}/Applications/Cursor.app")).exists() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Resolve a workflow's `script_path` to a confined, existing local path under
+/// `workspace_root`. Returns `None` when the path escapes the root (workflow
+/// rows are author-supplied via MCP/API, so the confinement base MUST be the
+/// app-config `workspace_root`, never a per-workflow value) or when no local
+/// file/dir exists (e.g. a cloud-only operator with a placeholder script_path).
+fn resolve_local_script(workspace_root: &str, script_path: &str) -> Option<std::path::PathBuf> {
+    if script_path.trim().is_empty() {
+        return None;
+    }
+    let confined = crate::operators::confine_path_under_root(workspace_root, script_path).ok()?;
+    confined.exists().then_some(confined)
+}
+
+/// Whether a run ended in a non-OK terminal state (eligible for a fix agent).
+fn run_is_failed(run: &Run) -> bool {
+    matches!(
+        run.status.as_str(),
+        "failed" | "poll_exhausted" | "timed_out" | "error" | "cancelled"
+    ) || run.exit_code.is_some_and(|code| code != 0)
+}
+
+/// Open the failed run's local script/repo location in the Cursor desktop app
+/// via a `cursor://` deep link. Side-effect-free (no spend); the path is
+/// confined under the app-configured `workspace_root` and the URL is routed
+/// through the same scheme-guarded `open` path as every other external link.
+#[tauri::command]
+pub fn open_run_in_cursor(state: State<AppState>, run_id: String) -> Result<(), String> {
+    let run = state.db.get_run(&run_id).map_err(|e| e.to_string())?;
+    let workflow = state
+        .db
+        .get_workflow(&run.workflow_id)
+        .map_err(|e| e.to_string())?;
+    let path = resolve_local_script(&state.workspace_root, &workflow.script_path)
+        .ok_or_else(|| "open_run_in_cursor: no local script for this run".to_string())?;
+    open_url(build_cursor_file_link(&path))
+}
+
+/// Per-run eligibility for the Cursor integration affordances. Open-in-Cursor is
+/// decoupled from the spend/`enabled` gate (it is safe and side-effect-free);
+/// fix-agent dispatch requires the feature enabled, a designated fix workflow,
+/// and a failed source run.
+#[tauri::command]
+pub fn get_cursor_integration_status(
+    state: State<AppState>,
+    run_id: String,
+) -> Result<serde_json::Value, String> {
+    let run = state.db.get_run(&run_id).map_err(|e| e.to_string())?;
+    let workflow = state
+        .db
+        .get_workflow(&run.workflow_id)
+        .map_err(|e| e.to_string())?;
+    let prefs = state
+        .db
+        .get_cursor_integration_prefs()
+        .map_err(|e| e.to_string())?;
+    let installed = cursor_installed();
+    let open_in_cursor_available =
+        installed && resolve_local_script(&state.workspace_root, &workflow.script_path).is_some();
+    let dispatch_fix_available =
+        prefs.enabled && prefs.fix_workflow_id.is_some() && run_is_failed(&run);
+    Ok(serde_json::json!({
+        "open_in_cursor_available": open_in_cursor_available,
+        "dispatch_fix_available": dispatch_fix_available,
+        "cursor_installed": installed,
+    }))
 }
 
 #[tauri::command]

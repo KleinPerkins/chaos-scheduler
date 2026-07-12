@@ -107,6 +107,8 @@ export type IpcCommand =
   | "get_notification_prefs"
   | "get_cursor_integration_prefs"
   | "set_cursor_integration_prefs"
+  | "open_run_in_cursor"
+  | "get_cursor_integration_status"
   | "analyze_run_error"
   | "generate_workflow_description"
   | "get_email_config"
@@ -458,6 +460,12 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       fix_workflow_id:
         (args.fixWorkflowId as string | null | undefined) ?? null,
       max_dispatches_per_hour: Number(args.maxDispatchesPerHour ?? 5),
+    }),
+    open_run_in_cursor: () => undefined,
+    get_cursor_integration_status: () => ({
+      open_in_cursor_available: false,
+      dispatch_fix_available: false,
+      cursor_installed: false,
     }),
     analyze_run_error: () => ({
       diagnosis: "Demo analysis",

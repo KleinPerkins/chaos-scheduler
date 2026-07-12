@@ -474,6 +474,8 @@ pub fn run() {
             commands::get_notification_prefs,
             commands::get_cursor_integration_prefs,
             commands::set_cursor_integration_prefs,
+            commands::open_run_in_cursor,
+            commands::get_cursor_integration_status,
             commands::analyze_run_error,
             commands::generate_workflow_description,
             commands::get_email_config,
