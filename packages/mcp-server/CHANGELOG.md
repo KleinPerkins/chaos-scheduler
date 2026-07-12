@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v1.1.0...mcp-server-v1.2.0) (2026-07-12)
+
+
+### Features
+
+* **mcp-server:** deprecate run_workflow_now in favor of enqueue_workflow ([#267](https://github.com/KleinPerkins/chaos-scheduler/issues/267)) ([081ed6f](https://github.com/KleinPerkins/chaos-scheduler/commit/081ed6f6c9c9b627fd7cc50da0bf80d9f41b0750))
+
 ## [1.1.0](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v1.0.2...mcp-server-v1.1.0) (2026-07-09)
 
 
