@@ -114,6 +114,8 @@ describe("ipc fixture registry", () => {
       "get_notification_prefs",
       "get_cursor_integration_prefs",
       "set_cursor_integration_prefs",
+      "open_run_in_cursor",
+      "get_cursor_integration_status",
       "analyze_run_error",
       "generate_workflow_description",
       "get_email_config",
