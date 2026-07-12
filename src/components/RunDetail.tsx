@@ -573,7 +573,10 @@ export default function RunDetail({ runId, onBack }: Props) {
             {tasks.map((task) => (
               <div key={task.id} className="rd-task-row">
                 <div className="rd-task-label">
-                  <StatusDot status={task.status} />
+                  <StatusDot
+                    status={task.status}
+                    aria-label={`Status: ${formatRunStatusLabel(task.status)}`}
+                  />
                   <span>{task.task_id}</span>
                   <span className="rd-task-attempt">
                     attempt {task.attempt_number}
