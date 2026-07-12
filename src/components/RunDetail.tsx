@@ -1,4 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import {
   getRunAttempts,
   getRunLog,
@@ -8,6 +14,7 @@ import {
   analyzeRunError,
 } from "../lib/commands";
 import { openExternalSafe } from "../lib/openExternalSafe";
+import { formatDurationBetween } from "../lib/duration";
 import Button from "./Button";
 import PageHeader from "./PageHeader";
 import StatCard from "./StatCard";
@@ -122,13 +129,7 @@ function isSummarySection(value: unknown): value is SummarySection {
 
 function formatDuration(start: string, end: string | null): string {
   if (!end) return "running...";
-  const ms = new Date(end).getTime() - new Date(start).getTime();
-  const secs = Math.floor(ms / 1000);
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ${secs % 60}s`;
-  const hrs = Math.floor(mins / 60);
-  return `${hrs}h ${mins % 60}m`;
+  return formatDurationBetween(start, end);
 }
 
 function formatDate(iso: string): string {
@@ -139,6 +140,23 @@ function formatDate(iso: string): string {
     minute: "2-digit",
     timeZoneName: "short",
   });
+}
+
+function taskTimelineWidth(task: RunTask, run: Run): string {
+  if (!task.started_at || !task.finished_at || !run.finished_at) return "100%";
+  const runDuration = Date.parse(run.finished_at) - Date.parse(run.started_at);
+  const taskDuration =
+    Date.parse(task.finished_at) - Date.parse(task.started_at);
+  if (
+    !Number.isFinite(runDuration) ||
+    !Number.isFinite(taskDuration) ||
+    runDuration <= 0 ||
+    taskDuration < 0
+  ) {
+    return "100%";
+  }
+  const share = Math.max(12, Math.min(100, (taskDuration / runDuration) * 100));
+  return `${Math.round(share)}%`;
 }
 
 function StatsGrid({ data }: { data: Record<string, number | string> }) {
@@ -318,7 +336,7 @@ export default function RunDetail({ runId, onBack }: Props) {
   const [attempts, setAttempts] = useState<RunAttempt[]>([]);
   const [metrics, setMetrics] = useState<RunMetric[]>([]);
   const [relationships, setRelationships] = useState<RunRelationship[]>([]);
-  const [showLogs, setShowLogs] = useState(false);
+  const [showLogs, setShowLogs] = useState(true);
   const [logTab, setLogTab] = useState<"stdout" | "stderr">("stdout");
   const [analysis, setAnalysis] = useState<ErrorAnalysis | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
@@ -402,30 +420,44 @@ export default function RunDetail({ runId, onBack }: Props) {
     }
   };
 
+  const handleLogTabKeyDown = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const nextTab = logTab === "stdout" ? "stderr" : "stdout";
+    setLogTab(nextTab);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`run-log-tab-${nextTab}`)?.focus();
+    });
+  };
+
   if (loading && !run) {
     return (
-      <div className="rd-page">
+      <section className="rd-page" aria-label="Run detail">
         <div className="page-header">
           <h1 className="page-title">Run Details</h1>
           <Button variant="ghost" onClick={onBack}>
-            &larr; Back
+            &larr; Run history
           </Button>
         </div>
-        <div className="rd-loading">Loading run...</div>
-      </div>
+        <div className="rd-loading" role="status">
+          Loading run...
+        </div>
+      </section>
     );
   }
 
   if (loadError && !run) {
     return (
-      <div className="rd-page">
+      <section className="rd-page" aria-label="Run detail">
         <div className="page-header">
           <h1 className="page-title">Run Details</h1>
           <Button variant="ghost" onClick={onBack}>
-            &larr; Back
+            &larr; Run history
           </Button>
         </div>
-        <div className="rd-error">
+        <div className="rd-error" role="alert">
           <span>Failed to load run: {loadError}</span>
           <Button
             variant="ghost"
@@ -436,7 +468,7 @@ export default function RunDetail({ runId, onBack }: Props) {
             Retry
           </Button>
         </div>
-      </div>
+      </section>
     );
   }
 
@@ -456,6 +488,7 @@ export default function RunDetail({ runId, onBack }: Props) {
   const isFailed = run.status === "failed";
   const hasStderr = !!run.stderr;
   const recommendedSteps = analysis?.recommended_steps ?? [];
+  const workflowName = run.workflow_name ?? "Workflow run";
   const attemptsByTask = attempts.reduce<Record<string, RunAttempt[]>>(
     (acc, attempt) => {
       acc[attempt.task_id] = [...(acc[attempt.task_id] ?? []), attempt];
@@ -465,14 +498,24 @@ export default function RunDetail({ runId, onBack }: Props) {
   );
 
   return (
-    <div className="rd-page">
+    <section className="rd-page" aria-label={`${workflowName} run detail`}>
       <PageHeader
-        title={run.workflow_name ?? "Workflow Run"}
-        subtitle={summaryTitle}
+        title={workflowName}
+        subtitle={`Run ${run.id}`}
         actions={
-          <Button variant="ghost" onClick={onBack}>
-            &larr; Back
-          </Button>
+          <div className="rd-header-actions">
+            <Button variant="ghost" onClick={onBack}>
+              &larr; Run history
+            </Button>
+            {run.result_url && (
+              <Button
+                variant="primary"
+                onClick={() => openExternalSafe(run.result_url!)}
+              >
+                Open result
+              </Button>
+            )}
+          </div>
         }
       />
 
@@ -491,7 +534,7 @@ export default function RunDetail({ runId, onBack }: Props) {
       )}
 
       {/* Run metadata bar */}
-      <div className="rd-meta-bar">
+      <div className="rd-meta-bar" aria-label="Run metadata">
         <StatusBadge status={run.status}>
           {formatRunStatusLabel(run.status)}
         </StatusBadge>
@@ -511,32 +554,39 @@ export default function RunDetail({ runId, onBack }: Props) {
             exit {run.exit_code}
           </span>
         )}
-        {run.result_url && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => openExternalSafe(run.result_url!)}
-          >
-            Open Result
-          </Button>
+        {run.trigger_kind && (
+          <span className="rd-meta-item">
+            {run.trigger_kind.replace(/_/g, " ")} trigger
+          </span>
         )}
       </div>
 
       {tasks.length > 0 && (
-        <div className="rd-observability-card">
-          <h3 className="rd-section-title">Task Timeline</h3>
+        <section
+          className="rd-observability-card"
+          aria-labelledby="run-task-timeline-title"
+        >
+          <h2 className="rd-section-title" id="run-task-timeline-title">
+            Task timeline
+          </h2>
           <div className="rd-task-timeline">
             {tasks.map((task) => (
               <div key={task.id} className="rd-task-row">
                 <div className="rd-task-label">
-                  <StatusDot status={task.status} />
+                  <StatusDot
+                    status={task.status}
+                    aria-label={`Status: ${formatRunStatusLabel(task.status)}`}
+                  />
                   <span>{task.task_id}</span>
                   <span className="rd-task-attempt">
                     attempt {task.attempt_number}
                   </span>
                 </div>
                 <div className="rd-task-bar-wrap">
-                  <div className={`rd-task-bar ${task.status}`}>
+                  <div
+                    className={`rd-task-bar ${task.status}`}
+                    style={{ width: taskTimelineWidth(task, run) }}
+                  >
                     {task.started_at && task.finished_at
                       ? formatDuration(task.started_at, task.finished_at)
                       : task.status}
@@ -546,6 +596,7 @@ export default function RunDetail({ runId, onBack }: Props) {
             ))}
           </div>
           <table className="rd-table rd-attempt-table">
+            <caption className="sr-only">Attempts for {workflowName}</caption>
             <thead>
               <tr>
                 <th>Task</th>
@@ -580,13 +631,21 @@ export default function RunDetail({ runId, onBack }: Props) {
               )}
             </tbody>
           </table>
-        </div>
+        </section>
       )}
 
       {metrics.length > 0 && (
-        <div className="rd-observability-card">
-          <h3 className="rd-section-title">Run Metrics</h3>
+        <section
+          className="rd-observability-card"
+          aria-labelledby="run-metrics-title"
+        >
+          <h2 className="rd-section-title" id="run-metrics-title">
+            Run metrics
+          </h2>
           <table className="rd-table">
+            <caption className="sr-only">
+              Run metrics for {workflowName}
+            </caption>
             <thead>
               <tr>
                 <th>Metric</th>
@@ -609,13 +668,21 @@ export default function RunDetail({ runId, onBack }: Props) {
               ))}
             </tbody>
           </table>
-        </div>
+        </section>
       )}
 
       {relationships.length > 0 && (
-        <div className="rd-observability-card">
-          <h3 className="rd-section-title">Child Workflow Lineage</h3>
+        <section
+          className="rd-observability-card"
+          aria-labelledby="run-lineage-title"
+        >
+          <h2 className="rd-section-title" id="run-lineage-title">
+            Child workflow lineage
+          </h2>
           <table className="rd-table">
+            <caption className="sr-only">
+              Workflow lineage for {workflowName}
+            </caption>
             <thead>
               <tr>
                 <th>Direction</th>
@@ -651,134 +718,192 @@ export default function RunDetail({ runId, onBack }: Props) {
               })}
             </tbody>
           </table>
-        </div>
+        </section>
       )}
 
-      {/* Prominent error output for failed runs */}
-      {isFailed && hasStderr && (
-        <div className="rd-error-block">
-          <h3 className="rd-error-title">Error Output</h3>
-          <pre className="rd-error-output">{run.stderr}</pre>
-        </div>
-      )}
-
-      {isFailed && !hasStderr && !run.stdout && (
-        <div className="rd-error-block">
-          <h3 className="rd-error-title">Run Failed</h3>
-          <p className="rd-error-hint">
-            The workflow exited with code {run.exit_code ?? "unknown"} but
-            produced no output. Try running the script manually to diagnose.
-          </p>
-        </div>
-      )}
-
-      {/* AI-powered error analysis */}
-      {isFailed && analysis && (
-        <div className="rd-analysis">
-          <h3 className="rd-analysis-title">AI Diagnosis</h3>
-          <p className="rd-analysis-diagnosis">{analysis.diagnosis}</p>
-          <div className="rd-analysis-cause">
-            <span className="rd-analysis-cause-label">Likely cause:</span>{" "}
-            {analysis.likely_cause}
-          </div>
-          {recommendedSteps.length > 0 && (
-            <div className="rd-analysis-steps">
-              <span className="rd-analysis-steps-label">
-                Recommended steps:
-              </span>
-              <ol>
-                {recommendedSteps.map((step, i) => (
-                  <li key={i}>{step}</li>
-                ))}
-              </ol>
-            </div>
-          )}
-        </div>
-      )}
-
-      {isFailed && !analysis && (
-        <div className="rd-analyze-prompt">
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={handleAnalyze}
-            disabled={analyzing}
+      <section
+        className="rd-observability-card rd-logs-section"
+        aria-labelledby="run-logs-title"
+      >
+        <h2 className="rd-section-title" id="run-logs-title">
+          <button
+            type="button"
+            className="rd-logs-toggle"
+            onClick={() => setShowLogs(!showLogs)}
+            aria-expanded={showLogs}
+            aria-controls="run-log-content"
           >
-            {analyzing ? "Analyzing..." : "Analyze Error with AI"}
-          </Button>
-          {!analyzing && (
-            <span className="rd-analyze-hint">
-              Uses Claude to diagnose the failure and suggest fixes
-            </span>
-          )}
-          {analysisError && (
-            <div className="rd-analysis-error" role="alert">
-              Analysis failed: {analysisError}
-            </div>
-          )}
-        </div>
-      )}
-
-      {summaryDescription && (
-        <p className="rd-description">{summaryDescription}</p>
-      )}
-
-      {/* Structured sections */}
-      {hasSummary ? (
-        <div className="rd-sections">
-          {summarySections.map((section, i) => (
-            <div key={i} className="rd-section">
-              <h3 className="rd-section-title">
-                {(typeof section.title === "string" && section.title) ||
-                  `Section ${i + 1}`}
-              </h3>
-              <SectionRenderer section={section} />
-            </div>
-          ))}
-        </div>
-      ) : !isFailed ? (
-        <div className="rd-no-summary">
-          <p>No structured summary available for this run.</p>
-          <p className="rd-no-summary-hint">
-            Workflow scripts can emit <code>SUMMARY_JSON:{"{ ... }"}</code> to
-            provide rich run details here.
-          </p>
-        </div>
-      ) : null}
-
-      {/* Collapsible raw logs */}
-      <div className="rd-logs-section">
-        <button
-          className="rd-logs-toggle"
-          onClick={() => setShowLogs(!showLogs)}
-        >
-          {showLogs ? "▾" : "▸"} Raw Logs
-        </button>
+            Raw logs
+            <span aria-hidden="true">{showLogs ? "▾" : "▸"}</span>
+          </button>
+        </h2>
 
         {showLogs && (
-          <div className="rd-logs-content">
-            <div className="rd-log-tabs">
+          <div
+            className="rd-logs-content"
+            id="run-log-content"
+            role="region"
+            aria-labelledby="run-logs-title"
+          >
+            <div className="rd-log-tabs" role="tablist" aria-label="Log stream">
               <button
+                type="button"
                 className={`log-tab ${logTab === "stdout" ? "active" : ""}`}
+                role="tab"
+                id="run-log-tab-stdout"
+                aria-controls="run-log-panel"
+                aria-selected={logTab === "stdout"}
+                tabIndex={logTab === "stdout" ? 0 : -1}
                 onClick={() => setLogTab("stdout")}
+                onKeyDown={handleLogTabKeyDown}
               >
                 stdout
               </button>
               <button
+                type="button"
                 className={`log-tab ${logTab === "stderr" ? "active" : ""}`}
+                role="tab"
+                id="run-log-tab-stderr"
+                aria-controls="run-log-panel"
+                aria-selected={logTab === "stderr"}
+                tabIndex={logTab === "stderr" ? 0 : -1}
                 onClick={() => setLogTab("stderr")}
+                onKeyDown={handleLogTabKeyDown}
               >
                 stderr
               </button>
             </div>
-            <pre className="log-output">
+            <pre
+              className="log-output"
+              id="run-log-panel"
+              role="tabpanel"
+              aria-labelledby={`run-log-tab-${logTab}`}
+            >
               {(logTab === "stdout" ? run.stdout : run.stderr) || (
                 <span className="log-empty">(empty)</span>
               )}
             </pre>
           </div>
         )}
-      </div>
-    </div>
+      </section>
+
+      {/* Prominent error output for failed runs */}
+      {isFailed && hasStderr && (
+        <section className="rd-error-block" aria-labelledby="run-error-title">
+          <h2 className="rd-error-title" id="run-error-title">
+            Error output
+          </h2>
+          <pre className="rd-error-output">{run.stderr}</pre>
+        </section>
+      )}
+
+      {isFailed && !hasStderr && !run.stdout && (
+        <section className="rd-error-block" aria-labelledby="run-failed-title">
+          <h2 className="rd-error-title" id="run-failed-title">
+            Run failed
+          </h2>
+          <p className="rd-error-hint">
+            The workflow exited with code {run.exit_code ?? "unknown"} but
+            produced no output. Try running the script manually to diagnose.
+          </p>
+        </section>
+      )}
+
+      {/* AI-powered error analysis */}
+      {isFailed && (
+        <section
+          className="rd-analysis"
+          aria-labelledby="run-failure-analysis-title"
+        >
+          <div className="rd-analysis-header">
+            <h2 className="rd-analysis-title" id="run-failure-analysis-title">
+              Failure analysis
+            </h2>
+            {!analysis && (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleAnalyze}
+                disabled={analyzing}
+              >
+                {analyzing ? "Analyzing…" : "Analyze error with AI"}
+              </Button>
+            )}
+          </div>
+
+          {analysis ? (
+            <>
+              <p className="rd-analysis-diagnosis">
+                {analysis.diagnosis ??
+                  analysis.summary ??
+                  "Analysis completed without a narrative diagnosis."}
+              </p>
+              {analysis.likely_cause && (
+                <div className="rd-analysis-cause">
+                  <span className="rd-analysis-cause-label">Likely cause:</span>{" "}
+                  {analysis.likely_cause}
+                </div>
+              )}
+              {recommendedSteps.length > 0 && (
+                <div className="rd-analysis-steps">
+                  <span className="rd-analysis-steps-label">
+                    Recommended steps:
+                  </span>
+                  <ol>
+                    {recommendedSteps.map((step, i) => (
+                      <li key={i}>{step}</li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+            </>
+          ) : (
+            <p className="rd-analyze-hint">
+              Ask Claude to diagnose this failure and suggest recovery steps.
+            </p>
+          )}
+
+          {analysisError && (
+            <div className="rd-analysis-error" role="alert">
+              Analysis failed: {analysisError}
+            </div>
+          )}
+        </section>
+      )}
+
+      {(summaryTitle || summaryDescription || hasSummary || !isFailed) && (
+        <section className="rd-summary" aria-labelledby="run-summary-title">
+          <h2 className="rd-summary-title" id="run-summary-title">
+            {summaryTitle ?? "Run summary"}
+          </h2>
+          {summaryDescription && (
+            <p className="rd-description">{summaryDescription}</p>
+          )}
+
+          {/* Structured workflow-emitted sections */}
+          {hasSummary ? (
+            <div className="rd-sections">
+              {summarySections.map((section, i) => (
+                <div key={i} className="rd-section">
+                  <h3 className="rd-section-title">
+                    {(typeof section.title === "string" && section.title) ||
+                      `Section ${i + 1}`}
+                  </h3>
+                  <SectionRenderer section={section} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="rd-no-summary">
+              <p>No structured summary available for this run.</p>
+              <p className="rd-no-summary-hint">
+                Workflow scripts can emit <code>SUMMARY_JSON:{"{ ... }"}</code>{" "}
+                to provide rich run details here.
+              </p>
+            </div>
+          )}
+        </section>
+      )}
+    </section>
   );
 }

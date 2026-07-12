@@ -1,0 +1,24 @@
+/*
+ * Gauge — 270° execution-slots arc. Geometry + arc colors are set inline from
+ * props (token vars); the center label type/color binds to the shared tokens
+ * here (tokens.css / DESIGN-SYSTEM.md). Never raw hex.
+ */
+
+.cs-gauge {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.cs-gauge__value {
+  fill: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-2xl);
+  font-weight: 700;
+}
+
+.cs-gauge__sub {
+  fill: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+}

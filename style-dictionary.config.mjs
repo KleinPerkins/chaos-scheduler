@@ -165,6 +165,20 @@ const THEME_GROUPS = [
     ],
   },
   {
+    title:
+      "Data-viz — categorical series (qualitative; solid + rgb triplet for fills)",
+    items: [
+      { css: "chart-1", from: "chart.1", rgb: "chart-1-rgb" },
+      { css: "chart-2", from: "chart.2", rgb: "chart-2-rgb" },
+      { css: "chart-3", from: "chart.3", rgb: "chart-3-rgb" },
+      { css: "chart-4", from: "chart.4", rgb: "chart-4-rgb" },
+      { css: "chart-5", from: "chart.5", rgb: "chart-5-rgb" },
+      { css: "chart-6", from: "chart.6", rgb: "chart-6-rgb" },
+      { css: "chart-7", from: "chart.7", rgb: "chart-7-rgb" },
+      { css: "chart-8", from: "chart.8", rgb: "chart-8-rgb" },
+    ],
+  },
+  {
     title: "Neutral overlays (flip polarity between themes)",
     items: [
       { css: "elevate-rgb", from: "overlay.elevate", rgbOnly: true },
@@ -445,6 +459,54 @@ const FIGMA_COLOR_META = {
   "error-text": { name: "status/error/text", scopes: ["TEXT_FILL"] },
   "warning-text": { name: "status/warning/text", scopes: ["TEXT_FILL"] },
   "running-text": { name: "status/running/text", scopes: ["TEXT_FILL"] },
+  "chart-1": {
+    name: "chart/1",
+    scopes: ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+    description:
+      "Categorical data-viz series 1 (violet, brand-harmonized). Solid mark/line/fill; use rgba(var(--chart-1-rgb), α) for translucent area fills.",
+  },
+  "chart-2": {
+    name: "chart/2",
+    scopes: ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+    description:
+      "Categorical data-viz series 2 (orange). Solid mark/line/fill; use rgba(var(--chart-2-rgb), α) for translucent area fills.",
+  },
+  "chart-3": {
+    name: "chart/3",
+    scopes: ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+    description:
+      "Categorical data-viz series 3 (teal). Solid mark/line/fill; use rgba(var(--chart-3-rgb), α) for translucent area fills.",
+  },
+  "chart-4": {
+    name: "chart/4",
+    scopes: ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+    description:
+      "Categorical data-viz series 4 (pink). Solid mark/line/fill; use rgba(var(--chart-4-rgb), α) for translucent area fills.",
+  },
+  "chart-5": {
+    name: "chart/5",
+    scopes: ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+    description:
+      "Categorical data-viz series 5 (slate). Solid mark/line/fill; use rgba(var(--chart-5-rgb), α) for translucent area fills.",
+  },
+  "chart-6": {
+    name: "chart/6",
+    scopes: ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+    description:
+      "Categorical data-viz series 6 (fuchsia). Solid mark/line/fill; use rgba(var(--chart-6-rgb), α) for translucent area fills.",
+  },
+  "chart-7": {
+    name: "chart/7",
+    scopes: ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+    description:
+      "Categorical data-viz series 7 (lime). Solid mark/line/fill; use rgba(var(--chart-7-rgb), α) for translucent area fills.",
+  },
+  "chart-8": {
+    name: "chart/8",
+    scopes: ["FRAME_FILL", "SHAPE_FILL", "STROKE_COLOR"],
+    description:
+      "Categorical data-viz series 8 (brown). Solid mark/line/fill; use rgba(var(--chart-8-rgb), α) for translucent area fills.",
+  },
   "elevate-rgb": {
     name: "overlay/elevate",
     scopes: ["FRAME_FILL", "SHAPE_FILL"],

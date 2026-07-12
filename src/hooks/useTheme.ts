@@ -1,17 +1,20 @@
-import { useCallback, useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import {
   getStoredPreference,
   setThemePreference,
+  subscribeThemePreference,
   type ThemePreference,
 } from "../lib/theme";
 
 export function useTheme() {
-  const [preference, setPreferenceState] =
-    useState<ThemePreference>(getStoredPreference);
+  const preference = useSyncExternalStore(
+    subscribeThemePreference,
+    getStoredPreference,
+    (): ThemePreference => "dark",
+  );
 
   const setPreference = useCallback((next: ThemePreference) => {
     setThemePreference(next);
-    setPreferenceState(next);
   }, []);
 
   return { preference, setPreference };

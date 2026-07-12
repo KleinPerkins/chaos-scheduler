@@ -22,8 +22,8 @@ export interface BrandMarkProps {
  * there are no semantic color tokens for them — so, unlike UI chrome, the mark
  * intentionally carries its brand-gradient stops rather than `var(--…)` tokens.
  * Gradient/filter ids are made unique per instance so multiple marks can coexist
- * on a page without id collisions. Purely presentational — not yet wired into
- * any screen.
+ * on a page without id collisions. The Sidebar renders it decoratively beside
+ * the product name and as the recognizable mark in collapsed mode.
  */
 export default function BrandMark({
   size = 30,

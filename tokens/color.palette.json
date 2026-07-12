@@ -41,6 +41,46 @@
       "dark": { "value": "#6ea8fe", "comment": "solid + tint hue — dark" },
       "light": { "value": "#2f6fed", "comment": "solid + tint hue — light" }
     },
+    "chart": {
+      "1": {
+        "dark": {
+          "value": "#a78bfa",
+          "comment": "series 1 · violet — brand-harmonized (dark)"
+        },
+        "light": {
+          "value": "#6d28d9",
+          "comment": "series 1 · violet — brand-harmonized (light)"
+        }
+      },
+      "2": {
+        "dark": { "value": "#fb923c", "comment": "series 2 · orange (dark)" },
+        "light": { "value": "#dc5a10", "comment": "series 2 · orange (light)" }
+      },
+      "3": {
+        "dark": { "value": "#2dd4bf", "comment": "series 3 · teal (dark)" },
+        "light": { "value": "#0f766e", "comment": "series 3 · teal (light)" }
+      },
+      "4": {
+        "dark": { "value": "#f472b6", "comment": "series 4 · pink (dark)" },
+        "light": { "value": "#be185d", "comment": "series 4 · pink (light)" }
+      },
+      "5": {
+        "dark": { "value": "#94a3b8", "comment": "series 5 · slate (dark)" },
+        "light": { "value": "#475569", "comment": "series 5 · slate (light)" }
+      },
+      "6": {
+        "dark": { "value": "#e879f9", "comment": "series 6 · fuchsia (dark)" },
+        "light": { "value": "#a21caf", "comment": "series 6 · fuchsia (light)" }
+      },
+      "7": {
+        "dark": { "value": "#84cc16", "comment": "series 7 · lime (dark)" },
+        "light": { "value": "#4d7c0f", "comment": "series 7 · lime (light)" }
+      },
+      "8": {
+        "dark": { "value": "#b08968", "comment": "series 8 · brown (dark)" },
+        "light": { "value": "#78350f", "comment": "series 8 · brown (light)" }
+      }
+    },
     "white": { "value": "#ffffff" },
     "black": { "value": "#000000" }
   }
