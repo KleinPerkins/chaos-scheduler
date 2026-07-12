@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.4.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.3.0...chaos-scheduler-v1.4.0) (2026-07-12)
+
+
+### Features
+
+* **cursor:** add Cursor integration preferences storage ([#275](https://github.com/KleinPerkins/chaos-scheduler/issues/275)) ([a9c311e](https://github.com/KleinPerkins/chaos-scheduler/commit/a9c311e7732936d7a528fd7cef92c4039cba4f61))
+* **cursor:** add open-in-cursor command + per-run integration status ([#278](https://github.com/KleinPerkins/chaos-scheduler/issues/278)) ([7168b4a](https://github.com/KleinPerkins/chaos-scheduler/commit/7168b4a0b9b3b3c9983c86c15d987156abb147b3))
+
+
+### Bug Fixes
+
+* **cursor:** add server-side scheme allowlist to open_url ([#277](https://github.com/KleinPerkins/chaos-scheduler/issues/277)) ([289df5d](https://github.com/KleinPerkins/chaos-scheduler/commit/289df5d88893c069e1ba15b647a25f48badfb58c))
+
 ## [1.3.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.2.0...chaos-scheduler-v1.3.0) (2026-07-12)
 
 
