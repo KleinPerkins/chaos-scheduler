@@ -857,24 +857,11 @@ fn running_count_for_queue(
 }
 
 fn is_terminal_status(status: &str) -> bool {
-    matches!(
-        status,
-        "success"
-            | "succeeded"
-            | "failed"
-            | "cancelled"
-            | "cascade-skipped"
-            | "dead_letter"
-            | "dead_lettered"
-            | "stale"
-    )
+    crate::db::run_status::is_terminal(status)
 }
 
 fn is_failure_terminal(status: &str) -> bool {
-    matches!(
-        status,
-        "failed" | "cancelled" | "cascade-skipped" | "dead_letter" | "dead_lettered" | "stale"
-    )
+    crate::db::run_status::ended_not_ok(status)
 }
 
 impl CompletionChain {
@@ -4343,6 +4330,42 @@ mod tests {
             details: serde_json::json!({}),
         };
         assert_eq!(operator_run_terminal_status(&success), None);
+    }
+
+    #[test]
+    fn terminal_status_gates_canonicalize_poll_exhausted_stale_and_timed_out() {
+        // Regression: the scheduler's terminal-status gates and the KPI roll-ups
+        // historically disagreed on `poll_exhausted`/`stale`/`timed_out`, so a
+        // run that ended one of those ways could leave a `waits_for`/`depends_on`
+        // downstream waiting forever and stay invisible to the dashboards. All
+        // three are terminal, non-success statuses and must be treated as such
+        // by both gates, which now delegate to the canonical `run_status` set.
+        for status in [
+            "poll_exhausted",
+            "timed_out",
+            "stale",
+            "failed",
+            "cancelled",
+            "cascade-skipped",
+            "dead_letter",
+            "dead_lettered",
+        ] {
+            assert!(is_terminal_status(status), "{status} must be terminal");
+            assert!(
+                is_failure_terminal(status),
+                "{status} must be a non-success terminal status"
+            );
+        }
+        // Success stays terminal but is NOT a failure.
+        for status in ["success", "succeeded"] {
+            assert!(is_terminal_status(status), "{status} is terminal");
+            assert!(!is_failure_terminal(status), "{status} is not a failure");
+        }
+        // In-flight statuses are neither terminal nor failures.
+        for status in ["running", "admitted"] {
+            assert!(!is_terminal_status(status), "{status} is in-flight");
+            assert!(!is_failure_terminal(status), "{status} is in-flight");
+        }
     }
 
     #[test]

@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import InfoTip, { type GlossaryRow } from "./InfoTip";
 
 afterEach(cleanup);
@@ -70,5 +76,32 @@ describe("InfoTip", () => {
     expect((container.firstChild as HTMLElement).className).toBe(
       "info-tip mc-infotip",
     );
+  });
+
+  it("dismisses on Escape while keeping focus on the trigger", () => {
+    const { container } = render(
+      <InfoTip title="p50" def="Historical median runtime." />,
+    );
+    const trigger = screen.getByRole("button", { name: "p50" });
+    trigger.focus();
+    expect(trigger).toHaveFocus();
+
+    fireEvent.keyDown(trigger, { key: "Escape" });
+
+    // Card is hidden (via the dismissed-state class) but focus is retained,
+    // per the APG tooltip pattern: Escape dismisses without moving focus.
+    expect(container.firstChild).toHaveClass("is-dismissed");
+    expect(trigger).toHaveFocus();
+  });
+
+  it("re-arms the tooltip once focus leaves the trigger", () => {
+    const { container } = render(<InfoTip title="p50" def="d" />);
+    const trigger = screen.getByRole("button", { name: "p50" });
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: "Escape" });
+    expect(container.firstChild).toHaveClass("is-dismissed");
+
+    fireEvent.blur(trigger);
+    expect(container.firstChild).not.toHaveClass("is-dismissed");
   });
 });

@@ -1,0 +1,472 @@
+/*
+ * Shared styling for the Mission Control two-group IA (G09): the at-a-glance
+ * group summary cards, their in-place medium-detail expansion, and the
+ * full-detail drill-down subpages. Every color binds to a design token (never
+ * raw hex) and each surface renders in dark + light; type uses the shared
+ * font-size scale (raw px only for the hero metric value, matching the house
+ * style in Overview.css). Class prefixes:
+ *   .mc-grp-*   two-group summary cards
+ *   .mc-drill-* full-detail drill-down subpage scaffolding
+ *   .mc-na-*    Needs Attention surface specifics
+ */
+
+/* --- two-group summary grid --- */
+.mc-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.mc-grp {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: rgba(var(--surface-overlay-rgb), 0.98);
+  box-shadow: var(--shadow);
+}
+
+/* a group summary card that spans the full two-column width (e.g. Resources,
+ * the odd third card below the two primary health groups) */
+.mc-grp--wide {
+  grid-column: 1 / -1;
+}
+
+.mc-grp__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mc-grp__title {
+  font-size: var(--font-size-lg);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.mc-grp__tone {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  background: rgba(var(--elevate-rgb), 0.04);
+}
+
+.mc-grp__tone::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.mc-grp__tone--clear {
+  color: var(--success-text);
+  border-color: rgba(var(--success-rgb), 0.4);
+  background: rgba(var(--success-rgb), 0.08);
+}
+.mc-grp__tone--clear::before {
+  background: var(--success);
+}
+
+.mc-grp__tone--warn {
+  color: var(--warning-text);
+  border-color: rgba(var(--warning-rgb), 0.4);
+  background: rgba(var(--warning-rgb), 0.08);
+}
+.mc-grp__tone--warn::before {
+  background: var(--warning);
+}
+
+.mc-grp__tone--critical {
+  color: var(--error-text);
+  border-color: rgba(var(--error-rgb), 0.45);
+  background: rgba(var(--error-rgb), 0.09);
+}
+.mc-grp__tone--critical::before {
+  background: var(--error);
+}
+
+.mc-grp__headline {
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+/* metric chips */
+.mc-grp__metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mc-grp__metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 88px;
+  padding: 8px 12px;
+  border: 1px solid rgba(var(--elevate-rgb), 0.06);
+  border-radius: 12px;
+  background: rgba(var(--elevate-rgb), 0.03);
+}
+
+.mc-grp__metric-value {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.mc-grp__metric-label {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+/* in-place medium-detail expansion */
+.mc-grp__expand {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.mc-grp__expand-title {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.mc-grp__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.mc-grp__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(var(--elevate-rgb), 0.03);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.mc-grp__btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.mc-grp__btn--primary {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background: var(--bg-tertiary);
+}
+
+/* --- drill-down subpage scaffolding --- */
+.mc-drill {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.mc-drill__back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 6px 12px 6px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(var(--elevate-rgb), 0.03);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.mc-drill__back:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.mc-drill__header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mc-drill__title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mc-drill__title {
+  font-size: var(--font-size-2xl);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.mc-drill__headline {
+  color: var(--text-secondary);
+  font-size: var(--font-size-md);
+}
+
+.mc-drill__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.mc-drill-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: rgba(var(--surface-overlay-rgb), 0.98);
+  box-shadow: var(--shadow);
+  min-width: 0;
+}
+
+.mc-drill-card--wide {
+  grid-column: 1 / -1;
+}
+
+.mc-drill-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mc-drill-card__head h2 {
+  font-size: var(--font-size-lg);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.mc-drill-card__sub {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.mc-drill__empty {
+  padding: 16px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.mc-drill__status {
+  padding: 18px;
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  color: var(--text-secondary);
+}
+
+.mc-drill__status--error {
+  border-color: rgba(var(--error-rgb), 0.35);
+  color: var(--error-text);
+}
+
+/* --- data table (recent failures, queue/worker health) --- */
+.mc-data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.mc-data-table th,
+.mc-data-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.mc-data-table thead th {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.mc-data-table tbody th {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.mc-data-table td.mc-num,
+.mc-data-table th.mc-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.mc-data-table tbody tr:last-child th,
+.mc-data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.mc-data-table tbody tr:hover th,
+.mc-data-table tbody tr:hover td {
+  background: rgba(var(--elevate-rgb), 0.04);
+}
+
+/* text button that reads as an inline link (keeps table markup valid while the
+ * row header stays the keyboard-operable drill affordance) */
+.mc-linkish {
+  padding: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.mc-linkish:hover {
+  color: var(--running);
+  text-decoration: underline;
+}
+
+.mc-env-tag {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+/* --- trend chart legend (Operational Health) --- */
+.mc-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.mc-chart-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.mc-chart-legend__swatch {
+  width: 14px;
+  height: 0;
+  border-top: 2px solid transparent;
+  border-radius: 2px;
+}
+
+.mc-chart-legend__swatch--dashed {
+  border-top-style: dashed;
+}
+
+/* --- execution-slot gauges (Resources) --- */
+.mc-gauge-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.mc-gauge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 8px;
+  border: 1px solid rgba(var(--elevate-rgb), 0.06);
+  border-radius: 12px;
+  background: rgba(var(--elevate-rgb), 0.03);
+  text-align: center;
+}
+
+.mc-gauge__label {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.mc-gauge__sub {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.mc-gauge__caption {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- queue-health status cell (Resources table) --- */
+.mc-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.mc-status::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.mc-status--clear {
+  color: var(--success-text);
+}
+.mc-status--clear::before {
+  background: var(--success);
+}
+
+.mc-status--warn {
+  color: var(--warning-text);
+}
+.mc-status--warn::before {
+  background: var(--warning);
+}
+
+.mc-status--critical {
+  color: var(--error-text);
+}
+.mc-status--critical::before {
+  background: var(--error);
+}
+
+/* responsive: collapse to a single column at the native 960 width & below */
+@media (max-width: 1000px) {
+  .mc-groups,
+  .mc-drill__grid {
+    grid-template-columns: 1fr;
+  }
+}

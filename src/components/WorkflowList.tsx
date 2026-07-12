@@ -1,21 +1,24 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
-import { Play, Clock } from "lucide-react";
 import { useWorkflows } from "../hooks/useWorkflows";
 import { useEnvironments } from "../hooks/useEnvironments";
 import {
-  triggerWorkflow,
-  enqueueWorkflow,
   updateWorkflow,
   deleteWorkflow,
   environmentOf,
+  listQueuedRuns,
 } from "../lib/commands";
 import type { Workflow } from "../lib/commands";
 import { cronToHuman } from "./ScheduleBuilder";
-import EnvironmentBadge from "./EnvironmentBadge";
 import NoticeBanner from "./NoticeBanner";
 import Button from "./Button";
 import PageHeader from "./PageHeader";
-import { buildEnqueueIdempotencyKey } from "../lib/workflowValidation";
+import Select from "./Select";
+import WorkflowCard from "./WorkflowCard";
+import {
+  formatWorkflowQueueError,
+  formatWorkflowQueueOutcome,
+  queueWorkflowRun,
+} from "../lib/workflowEnqueue";
 import "./WorkflowList.css";
 
 interface Props {
@@ -25,95 +28,8 @@ interface Props {
   onHistory: (workflow: Workflow) => void;
 }
 
-type FrequencyGroup = "Hourly" | "Daily" | "Weekly" | "Monthly";
 type EnvFilter = string; // "all" or an environment name
-
-const GROUP_ORDER: FrequencyGroup[] = ["Hourly", "Daily", "Weekly", "Monthly"];
-
-function getFrequencyGroup(cronSchedule: string): FrequencyGroup {
-  if (cronSchedule.includes(";")) {
-    const groups = cronSchedule
-      .split(";")
-      .map((c) => c.trim())
-      .filter(Boolean)
-      .map((c) => getFrequencyGroup(c));
-    const priority: FrequencyGroup[] = ["Hourly", "Daily", "Weekly", "Monthly"];
-    return priority.find((p) => groups.includes(p)) || "Daily";
-  }
-
-  const parts = cronSchedule.trim().split(/\s+/);
-  let hour: string, dom: string, dow: string;
-
-  if (parts.length >= 7) {
-    [, , hour, dom, , dow] = parts;
-  } else if (parts.length === 6) {
-    [, , hour, dom, , dow] = parts;
-  } else if (parts.length === 5) {
-    [, hour, dom, , dow] = parts;
-  } else {
-    return "Daily";
-  }
-
-  if (hour.startsWith("*/")) return "Hourly";
-  if (dom !== "*") return "Monthly";
-  if (dow !== "*" && dow !== "Mon-Fri") return "Weekly";
-  return "Daily";
-}
-
-interface DescriptionBlockProps {
-  workflowId: string;
-  description: string;
-  expanded: boolean;
-  onToggle: (truncated: boolean) => void;
-}
-
-function DescriptionBlock({
-  description,
-  expanded,
-  onToggle,
-}: DescriptionBlockProps) {
-  const descRef = useRef<HTMLParagraphElement>(null);
-  const [truncated, setTruncated] = useState(false);
-
-  useEffect(() => {
-    const el = descRef.current;
-    if (!el) return;
-    const check = () => setTruncated(el.scrollHeight > el.clientHeight + 1);
-    check();
-    window.addEventListener("resize", check);
-    return () => window.removeEventListener("resize", check);
-  }, [description]);
-
-  return (
-    <div className="wf-card-desc-zone">
-      {truncated ? (
-        <button
-          type="button"
-          className="wf-card-desc-button"
-          aria-expanded={expanded}
-          onClick={() => onToggle(truncated)}
-        >
-          <span
-            ref={descRef}
-            className={`wf-card-desc ${expanded ? "wf-card-desc-expanded" : ""}`}
-          >
-            {description}
-          </span>
-          <span className="wf-card-desc-hint">
-            {expanded ? "Show less" : "Show full description"}
-          </span>
-        </button>
-      ) : (
-        <p ref={descRef} className="wf-card-desc wf-card-desc-full">
-          {description}
-        </p>
-      )}
-      {expanded && truncated && (
-        <div className="wf-card-desc-tooltip">{description}</div>
-      )}
-    </div>
-  );
-}
+type StatusFilter = "all" | "enabled" | "disabled";
 
 export default function WorkflowList({
   onOpen,
@@ -124,16 +40,19 @@ export default function WorkflowList({
   const { workflows, loading, error, refresh } = useWorkflows();
   const { environments } = useEnvironments();
   const [envFilter, setEnvFilter] = useState<EnvFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [query, setQuery] = useState("");
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
-  const [expandedDescId, setExpandedDescId] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<{
     id: string;
-    kind: "run" | "toggle" | "delete";
+    kind: "toggle" | "delete";
   } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [runNotice, setRunNotice] = useState<string | null>(null);
   const [pendingEnqueueId, setPendingEnqueueId] = useState<string | null>(null);
-  const enqueueKeysRef = useRef<Record<string, string>>({});
+  const [waitingWorkflowIds, setWaitingWorkflowIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
@@ -148,16 +67,39 @@ export default function WorkflowList({
     };
   }, []);
 
+  const refreshQueueActivity = useCallback(async () => {
+    try {
+      const rows = await listQueuedRuns(50);
+      setWaitingWorkflowIds(
+        new Set(
+          rows
+            .filter((row) => row.status.toLowerCase() === "queued")
+            .map((row) => row.workflow_id),
+        ),
+      );
+    } catch {
+      // Queue activity is positive-only enhancement data. An unavailable
+      // snapshot must never invent an idle/running state or block the list.
+    }
+  }, []);
+
+  useEffect(() => {
+    const initial = setTimeout(() => void refreshQueueActivity(), 0);
+    const interval = setInterval(() => void refreshQueueActivity(), 15_000);
+    return () => {
+      clearTimeout(initial);
+      clearInterval(interval);
+    };
+  }, [refreshQueueActivity]);
+
   const showRunNotice = (message: string) => {
     setRunNotice(message);
     clearTimeout(noticeTimerRef.current);
     noticeTimerRef.current = setTimeout(() => setRunNotice(null), 5000);
   };
 
-  const isPending = (
-    w: Workflow,
-    kind: "run" | "toggle" | "delete" | "enqueue",
-  ) => pendingAction?.id === w.id && pendingAction.kind === kind;
+  const isPending = (w: Workflow, kind: "toggle" | "delete") =>
+    pendingAction?.id === w.id && pendingAction.kind === kind;
 
   // Environment options are sourced from the environments backend and unioned
   // with any environments observed on the current workflows (so a workflow in
@@ -179,24 +121,30 @@ export default function WorkflowList({
   }, [environments, envCounts]);
 
   const visibleWorkflows = useMemo(() => {
-    if (envFilter === "all") return workflows;
-    return workflows.filter(
-      (workflow) => environmentOf(workflow) === envFilter,
-    );
-  }, [workflows, envFilter]);
-
-  const groupedWorkflows = useMemo(() => {
-    const groups = new Map<FrequencyGroup, Workflow[]>();
-    for (const w of visibleWorkflows) {
-      const group = getFrequencyGroup(w.cron_schedule);
-      if (!groups.has(group)) groups.set(group, []);
-      groups.get(group)!.push(w);
-    }
-    return GROUP_ORDER.filter((g) => groups.has(g)).map((g) => ({
-      group: g,
-      workflows: groups.get(g)!,
-    }));
-  }, [visibleWorkflows]);
+    const normalizedQuery = query.trim().toLowerCase();
+    return workflows.filter((workflow) => {
+      if (envFilter !== "all" && environmentOf(workflow) !== envFilter) {
+        return false;
+      }
+      if (
+        statusFilter !== "all" &&
+        workflow.enabled !== (statusFilter === "enabled")
+      ) {
+        return false;
+      }
+      if (!normalizedQuery) return true;
+      return [
+        workflow.name,
+        workflow.description,
+        workflow.script_path,
+        workflow.cron_schedule,
+        environmentOf(workflow),
+        workflow.kind,
+      ]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(normalizedQuery));
+    });
+  }, [workflows, envFilter, statusFilter, query]);
 
   const handleToggle = async (w: Workflow) => {
     setActionError(null);
@@ -246,50 +194,31 @@ export default function WorkflowList({
     }
   };
 
-  const handleRun = async (w: Workflow) => {
-    setActionError(null);
-    setPendingAction({ id: w.id, kind: "run" });
-    try {
-      const runId = await triggerWorkflow(w.id);
-      showRunNotice(
-        `Started run for ${w.name}${runId ? ` (${runId.slice(0, 8)}…)` : ""}.`,
-      );
-      await refresh();
-    } catch (e) {
-      setActionError(`Failed to run ${w.name}: ${e}`);
-    } finally {
-      setPendingAction(null);
-    }
-  };
-
   const handleEnqueue = async (w: Workflow) => {
     setActionError(null);
     setPendingEnqueueId(w.id);
-    const key =
-      enqueueKeysRef.current[w.id] ?? buildEnqueueIdempotencyKey(w.id);
-    enqueueKeysRef.current[w.id] = key;
     try {
-      const outcome = await enqueueWorkflow(w.id, key);
-      delete enqueueKeysRef.current[w.id];
-      showRunNotice(
-        outcome.status === "queued"
-          ? `Queued ${w.name}${outcome.queued_run_id ? ` (${outcome.queued_run_id.slice(0, 8)}…)` : ""}.`
-          : outcome.status === "duplicate"
-            ? `Duplicate enqueue for ${w.name}.`
-            : `Enqueued ${w.name} — ${outcome.status}${outcome.run_id ? ` (${outcome.run_id.slice(0, 8)}…)` : ""}.`,
-      );
+      const outcome = await queueWorkflowRun(w.id);
+      showRunNotice(formatWorkflowQueueOutcome(w.name, outcome));
+      if (
+        outcome.status === "queued" ||
+        (outcome.status === "duplicate" && outcome.queued_run_id)
+      ) {
+        setWaitingWorkflowIds((current) => new Set(current).add(w.id));
+      } else {
+        setWaitingWorkflowIds((current) => {
+          const next = new Set(current);
+          next.delete(w.id);
+          return next;
+        });
+      }
       await refresh();
     } catch (e) {
-      setActionError(`Failed to enqueue ${w.name}: ${e}`);
+      setActionError(formatWorkflowQueueError(w.name, e));
     } finally {
       setPendingEnqueueId(null);
     }
   };
-
-  const toggleDescription = useCallback((wId: string, truncated: boolean) => {
-    if (!truncated) return;
-    setExpandedDescId((current) => (current === wId ? null : wId));
-  }, []);
 
   if (loading && workflows.length === 0 && !error) {
     return <div className="wf-loading">Loading workflows...</div>;
@@ -322,132 +251,42 @@ export default function WorkflowList({
     );
   }
 
-  const renderCard = (w: Workflow) => (
-    <div key={w.id} className={`wf-card ${!w.enabled ? "disabled" : ""}`}>
-      <div className="wf-card-header">
-        <div className="wf-card-title-row">
-          <button
-            type="button"
-            className="wf-card-title wf-card-title-btn"
-            onClick={() => onOpen(w)}
-            title={`Open ${w.name}`}
-          >
-            {w.name}
-          </button>
-          <EnvironmentBadge
-            environment={environmentOf(w)}
-            managed={w.managed_externally}
-            size="sm"
-          />
-        </div>
-        <label className="wf-toggle">
-          <input
-            type="checkbox"
-            checked={w.enabled}
-            onChange={() => void handleToggle(w)}
-            disabled={isPending(w, "toggle") || isPending(w, "delete")}
-            aria-label={`${w.enabled ? "Disable" : "Enable"} ${w.name}`}
-          />
-          <span className="wf-toggle-track" aria-hidden="true" />
-        </label>
-      </div>
-      {w.description && (
-        <DescriptionBlock
-          workflowId={w.id}
-          description={w.description}
-          expanded={expandedDescId === w.id}
-          onToggle={(truncated) => toggleDescription(w.id, truncated)}
-        />
-      )}
-      <div className="wf-card-meta">
-        <span className="wf-card-schedule">
-          <Clock size={12} strokeWidth={2} aria-hidden="true" />
-          {cronToHuman(w.cron_schedule, w.timezone)}
-        </span>
-        <span className="wf-card-script">{w.script_path}</span>
-      </div>
-      <div className="wf-card-actions">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={() => void handleRun(w)}
-          disabled={
-            isPending(w, "run") ||
-            isPending(w, "toggle") ||
-            isPending(w, "delete") ||
-            pendingEnqueueId === w.id
-          }
-          title="Run now (immediate)"
-          aria-label={`Run ${w.name} now`}
-        >
-          {isPending(w, "run") ? (
-            "Running…"
-          ) : (
-            <>
-              <Play size={12} strokeWidth={2.5} aria-hidden="true" />
-              Run
-            </>
-          )}
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={() => void handleEnqueue(w)}
-          disabled={
-            isPending(w, "run") ||
-            isPending(w, "toggle") ||
-            isPending(w, "delete") ||
-            pendingEnqueueId === w.id
-          }
-          title="Enqueue via admission queue"
-          aria-label={`Enqueue ${w.name}`}
-        >
-          {pendingEnqueueId === w.id ? "Enqueueing…" : "Enqueue"}
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={() => onOpen(w)}
-        >
-          Details
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={() => onHistory(w)}
-        >
-          History
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={() => onEdit(w)}
-        >
-          Edit
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          className={
-            pendingDeleteId === w.id ? "btn-danger-confirm" : "btn-danger"
-          }
-          onClick={() => void handleDelete(w)}
-          disabled={isPending(w, "run") || isPending(w, "toggle")}
-        >
-          {isPending(w, "delete")
-            ? "Deleting…"
-            : pendingDeleteId === w.id
-              ? "Confirm?"
-              : "Delete"}
-        </Button>
-      </div>
-    </div>
-  );
+  const renderCard = (workflow: Workflow) => {
+    const activity =
+      pendingEnqueueId === workflow.id
+        ? "submitting"
+        : waitingWorkflowIds.has(workflow.id)
+          ? "waiting"
+          : "none";
+    const deleteState = isPending(workflow, "delete")
+      ? "deleting"
+      : pendingDeleteId === workflow.id
+        ? "armed"
+        : "idle";
+
+    return (
+      <WorkflowCard
+        key={workflow.id}
+        name={workflow.name}
+        environment={environmentOf(workflow)}
+        schedule={`${cronToHuman(workflow.cron_schedule)} · ${workflow.timezone}`}
+        description={workflow.description}
+        enabled={workflow.enabled}
+        activity={activity}
+        managedExternally={workflow.managed_externally}
+        actionBusy={
+          pendingAction?.id === workflow.id || pendingEnqueueId === workflow.id
+        }
+        deleteState={deleteState}
+        onOpen={() => onOpen(workflow)}
+        onQueue={() => void handleEnqueue(workflow)}
+        onToggleEnabled={() => void handleToggle(workflow)}
+        onHistory={() => onHistory(workflow)}
+        onEdit={() => onEdit(workflow)}
+        onDelete={() => void handleDelete(workflow)}
+      />
+    );
+  };
 
   return (
     <div>
@@ -474,15 +313,10 @@ export default function WorkflowList({
       )}
       <PageHeader
         title="Workflows"
-        subtitle={
-          <>
-            {workflows.length} workflow{workflows.length !== 1 ? "s" : ""}{" "}
-            configured
-          </>
-        }
+        subtitle="Search, filter, and manage registered schedules. Manual execution always enters scheduler admission control."
         actions={
-          <Button variant="primary" onClick={onNew}>
-            + Add Workflow
+          <Button variant="primary" className="wf-add-button" onClick={onNew}>
+            Add workflow
           </Button>
         }
       />
@@ -499,52 +333,64 @@ export default function WorkflowList({
         </div>
       ) : (
         <>
-          <div
-            className="wf-env-filter"
-            role="group"
-            aria-label="Filter workflows by environment"
-          >
-            <button
-              className={`wf-env-pill ${envFilter === "all" ? "active" : ""}`}
-              onClick={() => setEnvFilter("all")}
-              aria-pressed={envFilter === "all"}
+          <div className="wf-filter-bar">
+            <label className="sr-only" htmlFor="workflow-search">
+              Search workflows
+            </label>
+            <input
+              id="workflow-search"
+              type="search"
+              value={query}
+              placeholder="Search workflows…"
+              onChange={(event) => setQuery(event.target.value)}
+            />
+
+            <label className="sr-only" htmlFor="workflow-environment-filter">
+              Environment
+            </label>
+            <Select
+              id="workflow-environment-filter"
+              value={envFilter}
+              onChange={(event) => setEnvFilter(event.target.value)}
             >
-              All
-              <span>{workflows.length}</span>
-            </button>
-            {envOptions.map((name) => (
-              <button
-                key={name}
-                className={`wf-env-pill ${envFilter === name ? "active" : ""}`}
-                onClick={() => setEnvFilter(name)}
-                aria-pressed={envFilter === name}
-              >
-                {name.charAt(0).toUpperCase() + name.slice(1)}
-                <span>{envCounts.get(name) ?? 0}</span>
-              </button>
-            ))}
+              <option value="all">All environments</option>
+              {envOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name.charAt(0).toUpperCase() + name.slice(1)} (
+                  {envCounts.get(name) ?? 0})
+                </option>
+              ))}
+            </Select>
+
+            <label className="sr-only" htmlFor="workflow-status-filter">
+              Status
+            </label>
+            <Select
+              id="workflow-status-filter"
+              value={statusFilter}
+              onChange={(event) =>
+                setStatusFilter(event.target.value as StatusFilter)
+              }
+            >
+              <option value="all">All statuses</option>
+              <option value="enabled">Enabled</option>
+              <option value="disabled">Disabled</option>
+            </Select>
           </div>
+          <p className="wf-result-count" aria-live="polite">
+            {visibleWorkflows.length} workflow
+            {visibleWorkflows.length !== 1 ? "s" : ""} · flat results
+          </p>
 
           {visibleWorkflows.length === 0 ? (
             <div className="wf-empty wf-empty-compact">
-              <p className="wf-empty-title">No workflows in {envFilter}</p>
+              <p className="wf-empty-title">No workflows match these filters</p>
               <p className="wf-empty-sub">
-                No workflows are assigned to this environment yet.
+                Clear search or choose a different environment or status.
               </p>
             </div>
           ) : (
-            <div className="wf-groups">
-              {groupedWorkflows.map(({ group, workflows: groupWfs }) => (
-                <div key={group} className="wf-group">
-                  <div className="wf-group-header">
-                    <span className="wf-group-label">{group}</span>
-                    <span className="wf-group-count">{groupWfs.length}</span>
-                    <span className="wf-group-divider" />
-                  </div>
-                  <div className="wf-grid">{groupWfs.map(renderCard)}</div>
-                </div>
-              ))}
-            </div>
+            <div className="wf-grid">{visibleWorkflows.map(renderCard)}</div>
           )}
         </>
       )}

@@ -19,14 +19,27 @@
 }
 
 .popup-error,
-.popup-inline-error {
+.popup-inline-error,
+.popup-inline-message.error {
   color: var(--error);
 }
 
-.popup-inline-error {
+.popup-inline-error,
+.popup-inline-message {
   padding: 8px 16px;
-  border-bottom: 1px solid rgba(var(--error-rgb), 0.25);
   font-size: 12px;
+}
+
+.popup-inline-error,
+.popup-inline-message.error {
+  border-bottom: 1px solid rgba(var(--error-rgb), 0.25);
+  background: rgba(var(--error-rgb), 0.08);
+}
+
+.popup-inline-message.success {
+  color: var(--success-text);
+  border-bottom: 1px solid rgba(var(--success-rgb), 0.25);
+  background: rgba(var(--success-rgb), 0.08);
 }
 
 .popup-header {
@@ -67,12 +80,12 @@
 }
 
 .popup-section-title {
+  margin: 0 0 8px;
   font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 1px;
   color: var(--text-muted);
-  margin-bottom: 8px;
 }
 
 .popup-list {
@@ -96,7 +109,7 @@
   font-weight: 600;
 }
 
-.popup-corpus-title span {
+.popup-env-title span {
   color: var(--text-muted);
 }
 
@@ -104,9 +117,14 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 6px 8px;
   border-radius: var(--radius);
   transition: background 0.1s;
+}
+
+.popup-item > .btn {
+  flex-shrink: 0;
 }
 
 button.popup-item {

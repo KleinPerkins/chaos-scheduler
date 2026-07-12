@@ -237,7 +237,7 @@
 .sched-time-add {
   align-self: flex-start;
   background: none;
-  color: var(--accent);
+  color: var(--text-primary);
   font-size: 12px;
   font-weight: 500;
   padding: 2px 0;
@@ -247,6 +247,6 @@
 }
 
 .sched-time-add:hover {
-  color: var(--accent-hover, var(--accent));
+  color: var(--text-primary);
   text-decoration: underline;
 }
