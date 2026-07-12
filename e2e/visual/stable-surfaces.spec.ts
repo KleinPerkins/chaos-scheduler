@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import {
   gotoDashboard,
+  openRunDetail,
   openSidebar,
   openWorkflowRunHistory,
 } from "../support/nav";
@@ -37,6 +38,116 @@ async function gotoSurface(page: Page, label: string): Promise<void> {
       .getByRole("button", { name: label }),
   ).toHaveAttribute("aria-current", "page");
   await waitForFonts(page);
+}
+
+async function installRunDetailVisualFixture(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const startedAt = "2026-07-04T11:42:00.000Z";
+    const finishedAt = "2026-07-04T12:00:00.000Z";
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      ...(window.__CHAOS_IPC_OVERRIDES__ ?? {}),
+      get_run_log: () => ({
+        id: "run-demo-1",
+        workflow_id: "wf-demo-1",
+        workflow_name: "Nightly sync",
+        started_at: startedAt,
+        finished_at: finishedAt,
+        exit_code: 1,
+        stdout: "Extracted 41 records before the publish step failed.",
+        stderr: "Connection refused: analytics.internal:443",
+        result_url: "https://example.com/results/run-demo-1",
+        status: "failed",
+        trigger_kind: "manual",
+        error_analysis: {
+          diagnosis: "The publish task could not reach the analytics service.",
+          likely_cause: "The upstream service was unavailable.",
+          recommended_steps: [
+            "Check analytics service health.",
+            "Retry the workflow after recovery.",
+          ],
+        },
+        summary: {
+          title: "Partial synchronization",
+          description: "Workflow-emitted results available before the failure.",
+          sections: [
+            {
+              title: "Records",
+              type: "stats",
+              data: { extracted: 41, published: 0 },
+            },
+          ],
+        },
+      }),
+      get_run_tasks: () => [
+        {
+          id: "task-extract",
+          run_id: "run-demo-1",
+          task_id: "extract",
+          status: "succeeded",
+          started_at: startedAt,
+          finished_at: "2026-07-04T11:48:00.000Z",
+          attempt_number: 1,
+        },
+        {
+          id: "task-publish",
+          run_id: "run-demo-1",
+          task_id: "publish",
+          status: "failed",
+          started_at: "2026-07-04T11:48:00.000Z",
+          finished_at: finishedAt,
+          attempt_number: 2,
+        },
+      ],
+      get_run_attempts: () => [
+        {
+          id: "attempt-extract-1",
+          run_id: "run-demo-1",
+          task_id: "extract",
+          attempt_number: 1,
+          status: "succeeded",
+          started_at: startedAt,
+          finished_at: "2026-07-04T11:48:00.000Z",
+        },
+        {
+          id: "attempt-publish-2",
+          run_id: "run-demo-1",
+          task_id: "publish",
+          attempt_number: 2,
+          status: "failed",
+          started_at: "2026-07-04T11:48:00.000Z",
+          finished_at: finishedAt,
+          error_type: "ConnectionError",
+          error_message: "Service unavailable",
+        },
+      ],
+      get_run_metrics: () => [
+        {
+          id: "metric-records",
+          run_id: "run-demo-1",
+          task_id: "extract",
+          metric_name: "records_extracted",
+          metric_value: 41,
+          metric_unit: "records",
+          emitted_at: "2026-07-04T11:48:00.000Z",
+        },
+      ],
+      get_run_relationships: () => [
+        {
+          id: "relationship-index",
+          parent_run_id: "run-demo-1",
+          child_run_id: "run-child-1",
+          child_workflow_id: "wf-index-1",
+          child_workflow_name: "Index refresh",
+          relationship: "child",
+          task_id: "publish",
+          wait: true,
+          status: "succeeded",
+          created_at: startedAt,
+          updated_at: finishedAt,
+        },
+      ],
+    };
+  });
 }
 
 test.describe("stable surfaces — main window (960x680)", () => {
@@ -98,6 +209,24 @@ test.describe("stable surfaces — main window (960x680)", () => {
     await page.getByRole("button", { name: "Light theme" }).click();
     await expect(page.locator('html[data-theme="light"]')).toHaveCount(1);
     await expect(page).toHaveScreenshot("workflow-history-light.png");
+  });
+
+  test("run-detail dark and light", async ({ page }) => {
+    await installRunDetailVisualFixture(page);
+    await openRunDetail(page);
+    await waitForFonts(page);
+    await expect(page).toHaveScreenshot("run-detail-dark.png");
+    await page.setViewportSize({ width: 960, height: 1800 });
+    await waitForFonts(page);
+    await expect(page).toHaveScreenshot("run-detail-full-dark.png");
+
+    await page.setViewportSize({ width: 960, height: 680 });
+    await page.getByRole("button", { name: "Light theme" }).click();
+    await expect(page.locator('html[data-theme="light"]')).toHaveCount(1);
+    await expect(page).toHaveScreenshot("run-detail-light.png");
+    await page.setViewportSize({ width: 960, height: 1800 });
+    await waitForFonts(page);
+    await expect(page).toHaveScreenshot("run-detail-full-light.png");
   });
 
   test("workflow-detail dark and light", async ({ page }) => {
