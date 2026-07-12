@@ -1581,12 +1581,59 @@ fn run_possibly_blocking<T>(f: impl FnOnce() -> T) -> T {
     }
 }
 
+/// Ephemeral, in-memory operator-config overlay for the Cursor fix-agent seam
+/// (D05 / F10, B3). Returns the stored config UNCHANGED for every dispatch
+/// except a `ui_fix_agent`-triggered `cursor_agent` run, for which it:
+///
+/// - overlays ONLY the `prompt` from `input_json` — a strict WHITELIST: no other
+///   `input_json` field (`repository` / `auto_create_pr` / `api_key_secret` / …)
+///   can reach the operator config, and
+/// - FORCES `auto_create_pr = false` regardless of the stored config OR any
+///   value smuggled in `input_json` (capability limit enforced AT EXECUTION, not
+///   merely defaulted).
+///
+/// repository / mode / model / api_key_secret therefore ALWAYS come from the
+/// designated fix workflow's STORED config, never from caller-supplied input.
+/// Gating on `trigger_kind == ui_fix_agent` (not merely `operator_type ==
+/// cursor_agent`) is what keeps a plain rerun/backfill/child dispatch of the
+/// same operator from having its prompt hijacked (M2).
+fn fix_agent_config_overlay<'a>(
+    operator_type: &str,
+    trigger_kind: Option<&str>,
+    input_json: Option<&str>,
+    config: &'a Value,
+) -> std::borrow::Cow<'a, Value> {
+    let is_fix_agent = operator_type == "cursor_agent"
+        && trigger_kind == Some(crate::service::FIX_AGENT_TRIGGER_KIND);
+    if !is_fix_agent {
+        return std::borrow::Cow::Borrowed(config);
+    }
+    let mut obj = match config {
+        Value::Object(map) => map.clone(),
+        _ => serde_json::Map::new(),
+    };
+    // Whitelist: take ONLY `prompt` from caller-supplied input_json.
+    if let Some(prompt) = input_json
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .as_ref()
+        .and_then(|v| v.get("prompt"))
+        .and_then(|v| v.as_str())
+    {
+        obj.insert("prompt".to_string(), Value::String(prompt.to_string()));
+    }
+    // Capability limit: a fix-agent dispatch never opens a PR.
+    obj.insert("auto_create_pr".to_string(), Value::Bool(false));
+    std::borrow::Cow::Owned(Value::Object(obj))
+}
+
 fn execute_typed_operator(
     db: &Arc<Database>,
     workspace_root: &str,
     run_id: &str,
     _workflow: &Workflow,
     typed: &crate::workflow_spec::TypedSpec,
+    trigger_kind: Option<&str>,
+    input_json: Option<&str>,
 ) -> (i32, String, String, Option<&'static str>) {
     let registry = crate::operators::OperatorRegistry::with_builtins();
     let Some(operator) = registry.get(&typed.operator_type) else {
@@ -1634,6 +1681,17 @@ fn execute_typed_operator(
     // `block_in_place` whenever an ambient tokio runtime is detected so the
     // runtime can offload other work first; call directly otherwise (e.g. the
     // cron scheduler loop or a Tauri sync-command context with no runtime).
+    // Fix-agent seam (D05 / F10): for a `ui_fix_agent` dispatch of a
+    // `cursor_agent` operator ONLY, overlay the diagnostic prompt from
+    // `input_json` and FORCE `auto_create_pr=false` at execution. Every other
+    // dispatch (rerun/backfill/child of the same operator) is untouched, so a
+    // stored prompt is never hijacked (M2). See [`fix_agent_config_overlay`].
+    let effective_config = fix_agent_config_overlay(
+        &typed.operator_type,
+        trigger_kind,
+        input_json,
+        &typed.config,
+    );
     let outcome = run_possibly_blocking(|| {
         let runner = crate::service::SystemProcessRunner;
         let http = crate::operators::ReqwestHttpClient::default();
@@ -1645,7 +1703,7 @@ fn execute_typed_operator(
             workspace_root,
             on_progress: &on_progress,
         };
-        operator.execute(&ctx, &typed.config)
+        operator.execute(&ctx, &effective_config)
     });
     let status = if outcome.success { "success" } else { "failed" };
     if let Some(attempt_id) = &attempt_id {
@@ -1814,9 +1872,15 @@ pub fn execute_workflow_with_context(
                 ),
             },
             crate::workflow_spec::WorkflowKind::Typed => match spec.typed.as_ref() {
-                Some(typed) => {
-                    execute_typed_operator(db, chaos_labs_root, &run.id, &workflow, typed)
-                }
+                Some(typed) => execute_typed_operator(
+                    db,
+                    chaos_labs_root,
+                    &run.id,
+                    &workflow,
+                    typed,
+                    trigger_kind,
+                    input_json,
+                ),
                 None => (
                     -1,
                     String::new(),
@@ -4856,7 +4920,7 @@ mod tests {
         };
 
         let (exit_code, _stdout, stderr, terminal) =
-            execute_typed_operator(&db, "/tmp", &run_id, &workflow, &typed);
+            execute_typed_operator(&db, "/tmp", &run_id, &workflow, &typed, None, None);
         assert_ne!(exit_code, 0);
         assert!(terminal.is_none());
         assert!(
@@ -4880,6 +4944,126 @@ mod tests {
             .contains("no repo_url"));
         assert!(task.finished_at.is_some());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ---- D05 / F10: fix-agent operator-config overlay (seam) -------------
+
+    #[test]
+    fn fix_agent_overlay_whitelists_prompt_and_forces_auto_create_pr_false() {
+        // Stored config carries a real repository + auto_create_pr:true.
+        let stored = serde_json::json!({
+            "repository": "https://github.com/owner/repo",
+            "prompt": "STORED PROMPT",
+            "auto_create_pr": true,
+            "api_key_secret": "cursor_api_key"
+        });
+        // Caller input tries to smuggle repository + auto_create_pr past the prompt.
+        let input = r#"{"prompt":"DIAGNOSTIC PROMPT","auto_create_pr":true,"repository":"https://github.com/attacker/evil"}"#;
+
+        let effective = fix_agent_config_overlay(
+            "cursor_agent",
+            Some(crate::service::FIX_AGENT_TRIGGER_KIND),
+            Some(input),
+            &stored,
+        );
+
+        // Prompt is overlaid from input...
+        assert_eq!(
+            effective.get("prompt").and_then(|v| v.as_str()),
+            Some("DIAGNOSTIC PROMPT")
+        );
+        // ...auto_create_pr is FORCED false despite input asking for true...
+        assert_eq!(
+            effective.get("auto_create_pr").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        // ...repository stays the STORED value (input's is ignored — whitelist)...
+        assert_eq!(
+            effective.get("repository").and_then(|v| v.as_str()),
+            Some("https://github.com/owner/repo")
+        );
+        // ...and no attacker-supplied field leaked in.
+        let serialized = effective.to_string();
+        assert!(!serialized.contains("attacker/evil"));
+        // api_key_secret comes untouched from stored config.
+        assert_eq!(
+            effective.get("api_key_secret").and_then(|v| v.as_str()),
+            Some("cursor_api_key")
+        );
+    }
+
+    #[test]
+    fn fix_agent_overlay_does_not_hijack_a_cursor_agent_rerun() {
+        // M2 regression: a NON-`ui_fix_agent` dispatch (e.g. rerun) carrying
+        // `input_json.prompt` must NOT have its stored prompt overlaid.
+        let stored = serde_json::json!({
+            "repository": "https://github.com/owner/repo",
+            "prompt": "STORED PROMPT",
+            "auto_create_pr": true
+        });
+        let input = r#"{"prompt":"INJECTED PROMPT"}"#;
+
+        let effective =
+            fix_agent_config_overlay("cursor_agent", Some("ui_rerun"), Some(input), &stored);
+
+        // Returned UNCHANGED: stored prompt + auto_create_pr preserved.
+        assert!(matches!(effective, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(
+            effective.get("prompt").and_then(|v| v.as_str()),
+            Some("STORED PROMPT")
+        );
+        assert_eq!(
+            effective.get("auto_create_pr").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn fix_agent_overlay_ignores_non_cursor_agent_operators() {
+        // Even with the fix-agent trigger kind, a different operator is untouched.
+        let stored = serde_json::json!({ "path": "/repo", "auto_create_pr": true });
+        let input = r#"{"prompt":"x"}"#;
+
+        let effective = fix_agent_config_overlay(
+            "git_pull",
+            Some(crate::service::FIX_AGENT_TRIGGER_KIND),
+            Some(input),
+            &stored,
+        );
+
+        assert!(matches!(effective, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(
+            effective.get("auto_create_pr").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn fix_agent_overlay_forces_auto_create_pr_false_without_input_prompt() {
+        // A fix-agent dispatch with no usable input prompt still forces the
+        // capability limit; the stored prompt is left in place.
+        let stored = serde_json::json!({
+            "repository": "https://github.com/o/r",
+            "prompt": "STORED",
+            "auto_create_pr": true
+        });
+
+        let effective = fix_agent_config_overlay(
+            "cursor_agent",
+            Some(crate::service::FIX_AGENT_TRIGGER_KIND),
+            None,
+            &stored,
+        );
+
+        assert!(matches!(effective, std::borrow::Cow::Owned(_)));
+        assert_eq!(
+            effective.get("prompt").and_then(|v| v.as_str()),
+            Some("STORED")
+        );
+        assert_eq!(
+            effective.get("auto_create_pr").and_then(|v| v.as_bool()),
+            Some(false)
+        );
     }
 
     #[test]
