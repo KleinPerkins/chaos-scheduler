@@ -8,8 +8,9 @@
 //! trait, and time/process side effects are abstracted via [`Clock`] and
 //! [`ProcessRunner`] so the core is testable in isolation.
 
-use crate::db::{Database, EmailProfile, Workflow};
+use crate::db::{Database, EmailProfile, IdempotencyReservation, Workflow};
 use crate::operators::OperatorRegistry;
+use crate::scheduler::{dispatch_non_cron_workflow, DispatchOutcome, NonCronDispatchOptions};
 use crate::workflow_spec::{WorkflowKind, WorkflowSpec};
 use chrono::{DateTime, Utc};
 use std::process::Output;
@@ -167,6 +168,35 @@ impl From<rusqlite::Error> for ServiceError {
 
 /// Result alias for service operations.
 pub type ServiceResult<T> = Result<T, ServiceError>;
+
+/// Error surface for [`SchedulerService::dispatch_manual_run`]. It keeps the two
+/// distinct failure sources apart so each adapter preserves its existing
+/// transport mapping without change:
+/// - [`ManualDispatchError::Gate`] wraps the pre-dispatch governance check
+///   ([`SchedulerService::ensure_workflow_execution_allowed`]); the HTTP adapter
+///   maps it by [`ServiceError::status_code`] (403 protected / 404 not-found).
+/// - [`ManualDispatchError::Dispatch`] carries a free-form admission error; the
+///   HTTP adapter classifies it via its existing `map_dispatch_error` (e.g. 409
+///   for a disabled workflow or a reused key with a different fingerprint).
+///
+/// The Tauri IPC adapter stringifies either variant identically, so folding the
+/// previously-duplicated idempotency logic here is behavior-preserving.
+#[derive(Debug)]
+pub enum ManualDispatchError {
+    Gate(ServiceError),
+    Dispatch(String),
+}
+
+impl std::fmt::Display for ManualDispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ManualDispatchError::Gate(e) => write!(f, "{e}"),
+            ManualDispatchError::Dispatch(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl std::error::Error for ManualDispatchError {}
 
 /// The full definition of a workflow as accepted by every registration surface.
 #[derive(Debug, Clone)]
@@ -333,6 +363,109 @@ impl SchedulerService {
         let workflow = self.get_workflow(id)?;
         self.ensure_environment_target_writable(&workflow.environment, "execute workflow")?;
         Ok(workflow)
+    }
+
+    /// Single admission choke point for **manual, non-cron** dispatch (desktop
+    /// enqueue and the REST run/enqueue/rerun/webhook handlers). It folds
+    /// together the three concerns every manual caller previously duplicated:
+    /// 1. the protected-environment gate ([`Self::ensure_workflow_execution_allowed`]),
+    /// 2. the idempotency-key reserve → replay → complete wrapper, and
+    /// 3. capacity/dependency admission via [`dispatch_non_cron_workflow`]
+    ///    (which queues, cascade-skips, or admits+executes inline).
+    ///
+    /// Behavior-preserving: each caller keeps its own `trigger_kind`/`payload`,
+    /// and the idempotency fingerprint layout is unchanged. The cron tick,
+    /// on-completion chains, and the queue drainer keep calling the engine
+    /// directly and never route through here.
+    #[allow(clippy::too_many_arguments)] // Threads the full manual-dispatch context.
+    pub fn dispatch_manual_run(
+        &self,
+        workspace_root: &str,
+        python_path: &str,
+        workflow_id: &str,
+        trigger_kind: &str,
+        idempotency_key: Option<&str>,
+        payload: Option<&str>,
+        rerun_of: Option<&str>,
+        input_json: Option<&str>,
+    ) -> Result<DispatchOutcome, ManualDispatchError> {
+        self.ensure_workflow_execution_allowed(workflow_id)
+            .map_err(ManualDispatchError::Gate)?;
+
+        // Only compute/reserve a fingerprint when the caller supplied a key.
+        let fingerprint =
+            idempotency_key.map(|_| manual_run_fingerprint(workflow_id, trigger_kind, payload));
+
+        if let (Some(key), Some(fp)) = (idempotency_key, fingerprint.as_deref()) {
+            match self
+                .db
+                .reserve_idempotency_key(key, workflow_id, fp)
+                .map_err(|e| ManualDispatchError::Gate(ServiceError::Internal(e.to_string())))?
+            {
+                IdempotencyReservation::Reserved => {}
+                IdempotencyReservation::Existing(record) => {
+                    if let Some(existing) = record.request_fingerprint.as_deref() {
+                        if existing != fp {
+                            return Err(ManualDispatchError::Dispatch(
+                                "idempotency key was already used for a different request".into(),
+                            ));
+                        }
+                    }
+                    return Ok(DispatchOutcome {
+                        workflow_id: workflow_id.to_string(),
+                        status: "duplicate".to_string(),
+                        run_id: record.run_id,
+                        queued_run_id: record.queued_run_id,
+                        queue_name: String::new(),
+                        trigger_kind: Some(trigger_kind.to_string()),
+                        trigger_payload: payload.map(str::to_string),
+                        reason: Some("idempotent replay".to_string()),
+                    });
+                }
+            }
+        }
+
+        let options = NonCronDispatchOptions {
+            notify_on_success: false,
+            notify_on_failure: true,
+            email_on_failure_enabled: false,
+            trigger_kind,
+            trigger_payload: payload,
+            upstream_run_id: None,
+            input_json,
+            rerun_of_run_id: rerun_of,
+            suppress_completion_triggers: false,
+            dedupe: false,
+            app_handle: None,
+        };
+
+        let outcome = match dispatch_non_cron_workflow(
+            &self.db,
+            workspace_root,
+            python_path,
+            workflow_id,
+            options,
+        ) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // Release the reservation so a corrected retry can proceed.
+                if let (Some(key), Some(fp)) = (idempotency_key, fingerprint.as_deref()) {
+                    let _ = self.db.delete_idempotency_reservation(key, fp);
+                }
+                return Err(ManualDispatchError::Dispatch(e));
+            }
+        };
+
+        if let Some(key) = idempotency_key {
+            let _ = self.db.complete_idempotency_key(
+                key,
+                outcome.run_id.as_deref(),
+                outcome.queued_run_id.as_deref(),
+                &outcome.status,
+            );
+        }
+
+        Ok(outcome)
     }
 
     /// Validate a workflow spec (structure + operator config) without persisting.
@@ -869,6 +1002,22 @@ fn hash_key(salt: &str, secret: &str) -> String {
     hasher.update(salt.as_bytes());
     hasher.update(b"|");
     hasher.update(secret.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Idempotency request fingerprint: a stable SHA-256 over the workflow id, the
+/// trigger kind, and the optional trigger payload, NUL-separated. This is the
+/// exact byte layout the REST idempotency path has always used; because the
+/// desktop enqueue path never sends a payload, `None` collapses to the historic
+/// `id + kind` digest, so centralizing here preserves every caller's behavior.
+fn manual_run_fingerprint(workflow_id: &str, trigger_kind: &str, payload: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(workflow_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(trigger_kind.as_bytes());
+    hasher.update([0]);
+    hasher.update(payload.unwrap_or_default().as_bytes());
     hex::encode(hasher.finalize())
 }
 
@@ -1409,6 +1558,150 @@ mod tests {
             .get_workflow_for_scopes(&wf.id, &["write".to_string()])
             .unwrap();
         assert!(write.spec_json.as_ref().unwrap().contains("topsecret"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Seed a workflow directly in the DB (bypassing draft validation) so the
+    /// admission tests can pin the exact `queue_config` and `script_path`.
+    fn seed_workflow(
+        db: &Arc<Database>,
+        name: &str,
+        script_path: &str,
+        queue_config: &str,
+    ) -> String {
+        db.create_workflow(
+            name,
+            None,
+            script_path,
+            "0 0 * * *",
+            false,
+            false,
+            "UTC",
+            "production",
+            None,
+            None,
+            Some(queue_config),
+        )
+        .unwrap()
+        .id
+    }
+
+    #[test]
+    fn dispatch_manual_run_queues_when_dependency_is_unmet() {
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        // No protected environments so the gate admits `production`.
+        let svc = service_with_db(db.clone(), vec![], false);
+        let id = seed_workflow(
+            &db,
+            "Dep Gated",
+            "scripts/noop.py",
+            r#"{"queue":"production-default","depends_on":["upstream-never"]}"#,
+        );
+
+        let outcome = svc
+            .dispatch_manual_run(
+                dir.to_str().unwrap(),
+                "python3",
+                &id,
+                "ui_enqueue",
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("dispatch should succeed");
+
+        // The unmet dependency must admission-QUEUE the run rather than spawn it.
+        assert_eq!(outcome.status, "queued");
+        assert!(outcome.queued_run_id.is_some());
+        assert!(outcome.run_id.is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dispatch_manual_run_replays_idempotency_key_as_duplicate() {
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec![], false);
+        let id = seed_workflow(
+            &db,
+            "Dep Gated",
+            "scripts/noop.py",
+            r#"{"queue":"production-default","depends_on":["upstream-never"]}"#,
+        );
+
+        let first = svc
+            .dispatch_manual_run(
+                dir.to_str().unwrap(),
+                "python3",
+                &id,
+                "ui_enqueue",
+                Some("dup-key"),
+                None,
+                None,
+                None,
+            )
+            .expect("first dispatch should succeed");
+        assert_eq!(first.status, "queued");
+        let queued_run_id = first.queued_run_id.clone();
+        assert!(queued_run_id.is_some());
+
+        let second = svc
+            .dispatch_manual_run(
+                dir.to_str().unwrap(),
+                "python3",
+                &id,
+                "ui_enqueue",
+                Some("dup-key"),
+                None,
+                None,
+                None,
+            )
+            .expect("second dispatch should replay");
+        assert_eq!(second.status, "duplicate");
+        assert_eq!(second.queued_run_id, queued_run_id);
+        assert!(second.run_id.is_none());
+
+        // The reused key must not enqueue a second row.
+        assert_eq!(db.list_queued_runs(10).unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dispatch_manual_run_admits_with_free_capacity() {
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec![], false);
+        // `script_path` contains `=`, so the engine runs it via `sh -c`; `true`
+        // exits 0 instantly with no external runtime dependency.
+        let id = seed_workflow(
+            &db,
+            "Runnable",
+            "NOOP=1 true",
+            r#"{"queue":"production-default"}"#,
+        );
+
+        let outcome = svc
+            .dispatch_manual_run(
+                dir.to_str().unwrap(),
+                "python3",
+                &id,
+                "ui_enqueue",
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("dispatch should succeed");
+
+        // A free queue with no unmet dependency admits and executes inline.
+        assert_eq!(outcome.status, "admitted");
+        assert!(outcome.run_id.is_some());
+        assert!(outcome.queued_run_id.is_none());
+
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -5,9 +5,11 @@
 //! and reuses [`SchedulerService`] for **all** governance/validation so
 //! there is no duplicated business logic vs the Tauri commands.
 
-use crate::db::{Database, EmailProfile, IdempotencyReservation};
-use crate::scheduler::{dispatch_non_cron_workflow, NonCronDispatchOptions};
-use crate::service::{ApiIdentity, SchedulerService, ServiceError, WorkflowDraft};
+use crate::db::{Database, EmailProfile};
+use crate::scheduler::DispatchOutcome;
+use crate::service::{
+    ApiIdentity, ManualDispatchError, SchedulerService, ServiceError, WorkflowDraft,
+};
 use crate::workflow_spec::WorkflowSpec;
 use axum::{
     extract::{ConnectInfo, Extension, Path, Request, State},
@@ -631,21 +633,14 @@ async fn set_spec(
     Ok(Json(json!({ "workflow": wf })))
 }
 
-fn idempotency_fingerprint(workflow_id: &str, trigger_kind: &str, payload: Option<&str>) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(workflow_id.as_bytes());
-    hasher.update([0]);
-    hasher.update(trigger_kind.as_bytes());
-    hasher.update([0]);
-    hasher.update(payload.unwrap_or_default().as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-fn duplicate_dispatch_value(record: &crate::db::IdempotencyRecord) -> Value {
+/// Compact `{status, run_id, queued_run_id}` projection returned for an
+/// idempotent replay. This is the exact historical REST shape for a duplicate
+/// (narrower than the full `DispatchOutcome` serialized for a fresh dispatch).
+fn duplicate_dispatch_value(outcome: &DispatchOutcome) -> Value {
     json!({
         "status": "duplicate",
-        "run_id": record.run_id.as_deref(),
-        "queued_run_id": record.queued_run_id.as_deref(),
+        "run_id": outcome.run_id.as_deref(),
+        "queued_run_id": outcome.queued_run_id.as_deref(),
     })
 }
 
@@ -675,73 +670,38 @@ fn dispatch_with_idempotency(
     rerun_of_run_id: Option<&str>,
     input_json: Option<&str>,
 ) -> Result<Json<Value>, ApiError> {
-    st.service.ensure_workflow_execution_allowed(id)?;
-    let idem = headers
-        .get("idempotency-key")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let fingerprint = idem
-        .as_ref()
-        .map(|_| idempotency_fingerprint(id, trigger_kind, payload));
-    if let (Some(key), Some(fingerprint)) = (&idem, &fingerprint) {
-        match st
-            .db
-            .reserve_idempotency_key(key, id, fingerprint)
-            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        {
-            IdempotencyReservation::Reserved => {}
-            IdempotencyReservation::Existing(record) => {
-                if let Some(existing) = record.request_fingerprint.as_deref() {
-                    if existing != fingerprint.as_str() {
-                        return Err(ApiError::new(
-                            StatusCode::CONFLICT,
-                            "idempotency key was already used for a different request",
-                        ));
-                    }
-                }
-                return Ok(Json(duplicate_dispatch_value(&record)));
-            }
-        }
+    let idempotency_key = headers.get("idempotency-key").and_then(|v| v.to_str().ok());
+    let outcome = st
+        .service
+        .dispatch_manual_run(
+            &st.workspace_root,
+            &st.python_path,
+            id,
+            trigger_kind,
+            idempotency_key,
+            payload,
+            rerun_of_run_id,
+            input_json,
+        )
+        .map_err(|e| match e {
+            // The gate maps by ServiceError status; a free-form admission error
+            // keeps its existing HTTP classification (e.g. 409 for disabled /
+            // fingerprint-mismatch).
+            ManualDispatchError::Gate(se) => ApiError::from(se),
+            ManualDispatchError::Dispatch(msg) => map_dispatch_error(&msg),
+        })?;
+    // Preserve the historical REST wire shape exactly: an idempotent replay
+    // returns the compact {status, run_id, queued_run_id} projection, while a
+    // fresh dispatch serializes the full DispatchOutcome. `dedupe` is never
+    // enabled on this path, so `status == "duplicate"` uniquely identifies a
+    // replay.
+    if outcome.status == "duplicate" {
+        Ok(Json(duplicate_dispatch_value(&outcome)))
+    } else {
+        Ok(Json(
+            serde_json::to_value(&outcome).unwrap_or_else(|_| json!({})),
+        ))
     }
-    let options = NonCronDispatchOptions {
-        notify_on_success: false,
-        notify_on_failure: true,
-        email_on_failure_enabled: false,
-        trigger_kind,
-        trigger_payload: payload,
-        upstream_run_id: None,
-        input_json,
-        rerun_of_run_id,
-        suppress_completion_triggers: false,
-        dedupe: false,
-        app_handle: None,
-    };
-    let outcome = match dispatch_non_cron_workflow(
-        &st.db,
-        &st.workspace_root,
-        &st.python_path,
-        id,
-        options,
-    ) {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            if let (Some(key), Some(fingerprint)) = (&idem, &fingerprint) {
-                let _ = st.db.delete_idempotency_reservation(key, fingerprint);
-            }
-            return Err(map_dispatch_error(&e));
-        }
-    };
-    if let Some(key) = &idem {
-        let _ = st.db.complete_idempotency_key(
-            key,
-            outcome.run_id.as_deref(),
-            outcome.queued_run_id.as_deref(),
-            &outcome.status,
-        );
-    }
-    Ok(Json(
-        serde_json::to_value(&outcome).unwrap_or_else(|_| json!({})),
-    ))
 }
 
 async fn run_now(
