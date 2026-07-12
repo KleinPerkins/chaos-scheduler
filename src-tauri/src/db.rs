@@ -212,6 +212,58 @@ pub struct RunExecutionRecord {
     pub process_started_at: Option<String>,
 }
 
+/// One lean, LOG-FREE history row. Deliberately omits `stdout`/`stderr` (and
+/// every other large blob on `runs`): this read model backs the filtered
+/// history table + its KPI header, never a log viewer, so logs are never
+/// SELECTed or returned. Fetch a single run's logs via `get_run_log` instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryRow {
+    pub id: String,
+    pub workflow_id: String,
+    pub workflow_name: Option<String>,
+    /// The owning workflow's CURRENT environment (via the `workflows` join), NOT
+    /// a snapshot of where the run executed. See [`Database::history_read_model`].
+    pub environment: String,
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub exit_code: Option<i32>,
+    pub trigger_kind: Option<String>,
+    /// Wall-clock execution seconds (`finished_at - started_at`); `None` while
+    /// the run is still in-flight.
+    pub duration_seconds: Option<f64>,
+}
+
+/// Aggregate KPIs for the history read model, computed over the same
+/// environment/workflow/lookback scope as the returned rows. The status filter
+/// scopes the ROWS only (not these KPIs) so the header always shows the full
+/// breakdown for the scope. Every count derives from the canonical
+/// [`run_status`] sets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryKpis {
+    /// All runs in scope (any status).
+    pub total: i64,
+    /// Runs that ended OK (`run_status::ENDED_OK`).
+    pub ended_ok: i64,
+    /// Runs that ended not-OK — every non-success terminal status
+    /// (`run_status::ENDED_NOT_OK`).
+    pub ended_not_ok: i64,
+    /// In-flight runs (`run_status::RUNNING`).
+    pub running: i64,
+    /// p95 wall-clock execution seconds (nearest-rank) over FINISHED runs in
+    /// scope; `None` when there are no finished runs. Workflow-scoped when a
+    /// workflow filter is applied.
+    pub p95_duration_seconds: Option<f64>,
+}
+
+/// Filtered history rows plus their aggregate KPIs. Tauri-IPC-only; no
+/// REST/SDK/MCP surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryReadModel {
+    pub rows: Vec<HistoryRow>,
+    pub kpis: HistoryKpis,
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum RunAdmission {
     Admitted(Run),
@@ -3678,6 +3730,150 @@ impl Database {
         rows.collect()
     }
 
+    /// Lean, LOG-FREE history read model: filtered rows + aggregate KPIs
+    /// (`total` / `ended_ok` / `ended_not_ok` / `running` / p95 duration) for
+    /// the history table and its KPI header. Never SELECTs `stdout`/`stderr`;
+    /// fetch a single run's logs via [`Database::get_run`] instead.
+    ///
+    /// Filters: `environment_filter` and `workflow_filter` accept `"all"` (or
+    /// `None`) to disable. `status_filter` (`"all"`/`None` to disable) scopes
+    /// the returned ROWS only — the KPIs always report the full status
+    /// breakdown for the `(environment, workflow, window)` scope, so the header
+    /// stays stable as the table is filtered by status. `window_modifier` is a
+    /// SQLite datetime modifier (e.g. `"-1 day"`, or `"-100 years"` for "all"),
+    /// applied to `COALESCE(finished_at, started_at)` to match the other KPI
+    /// aggregates. p95 is nearest-rank over FINISHED runs in scope and is
+    /// therefore workflow-scoped whenever a workflow filter is applied. Every
+    /// count derives from the canonical [`run_status`] sets.
+    ///
+    /// ENVIRONMENT PROVENANCE — CURRENT, NOT HISTORICAL: a row's `environment`
+    /// (and the environment filter) reflect the owning workflow's environment
+    /// *now* — via the same `workflows` join the `get_workflow` path uses — not
+    /// a snapshot of where the run executed. Re-homing a workflow retroactively
+    /// re-buckets its history. This is an accepted, ledger-tracked limitation;
+    /// a run-time environment snapshot column is a separate, operator-gated
+    /// decision and is out of scope for this read model.
+    pub fn history_read_model(
+        &self,
+        environment_filter: Option<&str>,
+        workflow_filter: Option<&str>,
+        status_filter: Option<&str>,
+        window_modifier: &str,
+        limit: i64,
+    ) -> rusqlite::Result<HistoryReadModel> {
+        let environment_filter = environment_filter.unwrap_or("all");
+        let workflow_filter = workflow_filter.unwrap_or("all");
+        let status_filter = status_filter.unwrap_or("all");
+        let conn = self.conn()?;
+
+        // Rows: log-free projection (no stdout/stderr), honoring all four
+        // filters, newest first.
+        let rows = {
+            let mut stmt = conn.prepare(
+                "SELECT r.id, r.workflow_id, w.name,
+                        COALESCE(NULLIF(w.environment, ''), 'production') AS env,
+                        r.status, r.started_at, r.finished_at, r.exit_code, r.trigger_kind,
+                        CASE WHEN r.finished_at IS NOT NULL
+                             THEN (julianday(r.finished_at) - julianday(r.started_at)) * 86400.0
+                             END AS duration_seconds
+                 FROM runs r
+                 LEFT JOIN workflows w ON w.id = r.workflow_id
+                 WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
+                   AND (?2 = 'all' OR r.workflow_id = ?2)
+                   AND (?3 = 'all' OR r.status = ?3)
+                   AND datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?4)
+                 ORDER BY r.started_at DESC
+                 LIMIT ?5",
+            )?;
+            let mapped = stmt.query_map(
+                params![
+                    environment_filter,
+                    workflow_filter,
+                    status_filter,
+                    window_modifier,
+                    limit
+                ],
+                |row| {
+                    Ok(HistoryRow {
+                        id: row.get(0)?,
+                        workflow_id: row.get(1)?,
+                        workflow_name: row.get(2)?,
+                        environment: row.get(3)?,
+                        status: row.get(4)?,
+                        started_at: row.get(5)?,
+                        finished_at: row.get(6)?,
+                        exit_code: row.get(7)?,
+                        trigger_kind: row.get(8)?,
+                        duration_seconds: row.get(9)?,
+                    })
+                },
+            )?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        // KPIs: environment/workflow/window scope only (deliberately NOT the
+        // status filter — see the doc comment). Counts come from the canonical
+        // run-status sets so they never drift from the scheduler/dashboards.
+        let (total, ended_ok, ended_not_ok, running): (i64, i64, i64, i64) = conn.query_row(
+            &format!(
+                "SELECT COUNT(*),
+                        SUM(CASE WHEN r.status IN ({ended_ok}) THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN r.status IN ({ended_not_ok}) THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN r.status IN ({running}) THEN 1 ELSE 0 END)
+                 FROM runs r
+                 LEFT JOIN workflows w ON w.id = r.workflow_id
+                 WHERE (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
+                   AND (?2 = 'all' OR r.workflow_id = ?2)
+                   AND datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?3)",
+                ended_ok = run_status::ended_ok_sql(),
+                ended_not_ok = run_status::ended_not_ok_sql(),
+                running = run_status::running_sql(),
+            ),
+            params![environment_filter, workflow_filter, window_modifier],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                ))
+            },
+        )?;
+
+        // p95 duration: nearest-rank over FINISHED runs in scope, reduced in
+        // Rust from the ordered durations (avoids a fragile SQL percentile and
+        // keeps the reduction obviously correct).
+        let durations: Vec<f64> = {
+            let mut stmt = conn.prepare(
+                "SELECT (julianday(r.finished_at) - julianday(r.started_at)) * 86400.0 AS secs
+                 FROM runs r
+                 LEFT JOIN workflows w ON w.id = r.workflow_id
+                 WHERE r.finished_at IS NOT NULL
+                   AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
+                   AND (?2 = 'all' OR r.workflow_id = ?2)
+                   AND datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?3)
+                 ORDER BY secs ASC",
+            )?;
+            let mapped = stmt.query_map(
+                params![environment_filter, workflow_filter, window_modifier],
+                |row| row.get::<_, f64>(0),
+            )?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let p95_duration_seconds = percentile_nearest_rank(&durations, 95);
+
+        Ok(HistoryReadModel {
+            rows,
+            kpis: HistoryKpis {
+                total,
+                ended_ok,
+                ended_not_ok,
+                running,
+                p95_duration_seconds,
+            },
+        })
+    }
+
     pub fn retention_preview(
         &self,
         older_than_days: i64,
@@ -6589,6 +6785,20 @@ fn scheduler_asset_from_row(row: &rusqlite::Row) -> SchedulerAsset {
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok()),
     }
+}
+
+/// Nearest-rank percentile over an ASCENDING-sorted slice. `p` is `1..=100`.
+/// Returns `None` for an empty slice. Rank = `ceil(p/100 * n)` (1-based),
+/// clamped into `[1, n]` — the standard nearest-rank definition, chosen over a
+/// SQL percentile so the reduction is obviously correct and unit-testable.
+fn percentile_nearest_rank(sorted_asc: &[f64], p: u32) -> Option<f64> {
+    if sorted_asc.is_empty() {
+        return None;
+    }
+    let n = sorted_asc.len();
+    // Nearest-rank: rank = ceil(p/100 * n), 1-based.
+    let rank = (p as usize * n).div_ceil(100);
+    Some(sorted_asc[rank.clamp(1, n) - 1])
 }
 
 fn run_from_row(row: &rusqlite::Row) -> Run {
@@ -9931,6 +10141,167 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(all.total_runs, 4);
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn history_read_model_is_log_free_filtered_and_reuses_canonical_status_sets() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let prod = db
+            .create_workflow(
+                "Prod WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                Some("scheduler"),
+                None,
+                None,
+            )
+            .unwrap();
+        let sandbox = db
+            .create_workflow(
+                "Sandbox WF",
+                None,
+                "scripts/workflows/noop.py",
+                "0 1 * * *",
+                false,
+                true,
+                "UTC",
+                "sandbox",
+                Some("card"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let now = chrono::Utc::now();
+        let at = |mins_ago: i64| (now - chrono::Duration::minutes(mins_ago)).to_rfc3339();
+        let span = |mins_ago: i64, secs: i64| {
+            (now - chrono::Duration::minutes(mins_ago) + chrono::Duration::seconds(secs))
+                .to_rfc3339()
+        };
+        let conn = db.conn().unwrap();
+        // Insert WITH stdout/stderr populated so we can prove the read model
+        // never returns them.
+        let insert =
+            |id: &str, wf: &str, started: String, finished: Option<String>, status: &str| {
+                conn.execute(
+                "INSERT INTO runs (id, workflow_id, started_at, finished_at, status, stdout, stderr)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'SECRET STDOUT', 'SECRET STDERR')",
+                params![id, wf, started, finished, status],
+            )
+            .unwrap();
+            };
+        // Prod, in window (1d), finished durations 60/120/30/90s + 1 running.
+        insert("r1", &prod.id, at(120), Some(span(120, 60)), "success");
+        insert("r2", &prod.id, at(180), Some(span(180, 120)), "failed");
+        insert(
+            "r3",
+            &prod.id,
+            at(150),
+            Some(span(150, 30)),
+            "poll_exhausted",
+        );
+        insert("r4", &prod.id, at(200), Some(span(200, 90)), "stale");
+        insert("r5", &prod.id, at(30), None, "running");
+        // Prod, OUTSIDE the window (40h ago) — excluded from rows and KPIs.
+        insert(
+            "r6",
+            &prod.id,
+            at(40 * 60),
+            Some(span(40 * 60, 10)),
+            "success",
+        );
+        // Sandbox, in window — excluded by the production environment filter.
+        insert("s1", &sandbox.id, at(90), Some(span(90, 200)), "failed");
+
+        // --- Production, all statuses, 1d window ---
+        let model = db
+            .history_read_model(Some("production"), None, None, "-1 day", 100)
+            .unwrap();
+        assert_eq!(
+            model.rows.len(),
+            5,
+            "r1..r5 in the prod window; r6 out of window; s1 is sandbox"
+        );
+        // KPIs derive from the canonical run_status sets: poll_exhausted AND
+        // stale both count as ended_not_ok (the PR1 canonicalization), never as
+        // ended_ok and never as running.
+        assert_eq!(model.kpis.total, 5);
+        assert_eq!(model.kpis.ended_ok, 1, "only r1 (success) ended ok");
+        assert_eq!(
+            model.kpis.ended_not_ok, 3,
+            "failed + poll_exhausted + stale all count as ended_not_ok"
+        );
+        assert_eq!(model.kpis.running, 1, "r5 is in-flight");
+        // p95 nearest-rank over finished prod durations [30,60,90,120] -> 120s.
+        let p95 = model
+            .kpis
+            .p95_duration_seconds
+            .expect("finished runs present");
+        assert!((p95 - 120.0).abs() < 1.0, "p95 ~120s, got {p95}");
+
+        // LOG-FREE: a serialized row exposes no stdout/stderr keys even though
+        // both columns are populated in the DB.
+        let json = serde_json::to_value(&model.rows[0]).unwrap();
+        assert!(
+            json.get("stdout").is_none(),
+            "history rows must be log-free (no stdout)"
+        );
+        assert!(
+            json.get("stderr").is_none(),
+            "history rows must be log-free (no stderr)"
+        );
+
+        // --- Status filter scopes ROWS only, never the KPI header ---
+        let failed_only = db
+            .history_read_model(Some("production"), None, Some("failed"), "-1 day", 100)
+            .unwrap();
+        assert_eq!(failed_only.rows.len(), 1, "status filter narrows rows");
+        assert_eq!(failed_only.rows[0].status, "failed");
+        assert_eq!(
+            failed_only.kpis.total, 5,
+            "status filter must NOT narrow the KPI header"
+        );
+        assert_eq!(failed_only.kpis.ended_not_ok, 3);
+
+        // --- Workflow filter scopes rows AND p95 (workflow-scoped duration) ---
+        let sandbox_only = db
+            .history_read_model(None, Some(&sandbox.id), None, "-1 day", 100)
+            .unwrap();
+        assert_eq!(sandbox_only.rows.len(), 1, "only the sandbox run in scope");
+        assert_eq!(sandbox_only.kpis.total, 1);
+        assert_eq!(sandbox_only.kpis.ended_not_ok, 1);
+        let sp95 = sandbox_only
+            .kpis
+            .p95_duration_seconds
+            .expect("sandbox has one finished run");
+        assert!(
+            (sp95 - 200.0).abs() < 1.0,
+            "workflow-scoped p95 ~200s, got {sp95}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn percentile_nearest_rank_matches_the_standard_definition() {
+        assert_eq!(percentile_nearest_rank(&[], 95), None);
+        assert_eq!(percentile_nearest_rank(&[42.0], 95), Some(42.0));
+        // [30,60,90,120]: nearest-rank p95 -> rank ceil(0.95*4)=4 -> 120.
+        assert_eq!(
+            percentile_nearest_rank(&[30.0, 60.0, 90.0, 120.0], 95),
+            Some(120.0)
+        );
+        // 100 evenly-spaced values 1..=100: p95 -> the 95th value.
+        let hundred: Vec<f64> = (1..=100).map(|n| n as f64).collect();
+        assert_eq!(percentile_nearest_rank(&hundred, 95), Some(95.0));
+        assert_eq!(percentile_nearest_rank(&hundred, 100), Some(100.0));
     }
 
     #[test]
