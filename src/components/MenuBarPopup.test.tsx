@@ -38,6 +38,22 @@ describe("MenuBarPopup", () => {
     delete window.__CHAOS_IPC_OVERRIDES__;
   });
 
+  it("announces an initial status-load failure as an alert", async () => {
+    installStrictIpcMocks();
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_scheduler_status: () => {
+        throw new Error("scheduler offline");
+      },
+    };
+
+    render(<MenuBarPopup />);
+
+    // The async status fetch failed, so the error must be announced (role=alert)
+    // rather than rendered as a silent div a screen reader never voices.
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/Status failed to load/i);
+  });
+
   it("stays hidden when no update is available", async () => {
     installStrictIpcMocks();
     window.__CHAOS_IPC_OVERRIDES__ = {

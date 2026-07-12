@@ -8,6 +8,26 @@ test.describe("Menu bar popup", () => {
     await expectNoAxeViolations(page, "menu bar popup");
   });
 
+  test("announces an initial status-load failure as an alert", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      window.__CHAOS_IPC_OVERRIDES__ = {
+        get_scheduler_status: () => {
+          throw new Error("scheduler offline");
+        },
+      };
+    });
+
+    await page.goto("/?view=popup");
+
+    // The failed async status fetch must be announced, not shown silently.
+    await expect(page.getByRole("alert")).toContainText(
+      /Status failed to load/,
+    );
+    await expectNoAxeViolations(page, "menu bar popup load error");
+  });
+
   test("queues upcoming work with semantic regions in both themes", async ({
     page,
   }) => {
