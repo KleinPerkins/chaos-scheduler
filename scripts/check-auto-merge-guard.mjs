@@ -3,18 +3,22 @@
 // auto-merge bot, so cutting a release is a deliberate human merge.
 //
 // `app-auto-merge.yml` auto-approves + squash-auto-merges every non-draft,
-// same-repo PR via the chaos-scheduler-automerge GitHub App. release-please
-// maintains one standing "chore: release main" PR (head branch
-// `release-please--branches--main`) whose merge creates the tag(s) + GitHub
-// Release(s) and kicks off the signed build/sign/publish `release.yml`. That
-// must NOT happen automatically — so the `auto-merge` job's `if:` excludes any
-// PR whose head branch starts with `release-please--` (robust to the
-// target-branch suffix, so future targets are covered too).
+// same-repo PR via the chaos-scheduler-automerge GitHub App over TWO paths: the
+// `auto-merge` job (on `pull_request`, for non-Dependabot PRs) and the
+// `auto-merge-ci` job (on `workflow_run` after CI, which covers Dependabot PRs
+// whose pull_request run lacks the Actions secrets). release-please maintains one
+// standing "chore: release main" PR (head branch `release-please--branches--main`)
+// whose merge creates the tag(s) + GitHub Release(s) and kicks off the signed
+// build/sign/publish `release.yml`. That must NOT happen automatically — so BOTH
+// jobs' `if:` conditions exclude any PR whose head branch starts with
+// `release-please--` (robust to the target-branch suffix, so future targets are
+// covered too): the `auto-merge` job via `github.event.pull_request.head.ref`,
+// the `auto-merge-ci` job via `github.event.workflow_run.head_branch`.
 //
-// This check enforces that invariant, compile-free — a targeted structural
-// parse rather than a YAML dependency, mirroring scripts/check-release-gating.mjs
-// and scripts/check-tauri-versions.mjs — so the guard can never silently
-// regress if someone tidies the workflow condition.
+// This check enforces that invariant on BOTH paths, compile-free — a targeted
+// structural parse rather than a YAML dependency, mirroring
+// scripts/check-release-gating.mjs and scripts/check-tauri-versions.mjs — so the
+// guard can never silently regress if someone tidies a workflow condition.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -23,9 +27,14 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 // The negated head-branch-prefix guard that keeps the release train out of the
 // auto-merge bot. Tolerant of whitespace and quote style so a reformat (e.g.
-// prettier folding the scalar differently) does not defeat it.
+// prettier folding the scalar differently) does not defeat it. There is one
+// regex per path because the branch is read from a different event field:
+//   - `pull_request` job  → github.event.pull_request.head.ref
+//   - `workflow_run` job  → github.event.workflow_run.head_branch
 const RELEASE_TRAIN_GUARD_RE =
   /!\s*startsWith\(\s*github\.event\.pull_request\.head\.ref\s*,\s*['"]release-please--['"]\s*\)/;
+const RELEASE_TRAIN_GUARD_WORKFLOW_RUN_RE =
+  /!\s*startsWith\(\s*github\.event\.workflow_run\.head_branch\s*,\s*['"]release-please--['"]\s*\)/;
 
 /** Collapse every run of whitespace so a folded (`>-`) scalar compares cleanly. */
 function normalize(expr) {
@@ -87,35 +96,69 @@ export function extractJobIf(yamlText, jobName) {
   return null;
 }
 
-/** True when an `if:` expression excludes the release-please head branch. */
+/**
+ * True when an `if:` expression excludes the release-please head branch on the
+ * `pull_request` path (via `github.event.pull_request.head.ref`).
+ */
 export function excludesReleaseTrain(ifExpr) {
   return typeof ifExpr === "string" && RELEASE_TRAIN_GUARD_RE.test(ifExpr);
 }
 
 /**
- * Return a human-readable violation when the `auto-merge` job does not exclude
- * the release-please train. Empty array = the guard is in place.
+ * True when an `if:` expression excludes the release-please head branch on the
+ * `workflow_run` path (via `github.event.workflow_run.head_branch`).
+ */
+export function excludesReleaseTrainWorkflowRun(ifExpr) {
+  return (
+    typeof ifExpr === "string" &&
+    RELEASE_TRAIN_GUARD_WORKFLOW_RUN_RE.test(ifExpr)
+  );
+}
+
+/**
+ * Return human-readable violations when EITHER auto-merge path fails to exclude
+ * the release-please train. Empty array = the guard is in place on both paths.
+ *
+ * Both jobs are checked so the release PR stays a deliberate human merge no
+ * matter which path (pull_request or workflow_run) would otherwise merge it.
  *
  * @param {string} yamlText raw app-auto-merge.yml
  * @returns {string[]}
  */
 export function findAutoMergeGuardViolations(yamlText) {
-  const ifExpr = extractJobIf(yamlText, "auto-merge");
-  if (ifExpr === null) {
-    return [
-      "could not find an `auto-merge` job with an `if:` condition in " +
-        "app-auto-merge.yml",
-    ];
+  const violations = [];
+
+  const prIf = extractJobIf(yamlText, "auto-merge");
+  if (prIf === null) {
+    violations.push(
+      "could not find an `auto-merge` (pull_request) job with an `if:` " +
+        "condition in app-auto-merge.yml",
+    );
+  } else if (!excludesReleaseTrain(prIf)) {
+    violations.push(
+      "the `auto-merge` (pull_request) job's if: does not exclude the " +
+        "release-please train — append `&& !startsWith(" +
+        "github.event.pull_request.head.ref, 'release-please--')` so the " +
+        `Release PR stays a deliberate human merge. Current if: ${prIf}`,
+    );
   }
-  if (!excludesReleaseTrain(ifExpr)) {
-    return [
-      "the `auto-merge` job's if: does not exclude the release-please train — " +
-        "append `&& !startsWith(github.event.pull_request.head.ref, " +
-        "'release-please--')` so the Release PR stays a deliberate human merge. " +
-        `Current if: ${ifExpr}`,
-    ];
+
+  const runIf = extractJobIf(yamlText, "auto-merge-ci");
+  if (runIf === null) {
+    violations.push(
+      "could not find an `auto-merge-ci` (workflow_run) job with an `if:` " +
+        "condition in app-auto-merge.yml",
+    );
+  } else if (!excludesReleaseTrainWorkflowRun(runIf)) {
+    violations.push(
+      "the `auto-merge-ci` (workflow_run) job's if: does not exclude the " +
+        "release-please train — append `&& !startsWith(" +
+        "github.event.workflow_run.head_branch, 'release-please--')` so the " +
+        `Release PR stays a deliberate human merge. Current if: ${runIf}`,
+    );
   }
-  return [];
+
+  return violations;
 }
 
 function main() {
@@ -133,8 +176,9 @@ function main() {
   }
 
   console.log(
-    "OK — the auto-merge bot excludes the release-please train " +
-      "(release-please--*), so cutting a release stays a manual merge.",
+    "OK — both auto-merge paths (pull_request + workflow_run) exclude the " +
+      "release-please train (release-please--*), so cutting a release stays a " +
+      "manual merge.",
   );
 }
 
