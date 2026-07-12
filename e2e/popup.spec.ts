@@ -13,7 +13,9 @@ test.describe("Menu bar popup", () => {
   }) => {
     await page.addInitScript(() => {
       window.__CHAOS_IPC_OVERRIDES__ = {
-        get_scheduler_status: () => {
+        // The mini-dashboard glance is sourced from the Mission Control
+        // snapshot, so a failed snapshot fetch is what must be announced.
+        get_mission_control_snapshot: () => {
           throw new Error("scheduler offline");
         },
       };
@@ -33,18 +35,46 @@ test.describe("Menu bar popup", () => {
   }) => {
     await page.addInitScript(() => {
       window.__CHAOS_IPC_OVERRIDES__ = {
-        get_scheduler_status: () => ({
-          active_workflows: 1,
-          running_count: 0,
-          next_runs: [
+        get_mission_control_snapshot: () => ({
+          preferences: {
+            default_landing: "mission_control",
+            environment_filter: "all",
+            domain_filter: "all",
+          },
+          domains: [],
+          header: {
+            active_workflows: 1,
+            running_count: 0,
+            queued_count: 0,
+            recent_failures: 0,
+          },
+          sla: {
+            violations_count: 0,
+            success_rate_24h: 1,
+            median_wait_seconds: 0,
+            max_wait_seconds: 0,
+            long_running_count: 0,
+            blocked_count: 0,
+          },
+          needs_attention: [],
+          needs_attention_total: 0,
+          needs_attention_truncated: false,
+          live_activity: [],
+          upcoming_runs: [
             {
               workflow_id: "wf-popup",
               workflow_name: "Nightly sync",
               environment: "production",
+              domain: "ops",
+              trigger_kind: "cron",
+              trigger_label: "0 8 * * *",
               next_time: "2026-07-12T08:00:00.000Z",
             },
           ],
+          freshness_ledger: [],
           recent_runs: [],
+          workflow_telemetry: [],
+          availability: [],
         }),
         enqueue_workflow: () => ({
           status: "queued",
@@ -55,9 +85,10 @@ test.describe("Menu bar popup", () => {
 
     await page.goto("/?view=popup");
 
-    await expect(page.getByRole("region", { name: "Next Runs" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Upcoming" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Recent" })).toBeVisible();
     await expect(
-      page.getByRole("region", { name: "Recent Results" }),
+      page.getByRole("group", { name: "Run summary" }),
     ).toBeVisible();
     await page.getByRole("button", { name: "Queue run Nightly sync" }).click();
     await expect(

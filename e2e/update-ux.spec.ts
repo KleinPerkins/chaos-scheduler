@@ -131,7 +131,9 @@ test.describe("Update UX — dashboard banner", () => {
 });
 
 test.describe("Update UX — menu bar popup", () => {
-  test("available: shows a compact Update row", async ({ page }) => {
+  test("available: shows a compact update row with Install and Skip", async ({
+    page,
+  }) => {
     await page.addInitScript((snapshot) => {
       window.__CHAOS_IPC_OVERRIDES__ = {
         get_app_update_status: () => snapshot,
@@ -141,7 +143,8 @@ test.describe("Update UX — menu bar popup", () => {
     await page.goto("/?view=popup");
 
     await expect(page.getByText("Update available: v0.2.0")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Update" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Install" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Skip" })).toBeVisible();
     await expectNoAxeViolations(page, "popup, update available");
   });
 
