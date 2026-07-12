@@ -109,6 +109,7 @@ export type IpcCommand =
   | "set_cursor_integration_prefs"
   | "open_run_in_cursor"
   | "get_cursor_integration_status"
+  | "dispatch_fix_agent"
   | "analyze_run_error"
   | "generate_workflow_description"
   | "get_email_config"
@@ -466,6 +467,14 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       open_in_cursor_available: false,
       dispatch_fix_available: false,
       cursor_installed: false,
+    }),
+    // Fix-agent dispatch returns a DispatchOutcome (queued by default, mirroring
+    // the enqueue/rerun fixtures and the "manual runs = queue-only" contract).
+    dispatch_fix_agent: () => ({
+      workflow_id: sampleWorkflow.id,
+      status: "queued",
+      queued_run_id: "fix-agent-fixture-1",
+      queue_name: "sandbox-default",
     }),
     analyze_run_error: () => ({
       diagnosis: "Demo analysis",

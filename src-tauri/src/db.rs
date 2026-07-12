@@ -581,6 +581,25 @@ pub struct CursorIntegrationPrefs {
 /// Mandatory low default for the per-hour fix-agent dispatch ceiling.
 pub const CURSOR_INTEGRATION_DEFAULT_MAX_DISPATCHES_PER_HOUR: u32 = 5;
 
+/// One audit record per fix-agent dispatch (D05 / F10, schema v14). Records
+/// WHO dispatched a fix for WHICH failed run, WHEN, and the resulting fix run —
+/// deliberately NOT the prompt body (which embeds attacker-influenceable failed
+/// stderr; the audit trail stays free of tainted text). The table doubles as
+/// the enforcement substrate for the two spend controls: a UNIQUE index on
+/// `source_run_id` encodes single-fix-per-failed-run idempotency (also the B4
+/// guard against the on-failure auto-hook + a manual click double-firing), and
+/// a time-windowed COUNT over `dispatched_at` enforces the global
+/// `max_dispatches_per_hour` ceiling across DISTINCT failed runs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FixAgentDispatch {
+    pub id: String,
+    pub source_run_id: String,
+    pub fix_workflow_id: String,
+    pub fix_run_id: Option<String>,
+    pub initiator: String,
+    pub dispatched_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionControlHeader {
     pub active_workflows: i64,
@@ -1107,7 +1126,7 @@ pub enum IdempotencyReservation {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 13;
+pub const CURRENT_SCHEMA_VERSION: i64 = 14;
 
 pub struct Database {
     path: String,
@@ -1511,6 +1530,16 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_queue_occ_samples_env_time ON queue_occupancy_samples(environment, sampled_at);
             CREATE INDEX IF NOT EXISTS idx_queue_occ_samples_sampled_at ON queue_occupancy_samples(sampled_at);
+            CREATE TABLE IF NOT EXISTS fix_agent_dispatches (
+                id TEXT PRIMARY KEY,
+                source_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                fix_workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+                fix_run_id TEXT,
+                initiator TEXT NOT NULL,
+                dispatched_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_fix_agent_dispatches_source_run ON fix_agent_dispatches(source_run_id);
+            CREATE INDEX IF NOT EXISTS idx_fix_agent_dispatches_dispatched_at ON fix_agent_dispatches(dispatched_at);
             CREATE INDEX IF NOT EXISTS idx_runs_workflow_started ON runs(workflow_id, started_at DESC);
             CREATE INDEX IF NOT EXISTS idx_queued_runs_queue_status ON queued_runs(queue_name, status, priority DESC, queued_at ASC);
             CREATE INDEX IF NOT EXISTS idx_queued_runs_workflow_status ON queued_runs(workflow_id, status);
@@ -1586,7 +1615,31 @@ impl Database {
             (11, Self::migrate_v11_production_sandbox_environments),
             (12, Self::migrate_v12_queue_occupancy_samples),
             (13, Self::migrate_v13_run_environment_snapshot),
+            (14, Self::migrate_v14_fix_agent_dispatches),
         ]
+    }
+
+    /// v14: add the `fix_agent_dispatches` audit + spend-control table for the
+    /// Cursor fix-agent dispatch path (D05 / F10). Additive and idempotent — a
+    /// new table with no bearing on existing scheduling, run, or queue write
+    /// paths (fresh DBs get it from the base schema in `init`). The UNIQUE index
+    /// on `source_run_id` is the durable single-fix-per-failed-run idempotency /
+    /// double-fire guard; the `dispatched_at` index backs the per-hour ceiling
+    /// count.
+    fn migrate_v14_fix_agent_dispatches(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS fix_agent_dispatches (
+                id TEXT PRIMARY KEY,
+                source_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                fix_workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+                fix_run_id TEXT,
+                initiator TEXT NOT NULL,
+                dispatched_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_fix_agent_dispatches_source_run ON fix_agent_dispatches(source_run_id);
+            CREATE INDEX IF NOT EXISTS idx_fix_agent_dispatches_dispatched_at ON fix_agent_dispatches(dispatched_at);",
+        )?;
+        Ok(())
     }
 
     /// v13: snapshot each run's environment at creation time. Adds a NULLABLE
@@ -6161,6 +6214,77 @@ impl Database {
         self.get_cursor_integration_prefs()
     }
 
+    /// Read the single fix-agent dispatch audit row for a failed source run, if
+    /// one exists. Backs service-layer idempotency: a second dispatch for the
+    /// same failed run returns the original fix run rather than spending again.
+    pub fn get_fix_agent_dispatch_for_source_run(
+        &self,
+        source_run_id: &str,
+    ) -> rusqlite::Result<Option<FixAgentDispatch>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, source_run_id, fix_workflow_id, fix_run_id, initiator, dispatched_at
+             FROM fix_agent_dispatches WHERE source_run_id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![source_run_id], |row| {
+            Ok(FixAgentDispatch {
+                id: row.get(0)?,
+                source_run_id: row.get(1)?,
+                fix_workflow_id: row.get(2)?,
+                fix_run_id: row.get(3)?,
+                initiator: row.get(4)?,
+                dispatched_at: row.get(5)?,
+            })
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Count fix-agent dispatches with `dispatched_at >= since` (an RFC3339
+    /// instant). Backs the global `max_dispatches_per_hour` ceiling, which
+    /// spans DISTINCT failed runs (per-source-run idempotency alone does not
+    /// bound spend — each failed run has a distinct id).
+    pub fn count_fix_agent_dispatches_since(&self, since: &str) -> rusqlite::Result<u32> {
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM fix_agent_dispatches WHERE dispatched_at >= ?1",
+            params![since],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u32)
+    }
+
+    /// Insert one fix-agent dispatch audit row. The UNIQUE index on
+    /// `source_run_id` makes a duplicate insert for the same failed run fail
+    /// loudly (a belt-and-suspenders backstop behind the service's prior
+    /// existing-row check). NEVER records the prompt body.
+    pub fn insert_fix_agent_dispatch(
+        &self,
+        source_run_id: &str,
+        fix_workflow_id: &str,
+        fix_run_id: Option<&str>,
+        initiator: &str,
+    ) -> rusqlite::Result<FixAgentDispatch> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let dispatched_at = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO fix_agent_dispatches (id, source_run_id, fix_workflow_id, fix_run_id, initiator, dispatched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, source_run_id, fix_workflow_id, fix_run_id, initiator, dispatched_at],
+        )?;
+        Ok(FixAgentDispatch {
+            id,
+            source_run_id: source_run_id.to_string(),
+            fix_workflow_id: fix_workflow_id.to_string(),
+            fix_run_id: fix_run_id.map(str::to_string),
+            initiator: initiator.to_string(),
+            dispatched_at,
+        })
+    }
+
     pub fn validate_queue_cap_lattice(&self) -> rusqlite::Result<Vec<String>> {
         let conn = self.conn()?;
         let global_cap = self.global_parallelism_cap()?;
@@ -7267,7 +7391,7 @@ mod tests {
         // Tripwire: refresh this fixture (seed schema + asserted columns) the
         // next time a migration lands so the newest N-1 -> N paths stay covered.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 13,
+            CURRENT_SCHEMA_VERSION, 14,
             "add a v(N-1)->v(N) fixture when a new migration ships"
         );
 
@@ -10524,6 +10648,74 @@ SUMMARY_JSON:{\"title\":\"current\"}
             backfilled.as_deref(),
             Some("sandbox"),
             "v13 backfills the run's environment from its owning workflow"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migrate_v14_adds_fix_agent_dispatches_table_with_source_run_uniqueness() {
+        // The v14 migration adds the `fix_agent_dispatches` audit table to an
+        // existing (pre-v14) DB, and its UNIQUE index on `source_run_id` is the
+        // durable single-fix-per-failed-run idempotency / double-fire backstop.
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        let db = Database {
+            path: db_path.to_string_lossy().to_string(),
+        };
+
+        // Seed a pre-v14 shape (just enough for the REFERENCES targets to exist)
+        // and stamp v13 so ONLY the v14 migration is pending. Drive
+        // `run_migrations` directly to isolate the transition.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runs (id TEXT PRIMARY KEY, workflow_id TEXT, started_at TEXT, status TEXT);
+                 CREATE TABLE workflows (id TEXT PRIMARY KEY, name TEXT);
+                 INSERT INTO runs (id) VALUES ('run-a');
+                 INSERT INTO workflows (id, name) VALUES ('wf-fix', 'Fixer');
+                 PRAGMA user_version = 13;",
+            )
+            .unwrap();
+            let has_table: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fix_agent_dispatches'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(has_table, 0, "pre-v14 fixture must not carry the table");
+        }
+
+        let conn = db.conn().unwrap();
+        db.run_migrations(&conn, 13).unwrap();
+
+        let has_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fix_agent_dispatches'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_table, 1, "v14 must add the fix_agent_dispatches table");
+
+        // The UNIQUE index rejects a second dispatch row for the same failed run
+        // (single-fix-per-failed-run idempotency at the storage layer).
+        conn.execute(
+            "INSERT INTO fix_agent_dispatches (id, source_run_id, fix_workflow_id, fix_run_id, initiator, dispatched_at)
+             VALUES ('d1', 'run-a', 'wf-fix', 'run-fix-1', 'ui', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let dup = conn.execute(
+            "INSERT INTO fix_agent_dispatches (id, source_run_id, fix_workflow_id, fix_run_id, initiator, dispatched_at)
+             VALUES ('d2', 'run-a', 'wf-fix', 'run-fix-2', 'ui', '2026-01-01T00:01:00Z')",
+            [],
+        );
+        assert!(
+            dup.is_err(),
+            "a second dispatch row for the same source_run_id must be rejected by the UNIQUE index"
         );
 
         let _ = std::fs::remove_dir_all(dir);
