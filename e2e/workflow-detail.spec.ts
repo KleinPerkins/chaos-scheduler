@@ -42,6 +42,8 @@ test.describe("Unified workflow detail", () => {
       .locator(".wd-runs-table")
       .getByRole("button", { name: /View details for run/ })
       .click();
-    await expect(page.getByText(/Raw Logs|Run/)).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: /run detail/i }),
+    ).toBeVisible();
   });
 });
