@@ -107,8 +107,9 @@ export function buildServer(deps: ServerDeps): McpServer {
       instructions:
         "Chaos Scheduler MCP server. Use these tools to register/inspect environments and " +
         "workflows, dispatch runs on demand (with idempotency keys), and read run results. " +
-        "Prefer `enqueue_workflow` over `run_workflow_now` when the scheduler manages " +
-        "concurrency. Read-only state is also available as `chaos://` resources.",
+        "Prefer `enqueue_workflow` for manual runs; `run_workflow_now` is a deprecated alias " +
+        "that also goes through admission control. Read-only state is also available as " +
+        "`chaos://` resources.",
     },
   );
 
@@ -374,10 +375,13 @@ export function buildServer(deps: ServerDeps): McpServer {
   tool(
     "run_workflow_now",
     {
-      title: "Run workflow now",
+      title: "Run workflow now (deprecated)",
       description:
-        "Dispatch a run immediately. Pass an idempotency_key for safe retries; a reused key " +
-        "returns the original run as {status:'duplicate'}.",
+        "DEPRECATED — use enqueue_workflow instead. Manual runs are admission-controlled: this " +
+        "posts to /run but takes the same queued admission path as enqueue_workflow (it does NOT " +
+        "execute immediately or bypass the queue) and returns the same result. Pass an " +
+        "idempotency_key for safe retries; a reused key returns the original run as " +
+        "{status:'duplicate'}.",
       inputSchema: {
         id: z.string(),
         idempotency_key: z.string().optional(),
@@ -751,7 +755,7 @@ export function buildServer(deps: ServerDeps): McpServer {
               `2. Summarize why it failed (exit code, stderr tail). Use \`get_run_logs\` when you only need stdout/stderr.\n` +
               `3. Inspect the owning workflow with \`get_workflow\`.\n` +
               `4. Propose a concrete fix, and if it is a transient failure, offer to re-run it ` +
-              `with \`run_workflow_now\` using a fresh idempotency key.`,
+              `with \`enqueue_workflow\` using a fresh idempotency key.`,
           },
         },
       ],
