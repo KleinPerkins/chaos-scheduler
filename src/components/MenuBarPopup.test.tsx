@@ -16,6 +16,7 @@ import {
   availableUpdateSnapshot,
   idleUpdateSnapshot,
 } from "../test/fixtures/data";
+import { resetWorkflowQueueRequests } from "../lib/workflowEnqueue";
 
 function installStrictIpcMocks(): void {
   const registry = createDefaultIpcRegistry();
@@ -91,5 +92,60 @@ describe("MenuBarPopup update row", () => {
     fireEvent.click(updateBtn);
 
     await waitFor(() => expect(installedVersion).toBe("0.2.0"));
+  });
+});
+
+describe("MenuBarPopup queue action", () => {
+  afterEach(async () => {
+    cleanup();
+    await new Promise((r) => setTimeout(r, 0));
+    clearMocks();
+    resetWorkflowQueueRequests();
+    delete window.__CHAOS_IPC_OVERRIDES__;
+  });
+
+  it("queues an upcoming run through admission control instead of firing immediately", async () => {
+    installStrictIpcMocks();
+    let enqueued = 0;
+    let triggered = 0;
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_scheduler_status: () => ({
+        active_workflows: 1,
+        running_count: 0,
+        next_runs: [
+          {
+            workflow_id: "wf-nightly",
+            workflow_name: "Nightly sync",
+            environment: "production",
+            next_time: new Date(Date.now() + 3_600_000).toISOString(),
+          },
+        ],
+        recent_runs: [],
+      }),
+      enqueue_workflow: () => {
+        enqueued += 1;
+        return {
+          workflow_id: "wf-nightly",
+          status: "queued",
+          queued_run_id: "queued-abcdef12",
+          queue_name: "default",
+        };
+      },
+      trigger_workflow: () => {
+        triggered += 1;
+        return "run-immediate";
+      },
+    };
+
+    render(<MenuBarPopup />);
+
+    const queueBtn = await screen.findByRole("button", {
+      name: "Queue Nightly sync",
+    });
+    fireEvent.click(queueBtn);
+
+    await waitFor(() => expect(enqueued).toBe(1));
+    expect(triggered).toBe(0);
+    expect(await screen.findByText(/Waiting to start/)).toBeInTheDocument();
   });
 });
