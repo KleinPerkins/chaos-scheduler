@@ -244,4 +244,25 @@ describe("RunDetail", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Check service health.")).toBeInTheDocument();
   });
+
+  it("returns to run history via the back control from the loaded view", async () => {
+    installStrictIpcMocks();
+    window.__CHAOS_IPC_OVERRIDES__ = {
+      get_run_log: () => ({ ...sampleRun }),
+    };
+    const onBack = vi.fn();
+
+    render(<RunDetail runId={sampleRun.id} onBack={onBack} />);
+
+    // Wait for the loaded detail region (not the loading/error state) so we are
+    // asserting the normal drill-down return path.
+    expect(
+      await screen.findByRole("region", {
+        name: `${sampleRun.workflow_name} run detail`,
+      }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Run history/i }));
+    expect(onBack).toHaveBeenCalledTimes(1);
+  });
 });
