@@ -15,7 +15,7 @@ const port = 5173;
  * macOS produces separate `-darwin` files that are gitignored.
  *
  * Determinism levers: fixed viewport at the native window sizes (960x680 main /
- * 340x440 popup), `reducedMotion: "reduce"` (drives the app's reduced-motion
+ * 384x590 popup), `reducedMotion: "reduce"` (drives the app's reduced-motion
  * CSS), `animations: "disabled"` + `caret: "hide"` on every screenshot, a
  * frozen clock (per spec), and the fixed mockIPC fixture data (VITE_PLAYWRIGHT).
  */

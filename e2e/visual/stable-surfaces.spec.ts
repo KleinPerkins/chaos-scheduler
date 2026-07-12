@@ -263,8 +263,8 @@ test.describe("stable surfaces — main window (960x680)", () => {
   });
 });
 
-test.describe("stable surfaces — menu bar popup (340x440)", () => {
-  test.use({ viewport: { width: 340, height: 440 } });
+test.describe("stable surfaces — menu bar popup (384x590)", () => {
+  test.use({ viewport: { width: 384, height: 590 } });
 
   test.beforeEach(async ({ page }) => {
     await page.clock.setFixedTime(FIXTURE_NOW);
@@ -274,24 +274,85 @@ test.describe("stable surfaces — menu bar popup (340x440)", () => {
     await page.addInitScript(() => {
       window.__CHAOS_IPC_OVERRIDES__ = {
         ...(window.__CHAOS_IPC_OVERRIDES__ ?? {}),
-        get_scheduler_status: () => ({
-          active_workflows: 1,
-          running_count: 0,
-          next_runs: [
+        // The mini-dashboard sources its glance from the Mission Control
+        // snapshot (running/failed tallies, live activity, upcoming, recent)
+        // plus the live queue depth from list_queued_runs.
+        get_mission_control_snapshot: () => ({
+          preferences: {
+            default_landing: "mission_control",
+            environment_filter: "all",
+            domain_filter: "all",
+          },
+          domains: [],
+          header: {
+            active_workflows: 4,
+            running_count: 2,
+            queued_count: 3,
+            recent_failures: 1,
+          },
+          sla: {
+            violations_count: 0,
+            success_rate_24h: 1,
+            median_wait_seconds: 0,
+            max_wait_seconds: 0,
+            long_running_count: 0,
+            blocked_count: 0,
+          },
+          needs_attention: [],
+          needs_attention_total: 0,
+          needs_attention_truncated: false,
+          live_activity: [
             {
-              workflow_id: "wf-demo-1",
+              id: "act-nightly",
+              workflow_id: "wf-nightly-sync",
               workflow_name: "Nightly sync",
               environment: "production",
-              next_time: "2026-07-04T12:30:00.000Z",
+              domain: "ops",
+              status: "running",
+              started_at: "2026-07-04T11:40:00.000Z",
+              finished_at: null,
+              run_id: "run-live-nightly",
+            },
+            {
+              id: "act-etl",
+              workflow_id: "wf-etl-rollup",
+              workflow_name: "ETL rollup",
+              environment: "production",
+              domain: "data",
+              status: "running",
+              started_at: "2026-07-04T11:16:00.000Z",
+              finished_at: null,
+              run_id: "run-live-etl",
             },
           ],
+          upcoming_runs: [
+            {
+              workflow_id: "wf-nightly-sync",
+              workflow_name: "Nightly sync",
+              environment: "production",
+              domain: "ops",
+              trigger_kind: "cron",
+              trigger_label: "0 15 * * *",
+              next_time: "2026-07-04T15:00:00.000Z",
+            },
+            {
+              workflow_id: "wf-weekly-report",
+              workflow_name: "Weekly report",
+              environment: "production",
+              domain: "ops",
+              trigger_kind: "cron",
+              trigger_label: "0 8 * * 1",
+              next_time: "2026-07-05T08:00:00.000Z",
+            },
+          ],
+          freshness_ledger: [],
           recent_runs: [
             {
               id: "run-demo-1",
-              workflow_id: "wf-demo-1",
+              workflow_id: "wf-nightly-sync",
               workflow_name: "Nightly sync",
-              started_at: "2026-07-04T12:00:00.000Z",
-              finished_at: "2026-07-04T12:00:00.000Z",
+              started_at: "2026-07-04T11:30:00.000Z",
+              finished_at: "2026-07-04T11:38:00.000Z",
               exit_code: 0,
               stdout: "ok",
               stderr: null,
@@ -299,8 +360,55 @@ test.describe("stable surfaces — menu bar popup (340x440)", () => {
               status: "succeeded",
               trigger_kind: "manual",
             },
+            {
+              id: "run-demo-2",
+              workflow_id: "wf-data-export",
+              workflow_name: "Data export",
+              started_at: "2026-07-04T11:05:00.000Z",
+              finished_at: "2026-07-04T11:12:00.000Z",
+              exit_code: 1,
+              stdout: null,
+              stderr: "boom",
+              result_url: null,
+              status: "failed",
+              trigger_kind: "manual",
+            },
           ],
+          workflow_telemetry: [],
+          availability: [],
         }),
+        list_queued_runs: () => [
+          {
+            id: "q1",
+            workflow_id: "wf-ingest",
+            workflow_name: "Ingest fan-out",
+            queue_name: "default",
+            environment: "production",
+            priority: 0,
+            status: "queued",
+            queued_at: "2026-07-04T11:58:00.000Z",
+          },
+          {
+            id: "q2",
+            workflow_id: "wf-search-index",
+            workflow_name: "Search reindex",
+            queue_name: "ml",
+            environment: "sandbox",
+            priority: 0,
+            status: "queued",
+            queued_at: "2026-07-04T11:59:00.000Z",
+          },
+          {
+            id: "q3",
+            workflow_id: "wf-weekly-report",
+            workflow_name: "Weekly report",
+            queue_name: "default",
+            environment: "production",
+            priority: 0,
+            status: "queued",
+            queued_at: "2026-07-04T11:59:30.000Z",
+          },
+        ],
         get_app_update_status: () => ({
           updater_available: true,
           phase: "available",
