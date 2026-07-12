@@ -14,6 +14,12 @@ updates:
         dependency-type: development
       npm-prod:
         dependency-type: production
+    # TS 7's native Go port drops the classic compiler JS API that
+    # typescript-eslint needs (peer dep caps at typescript <6.1.0), which
+    # crashes ESLint at import time. Lift once typescript-eslint supports TS 7.
+    ignore:
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   # Rust backend.
   - package-ecosystem: cargo
