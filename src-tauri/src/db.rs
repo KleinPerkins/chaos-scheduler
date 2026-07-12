@@ -2,6 +2,88 @@ use rusqlite::{params, types::Type, Connection, OptionalExtension, TransactionBe
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Canonical run-status classification — the single source of truth for
+/// "did this run finish, and did it finish OK?".
+///
+/// Every KPI/history aggregate and every scheduler dependency gate must derive
+/// its "ended OK" / "ended not-OK" / "in-flight" partition from this module.
+/// Historically the KPI SQL in `db.rs` and the terminal-status helpers in
+/// `scheduler.rs` maintained independent status lists that disagreed on
+/// `stale`, `poll_exhausted`, and `timed_out`, so the same run could count as a
+/// failure in one place, be invisible in another, and hang a `waits_for`
+/// downstream in a third. Adding a new terminal status now means editing
+/// exactly one of the slices below.
+pub mod run_status {
+    /// Runs that finished successfully. `succeeded` is a historical alias of
+    /// `success`.
+    pub const ENDED_OK: &[&str] = &["success", "succeeded"];
+
+    /// Runs that finished but did NOT succeed — every terminal, non-success
+    /// status. Keep in sync with the scheduler's failure handling.
+    pub const ENDED_NOT_OK: &[&str] = &[
+        "failed",
+        "cancelled",
+        "cascade-skipped",
+        "dead_letter",
+        "dead_lettered",
+        "stale",
+        "poll_exhausted",
+        "timed_out",
+    ];
+
+    /// In-flight runs that have not yet reached a terminal state.
+    pub const RUNNING: &[&str] = &["admitted", "running"];
+
+    /// True when `status` is a successful terminal status.
+    pub fn ended_ok(status: &str) -> bool {
+        ENDED_OK.contains(&status)
+    }
+
+    /// True when `status` is a terminal, non-success status.
+    pub fn ended_not_ok(status: &str) -> bool {
+        ENDED_NOT_OK.contains(&status)
+    }
+
+    /// True when `status` is terminal (finished), success or not.
+    pub fn is_terminal(status: &str) -> bool {
+        ended_ok(status) || ended_not_ok(status)
+    }
+
+    /// Render a slice of status tokens as the comma-separated body of a SQL
+    /// `IN (...)` list, e.g. `'success', 'succeeded'`. Only ever called with the
+    /// compile-time constants above (never user input), so there is no
+    /// injection surface.
+    fn sql_in_list(values: &[&str]) -> String {
+        values
+            .iter()
+            .map(|value| format!("'{value}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// SQL `IN (...)` body for the successful terminal statuses.
+    pub fn ended_ok_sql() -> String {
+        sql_in_list(ENDED_OK)
+    }
+
+    /// SQL `IN (...)` body for the non-success terminal statuses.
+    pub fn ended_not_ok_sql() -> String {
+        sql_in_list(ENDED_NOT_OK)
+    }
+
+    /// SQL `IN (...)` body for every terminal status (OK + not-OK).
+    pub fn terminal_sql() -> String {
+        let mut all = ENDED_OK.to_vec();
+        all.extend_from_slice(ENDED_NOT_OK);
+        sql_in_list(&all)
+    }
+
+    /// SQL `IN (...)` body for the in-flight statuses.
+    pub fn running_sql() -> String {
+        sql_in_list(RUNNING)
+    }
+}
+
 fn default_utc() -> String {
     "UTC".to_string()
 }
@@ -3733,9 +3815,10 @@ impl Database {
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT
+            &format!(
+                "SELECT
                 COUNT(DISTINCT CASE WHEN w.enabled = 1 THEN w.id END) AS active_workflows,
-                SUM(CASE WHEN r.status IN ('admitted', 'running') THEN 1 ELSE 0 END) AS running_count,
+                SUM(CASE WHEN r.status IN ({running}) THEN 1 ELSE 0 END) AS running_count,
                 (SELECT COUNT(*)
                    FROM queued_runs q JOIN workflows qw ON qw.id = q.workflow_id
                   WHERE q.status IN ('queued', 'admitted')
@@ -3743,7 +3826,7 @@ impl Database {
                     AND (?2 = 'all'
                       OR (?2 = '__unowned__' AND (qw.domain IS NULL OR TRIM(qw.domain) = ''))
                       OR TRIM(qw.domain) = ?2)) AS queued_count,
-                SUM(CASE WHEN r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
+                SUM(CASE WHEN r.status IN ({ended_not_ok})
                           AND datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', '-1 day')
                          THEN 1 ELSE 0 END) AS recent_failures
              FROM workflows w
@@ -3752,6 +3835,9 @@ impl Database {
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
+                running = run_status::running_sql(),
+                ended_not_ok = run_status::ended_not_ok_sql(),
+            ),
             params![environment_filter, domain_filter],
             |row| {
                 Ok(MissionControlHeader {
@@ -3778,16 +3864,20 @@ impl Database {
         let domain_filter = normalize_mission_domain_filter(domain_filter);
         let conn = self.conn()?;
         let (total, succeeded): (i64, i64) = conn.query_row(
-            "SELECT COUNT(*),
-                    SUM(CASE WHEN r.status IN ('success', 'succeeded') THEN 1 ELSE 0 END)
+            &format!(
+                "SELECT COUNT(*),
+                    SUM(CASE WHEN r.status IN ({ended_ok}) THEN 1 ELSE 0 END)
              FROM runs r
              JOIN workflows w ON w.id = r.workflow_id
              WHERE datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?3)
-               AND r.status IN ('success', 'succeeded', 'failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')
+               AND r.status IN ({terminal})
                AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
                AND (?2 = 'all'
                  OR (?2 = '__unowned__' AND (w.domain IS NULL OR TRIM(w.domain) = ''))
                  OR TRIM(w.domain) = ?2)",
+                ended_ok = run_status::ended_ok_sql(),
+                terminal = run_status::terminal_sql(),
+            ),
             params![environment_filter, domain_filter, window_modifier],
             |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
         )?;
@@ -3903,10 +3993,11 @@ impl Database {
             Option<f64>,
             Option<f64>,
         ) = conn.query_row(
-            "SELECT
+            &format!(
+                "SELECT
                 COUNT(*),
-                SUM(CASE WHEN r.status IN ('success', 'succeeded') THEN 1 ELSE 0 END),
-                SUM(CASE WHEN r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered') THEN 1 ELSE 0 END),
+                SUM(CASE WHEN r.status IN ({ended_ok}) THEN 1 ELSE 0 END),
+                SUM(CASE WHEN r.status IN ({ended_not_ok}) THEN 1 ELSE 0 END),
                 AVG(CASE WHEN r.finished_at IS NOT NULL THEN (julianday(r.finished_at) - julianday(r.started_at)) * 86400 END),
                 MAX(CASE WHEN r.finished_at IS NOT NULL THEN (julianday(r.finished_at) - julianday(r.started_at)) * 86400 END)
              FROM runs r
@@ -3914,6 +4005,9 @@ impl Database {
              WHERE datetime(COALESCE(r.finished_at, r.started_at)) >= datetime('now', ?2)
                AND datetime(COALESCE(r.finished_at, r.started_at)) < datetime('now', ?3)
                AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)",
+                ended_ok = run_status::ended_ok_sql(),
+                ended_not_ok = run_status::ended_not_ok_sql(),
+            ),
             params![environment_filter, lower_modifier, upper_modifier],
             |row| {
                 Ok((
@@ -4102,14 +4196,16 @@ impl Database {
         let sql = format!(
             "SELECT {bucket_expr} AS bucket,
                     COUNT(*) AS total,
-                    SUM(CASE WHEN r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered') THEN 1 ELSE 0 END) AS failed,
-                    SUM(CASE WHEN r.status IN ('success', 'succeeded') THEN 1 ELSE 0 END) AS succeeded
+                    SUM(CASE WHEN r.status IN ({ended_not_ok}) THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN r.status IN ({ended_ok}) THEN 1 ELSE 0 END) AS succeeded
              FROM runs r
              JOIN workflows w ON w.id = r.workflow_id
              WHERE datetime(r.started_at) >= datetime('now', ?2)
                AND (?1 = 'all' OR COALESCE(NULLIF(w.environment, ''), 'production') = ?1)
              GROUP BY bucket
-             ORDER BY bucket ASC"
+             ORDER BY bucket ASC",
+            ended_not_ok = run_status::ended_not_ok_sql(),
+            ended_ok = run_status::ended_ok_sql(),
         );
         let conn = self.conn()?;
         let mut stmt = conn.prepare(&sql)?;
@@ -4308,11 +4404,11 @@ impl Database {
     ) -> rusqlite::Result<Vec<DashboardWorkflowFailureCount>> {
         let environment_filter = normalize_mission_environment_filter(environment_filter);
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT w.id,
                     w.name,
                     COALESCE(NULLIF(w.environment, ''), 'production') AS env,
-                    SUM(CASE WHEN r.status IN ('failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered') THEN 1 ELSE 0 END) AS failures,
+                    SUM(CASE WHEN r.status IN ({ended_not_ok}) THEN 1 ELSE 0 END) AS failures,
                     COUNT(r.id) AS total
              FROM workflows w
              JOIN runs r ON r.workflow_id = w.id
@@ -4321,7 +4417,8 @@ impl Database {
              GROUP BY w.id
              HAVING failures > 0
              ORDER BY failures DESC, total DESC, w.name ASC",
-        )?;
+            ended_not_ok = run_status::ended_not_ok_sql(),
+        ))?;
         let rows = stmt.query_map(params![environment_filter, window_modifier], |row| {
             Ok(DashboardWorkflowFailureCount {
                 workflow_id: row.get(0)?,
@@ -5442,11 +5539,15 @@ impl Database {
             if let Some(min_rate) = sla.get("min_success_rate_24h").and_then(|v| v.as_f64()) {
                 let conn = self.conn()?;
                 let (total, succeeded): (i64, i64) = conn.query_row(
-                    "SELECT COUNT(*), SUM(CASE WHEN status IN ('success', 'succeeded') THEN 1 ELSE 0 END)
+                    &format!(
+                        "SELECT COUNT(*), SUM(CASE WHEN status IN ({ended_ok}) THEN 1 ELSE 0 END)
                      FROM runs
                      WHERE workflow_id = ?1
                        AND datetime(started_at) >= datetime('now', '-1 day')
-                       AND status IN ('success', 'succeeded', 'failed', 'cancelled', 'cascade-skipped', 'dead_letter', 'dead_lettered')",
+                       AND status IN ({terminal})",
+                        ended_ok = run_status::ended_ok_sql(),
+                        terminal = run_status::terminal_sql(),
+                    ),
                     params![workflow.id],
                     |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
                 )?;
@@ -6686,6 +6787,52 @@ fn queue_tags_from_config(queue_config: Option<&str>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_status_canonicalizes_poll_exhausted_and_stale_as_ended_not_ok() {
+        use run_status::{ended_not_ok, ended_ok, is_terminal, ENDED_NOT_OK, ENDED_OK, RUNNING};
+
+        // The disagreement this canonical set resolves: `poll_exhausted`,
+        // `stale`, and `timed_out` are terminal, non-success statuses. Each
+        // counts as endedNotOk — never as endedOk, never as in-flight.
+        for status in ["poll_exhausted", "stale", "timed_out"] {
+            assert!(ended_not_ok(status), "{status} must be endedNotOk");
+            assert!(!ended_ok(status), "{status} must not be endedOk");
+            assert!(is_terminal(status), "{status} must be terminal");
+            assert!(!RUNNING.contains(&status), "{status} must not be running");
+        }
+
+        // endedOk is exactly `success` + its `succeeded` alias.
+        assert_eq!(ENDED_OK, ["success", "succeeded"].as_slice());
+        for &status in ENDED_OK {
+            assert!(ended_ok(status));
+            assert!(!ended_not_ok(status));
+            assert!(is_terminal(status));
+        }
+
+        // Pin the full non-success terminal set so a new status must be added
+        // here (the single source of truth) rather than in a scattered call-site.
+        assert_eq!(ENDED_NOT_OK.len(), 8);
+        for status in [
+            "failed",
+            "cancelled",
+            "cascade-skipped",
+            "dead_letter",
+            "dead_lettered",
+            "stale",
+            "poll_exhausted",
+            "timed_out",
+        ] {
+            assert!(ended_not_ok(status), "{status} must be endedNotOk");
+            assert!(!ended_ok(status), "{status} must not be endedOk");
+        }
+
+        // The in-flight set is terminal-free and failure-free.
+        for &status in RUNNING {
+            assert!(!is_terminal(status), "{status} must be in-flight");
+            assert!(!ended_not_ok(status), "{status} must be in-flight");
+        }
+    }
 
     fn fk_delete_action(conn: &Connection, table: &str, from_col: &str) -> String {
         let mut stmt = conn
