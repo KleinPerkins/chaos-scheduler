@@ -4621,6 +4621,217 @@ mod tests {
     }
 
     #[test]
+    fn local_fix_push_failure_surfaces_local_error_and_teardown_is_orphan_safe() {
+        // Missing-test: gh/git/push FAILURE contract. The app's OWN credentialed
+        // push fails for real here (the repo has NO `origin` remote), so
+        // run_local_fix_flow surfaces an APP-AUTHORED Local error (never raw git
+        // stderr — origin is public), opens NO PR, and the FixWorktree Drop is
+        // the orphan-safe FINALLY: the throwaway worktree AND its chaos-fix/<run>
+        // branch are gone afterward, leaving nothing for the startup sweep. The
+        // single-flight claim rollback on ANY Err is the dispatch thread's
+        // uniform Err arm (service.rs) — we exercise that exact two-step FINALLY
+        // (delete claim, then Drop) and assert both the release and the prune.
+        if !git_available() {
+            return;
+        }
+        let repo = init_git_repo(); // deliberately NO origin remote
+        let db_dir = tmpdir();
+        let db = Arc::new(Database::new(&db_dir));
+        let (src_wf_id, src_run_id) =
+            seed_failed_local_source(&db, "sandbox", "CHECK=1 && test -f fixed.txt");
+        let src_wf = db.get_workflow(&src_wf_id).unwrap();
+        let fix_wf_id = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        let claim = db
+            .insert_fix_agent_dispatch(&src_run_id, &fix_wf_id, None, "ui", "local")
+            .unwrap();
+        let worktree =
+            crate::fix_worktree::create_fix_worktree(repo.to_str().unwrap(), &src_run_id).unwrap();
+        let wt_path = worktree.path().to_path_buf();
+
+        // Agent edits + rerun go green; the REAL push then fails (no origin).
+        let runner = FixFlowRunner::new(true, Some("fixed.txt")).with_real_push();
+        let err = run_local_fix_flow(
+            &db,
+            LocalFixFlow {
+                workspace_root: repo.to_str().unwrap(),
+                python_path: "python3",
+                source_run_id: &src_run_id,
+                source_workflow: &src_wf,
+                prompt: "please fix",
+                worktree: &worktree,
+                claim_id: &claim.id,
+                runner: &runner,
+                rerun_timeout: std::time::Duration::from_secs(30),
+                poll_interval: std::time::Duration::from_millis(10),
+            },
+        )
+        .expect_err("a failed push must surface an error");
+        assert!(
+            matches!(err, FixAgentError::Local(_)),
+            "app-authored Local error"
+        );
+        if let FixAgentError::Local(msg) = &err {
+            assert!(
+                !msg.to_lowercase().contains("origin"),
+                "the operator-facing error must not leak raw git stderr: {msg}"
+            );
+        }
+        // We failed at/after the push, so no PR was opened.
+        assert!(runner.find("gh").is_none(), "no PR on a failed push");
+
+        // The dispatch thread's uniform FINALLY on any Err (see the spawn in
+        // dispatch_fix_agent_local): roll the claim back, then Drop the worktree.
+        assert!(
+            db.get_fix_agent_dispatch_for_source_run(&src_run_id)
+                .unwrap()
+                .is_some(),
+            "the claim is still live until the caller's Err arm releases it"
+        );
+        let _ = db.delete_fix_agent_dispatch(&claim.id);
+        assert!(
+            db.get_fix_agent_dispatch_for_source_run(&src_run_id)
+                .unwrap()
+                .is_none(),
+            "the single-flight claim is rolled back on a push failure"
+        );
+        drop(worktree);
+        assert!(!wt_path.exists(), "worktree torn down on drop");
+        let leftover = git_read(&repo, &["branch", "--list", "chaos-fix/*"]);
+        assert!(
+            leftover.is_empty(),
+            "the fix branch is pruned (orphan-safe), leftover: {leftover:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&db_dir);
+    }
+
+    #[test]
+    fn local_fix_is_idempotent_a_second_local_dispatch_opens_no_second_pr() {
+        // Missing-test: end-to-end idempotency — the DRAFT PR is opened exactly
+        // ONCE. A GREEN rerun opens the PR and KEEPS its single-flight claim
+        // (status pr_opened), so a SECOND local dispatch for the SAME source run
+        // short-circuits as "duplicate" — no second agent, no second PR. (The
+        // queued-drain admission/resolution that feeds the green rerun is unit-
+        // covered by the await_rerun_terminal_* tests.)
+        if !git_available() {
+            return;
+        }
+        let repo = init_git_repo();
+        let db_dir = tmpdir();
+        let db = Arc::new(Database::new(&db_dir));
+        let (src_wf_id, src_run_id) =
+            seed_failed_local_source(&db, "sandbox", "CHECK=1 && test -f fixed.txt");
+        let src_wf = db.get_workflow(&src_wf_id).unwrap();
+        let fix_wf_id = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        let claim = db
+            .insert_fix_agent_dispatch(&src_run_id, &fix_wf_id, None, "ui", "local")
+            .unwrap();
+        let worktree =
+            crate::fix_worktree::create_fix_worktree(repo.to_str().unwrap(), &src_run_id).unwrap();
+
+        let runner = FixFlowRunner::new(true, Some("fixed.txt"));
+        let outcome = run_local_fix_flow(
+            &db,
+            LocalFixFlow {
+                workspace_root: repo.to_str().unwrap(),
+                python_path: "python3",
+                source_run_id: &src_run_id,
+                source_workflow: &src_wf,
+                prompt: "please fix",
+                worktree: &worktree,
+                claim_id: &claim.id,
+                runner: &runner,
+                rerun_timeout: std::time::Duration::from_secs(30),
+                poll_interval: std::time::Duration::from_millis(10),
+            },
+        )
+        .expect("flow opens a PR");
+        assert_eq!(outcome.status, "pr_opened");
+        // A green PR KEEPS its claim — that is what the source-run idempotency
+        // gate keys off to reject a re-dispatch.
+        assert!(
+            db.get_fix_agent_dispatch_for_source_run(&src_run_id)
+                .unwrap()
+                .is_some(),
+            "a green PR keeps its single-flight claim"
+        );
+        drop(worktree);
+
+        // A SECOND dispatch for the SAME source run is refused as duplicate
+        // BEFORE the lease/agent/rerun — the idempotency gate precedes them.
+        let svc = service_with_db(db.clone(), vec![], false);
+        enable_fix_agent(&db, &fix_wf_id, 5);
+        let dup = svc
+            .dispatch_fix_agent_local(repo.to_str().unwrap(), "python3", &src_run_id, "ui")
+            .expect("second dispatch replays");
+        assert_eq!(dup.status, "duplicate", "the PR is opened exactly once");
+
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&db_dir);
+    }
+
+    #[test]
+    fn local_fix_dispatch_refuses_an_http_cloud_source_mode_confusion() {
+        // Missing-test: orchestrator-level mode-confusion guard. Even though a
+        // LOCAL fix is requested, an http / cloud (non-local-tree-reading) SOURCE
+        // cannot be validated by rerunning it against a local edit, so
+        // dispatch_fix_agent_local refuses it in the preflight — before any
+        // claim, spend, thread, or lease. (The pure gate is unit-tested in
+        // fix_local; this asserts the orchestrator wires it in.)
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec![], false);
+        let fix = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        enable_fix_agent(&db, &fix, 5);
+
+        // A NON-prod http source (typed operator): passes the env gate, fails the
+        // local-tree-reading gate.
+        let src_wf = db
+            .create_workflow(
+                "Http Source",
+                None,
+                "unused",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "sandbox",
+                None,
+                None,
+                Some(r#"{"queue":"sandbox-default"}"#),
+            )
+            .unwrap();
+        db.set_workflow_spec(
+            &src_wf.id,
+            "typed",
+            Some(r#"{"kind":"typed","typed":{"operator_type":"http","config":{}}}"#),
+        )
+        .unwrap();
+        let run = db
+            .create_run_with_context(&src_wf.id, Some("cron"), None, None, None, None)
+            .unwrap();
+        db.finish_run(&run.id, 1, "out", "boom", None).unwrap();
+
+        let err = svc
+            .dispatch_fix_agent_local(dir.to_str().unwrap(), "python3", &run.id, "ui")
+            .unwrap_err();
+        assert!(matches!(err, FixAgentError::SourceNotEligible(_)));
+        // Refused before the commitment point: no claim and no spend recorded.
+        assert!(db
+            .get_fix_agent_dispatch_for_source_run(&run.id)
+            .unwrap()
+            .is_none());
+        let since = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        assert_eq!(
+            db.count_fix_agent_spend_since(&since).unwrap(),
+            0,
+            "a refused mode-confusion dispatch records no spend"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn await_rerun_terminal_times_out_when_no_run_finishes() {
         // M6 bounded poll: if the rerun never reaches a terminal state within the
         // budget, the flow gives up (never blocks forever).
