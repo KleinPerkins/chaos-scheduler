@@ -153,6 +153,41 @@ fn git_checked(runner: &dyn ProcessRunner, root: &str, args: &[&str]) -> Result<
 }
 
 // ---------------------------------------------------------------------------
+// PR-base divergence preflight (option 1) — runtime probe over workspace_root
+// ---------------------------------------------------------------------------
+
+/// Runtime side of the option-1 PR-base preflight. Probes whether `origin/main`
+/// is an ancestor of the workspace_root's HEAD and delegates the decision to the
+/// PURE [`crate::fix_local::fix_pr_base_preflight`]. Called by the local-fix
+/// preflight BEFORE the throwaway worktree/branch is created and BEFORE the
+/// agent runs, so a diverged checkout aborts the flow with zero side effects.
+pub fn ensure_pr_base_not_diverged(
+    runner: &dyn ProcessRunner,
+    workspace_root: &str,
+) -> Result<(), crate::fix_local::FixPrBaseRefusal> {
+    let is_ancestor = origin_main_is_ancestor_of_head(runner, workspace_root);
+    crate::fix_local::fix_pr_base_preflight(is_ancestor)
+}
+
+/// Whether `origin/main` is an ancestor of the workspace HEAD, via
+/// `git -C <workspace_root> merge-base --is-ancestor origin/main HEAD`. FAIL
+/// CLOSED: ONLY a clean exit 0 is `true` (origin/main reachable from HEAD); a
+/// non-zero exit (proven divergence, or a bad/absent `origin/main` ref) OR a
+/// `git` spawn failure all map to `false`, so an unverifiable checkout is
+/// treated exactly like a diverged one. Reuses the module's [`run_git`] plumbing
+/// (which strips inherited git context) — no new git-invocation pattern.
+fn origin_main_is_ancestor_of_head(runner: &dyn ProcessRunner, workspace_root: &str) -> bool {
+    match run_git(
+        runner,
+        workspace_root,
+        &["merge-base", "--is-ancestor", "origin/main", "HEAD"],
+    ) {
+        Ok(out) => out.status.success(),
+        Err(_) => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Create / cleanup a single fix worktree
 // ---------------------------------------------------------------------------
 
@@ -674,6 +709,99 @@ mod tests {
         assert!(
             !String::from_utf8_lossy(&after.stdout).contains(&branch),
             "sweep deleted the orphaned fix branch"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Run a git command in `repo`, asserting success (test-setup plumbing).
+    fn git_run(repo: &Path, args: &[&str]) {
+        assert!(
+            git_cmd()
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "git {args:?} failed in test repo setup"
+        );
+    }
+
+    #[test]
+    fn pr_base_preflight_refuses_a_diverged_checkout() {
+        // FAILING-FIRST: exercises the option-1 PR-base preflight over a REAL
+        // repo whose HEAD has DIVERGED from origin/main. `feature` advances to a
+        // commit main never sees, while main advances to a DIFFERENT commit
+        // published as origin/main — so origin/main is NOT an ancestor of the
+        // (checked-out) feature HEAD, and a base=main PR would show unrelated
+        // ancestry. The preflight MUST refuse.
+        if !is_git() {
+            return;
+        }
+        let repo = init_repo(); // main @ C1, HEAD = C1
+        let repo_str = repo.to_str().unwrap();
+        git_run(&repo, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo.join("feature.txt"), "f").unwrap();
+        git_run(&repo, &["add", "-A"]);
+        git_run(&repo, &["commit", "-qm", "feature C2"]);
+        git_run(&repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("main.txt"), "m").unwrap();
+        git_run(&repo, &["add", "-A"]);
+        git_run(&repo, &["commit", "-qm", "main C3"]);
+        git_run(&repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+        git_run(&repo, &["checkout", "-q", "feature"]);
+
+        let runner = SystemProcessRunner;
+        assert_eq!(
+            ensure_pr_base_not_diverged(&runner, repo_str).unwrap_err(),
+            crate::fix_local::FixPrBaseRefusal::OriginMainNotAncestorOfHead,
+            "a diverged checkout must be refused by the PR-base preflight"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn pr_base_preflight_allows_when_head_descends_from_origin_main() {
+        // Positive case: origin/main is published at C1, then HEAD advances to a
+        // descendant C2, so origin/main IS an ancestor of HEAD — a base=main PR
+        // shows only the fix. The preflight must ALLOW the flow.
+        if !is_git() {
+            return;
+        }
+        let repo = init_repo(); // main @ C1, HEAD = C1
+        let repo_str = repo.to_str().unwrap();
+        git_run(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        std::fs::write(repo.join("ahead.txt"), "a").unwrap();
+        git_run(&repo, &["add", "-A"]);
+        git_run(&repo, &["commit", "-qm", "ahead C2"]);
+
+        let runner = SystemProcessRunner;
+        assert!(
+            ensure_pr_base_not_diverged(&runner, repo_str).is_ok(),
+            "origin/main being an ancestor of HEAD must be allowed"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn pr_base_preflight_fails_closed_when_origin_main_is_absent() {
+        // Fail-closed: with no origin/main ref at all, the ancestry probe errors
+        // (git exits non-zero); the preflight must REFUSE rather than proceed on
+        // an unverifiable checkout.
+        if !is_git() {
+            return;
+        }
+        let repo = init_repo();
+        let repo_str = repo.to_str().unwrap();
+
+        let runner = SystemProcessRunner;
+        assert_eq!(
+            ensure_pr_base_not_diverged(&runner, repo_str).unwrap_err(),
+            crate::fix_local::FixPrBaseRefusal::OriginMainNotAncestorOfHead,
+            "an unverifiable (absent origin/main) checkout fails closed"
         );
 
         let _ = std::fs::remove_dir_all(&repo);

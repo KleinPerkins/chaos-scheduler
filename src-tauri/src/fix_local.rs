@@ -183,6 +183,56 @@ pub fn ensure_fix_rerun_source_allowed(
 }
 
 // ---------------------------------------------------------------------------
+// PR-base divergence preflight (option 1) — refuse a diverged checkout.
+// ---------------------------------------------------------------------------
+
+/// Why a LOCAL fix is refused BEFORE it starts (the "option 1" preflight for the
+/// PR-base divergence Bugbot finding). The fix flow opens its DRAFT PR against a
+/// CONSTANT base of `main` ([`crate::service`]'s `FIX_LOCAL_PR_BASE`). If the
+/// workspace checkout's HEAD has diverged from `origin/main` (a feature-branch /
+/// ahead checkout where `origin/main` is NOT an ancestor of HEAD), a PR with
+/// base=main would splice UNRELATED ancestry beside the fix. The conservative
+/// option-1 fix REFUSES up front rather than opening such a PR (a parameterized
+/// / feature-branch base is a deliberately-deferred future enhancement).
+#[derive(Debug, PartialEq, Eq)]
+pub enum FixPrBaseRefusal {
+    /// `origin/main` is NOT an ancestor of the workspace HEAD (a diverged /
+    /// ahead checkout) — OR the ancestry probe could not be executed at all.
+    /// Both collapse here so the preflight FAILS CLOSED: an unverifiable
+    /// ancestry is treated exactly like a proven divergence.
+    OriginMainNotAncestorOfHead,
+}
+
+impl std::fmt::Display for FixPrBaseRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FixPrBaseRefusal::OriginMainNotAncestorOfHead => write!(
+                f,
+                "local fix refused: origin/main is not an ancestor of HEAD (diverged checkout); \
+                 the PR base would show unrelated ancestry"
+            ),
+        }
+    }
+}
+
+/// PURE option-1 PR-base preflight decision. Allows the LOCAL fix only when
+/// `origin/main` is an ancestor of the workspace HEAD. Its sole input is the
+/// ancestry boolean — computed by the runtime wrapper that shells out to `git`
+/// (see [`crate::fix_worktree::ensure_pr_base_not_diverged`]) — so the security-
+/// critical decision is independently testable free of any repo I/O. FAIL
+/// CLOSED: the caller passes `false` for BOTH "not an ancestor" AND "the
+/// ancestry probe could not run", so an unverifiable checkout is refused too.
+pub fn fix_pr_base_preflight(
+    origin_main_is_ancestor_of_head: bool,
+) -> Result<(), FixPrBaseRefusal> {
+    if origin_main_is_ancestor_of_head {
+        Ok(())
+    } else {
+        Err(FixPrBaseRefusal::OriginMainNotAncestorOfHead)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // M4 — app-authored, human-review-gated draft PR.
 // ---------------------------------------------------------------------------
 
@@ -433,6 +483,26 @@ mod tests {
     #[test]
     fn m3_unparseable_spec_fails_closed() {
         assert!(!source_is_local_tree_reading(Some("{not json")));
+    }
+
+    // ---- Option-1 PR-base preflight -------------------------------------
+
+    #[test]
+    fn pr_base_preflight_allows_when_origin_main_is_ancestor_of_head() {
+        // A normal on-/ahead-of-main checkout: origin/main IS reachable from
+        // HEAD, so a base=main PR shows only the fix — the flow may proceed.
+        assert!(fix_pr_base_preflight(true).is_ok());
+    }
+
+    #[test]
+    fn pr_base_preflight_refuses_a_diverged_checkout_and_fails_closed() {
+        // `false` is passed for BOTH a proven divergence AND an unrunnable
+        // ancestry probe, so this single case pins the fail-closed contract:
+        // an unverifiable/diverged checkout is refused, never allowed through.
+        assert_eq!(
+            fix_pr_base_preflight(false).unwrap_err(),
+            FixPrBaseRefusal::OriginMainNotAncestorOfHead
+        );
     }
 
     // ---- M4 -------------------------------------------------------------

@@ -337,6 +337,12 @@ pub enum FixAgentError {
     /// rerun — production environment or a non-local-tree-reading type. Carries
     /// the human-readable reason.
     SourceNotEligible(String),
+    /// (LOCAL mode, option-1 PR-base preflight) The workspace checkout's HEAD
+    /// has diverged from `origin/main` (origin/main is NOT an ancestor of HEAD,
+    /// or the ancestry could not be verified), so a DRAFT PR based on `main`
+    /// would show unrelated ancestry. Refused up front, fail-closed. Carries the
+    /// human-readable reason.
+    PrBaseDiverged(String),
     /// (LOCAL mode, M6) Another local fix already holds the process-global
     /// working-tree exclusivity lease; only one fix runs at a time.
     Busy,
@@ -372,6 +378,7 @@ impl std::fmt::Display for FixAgentError {
                 "a fix agent can only be dispatched for a failed run (this run is '{status}')"
             ),
             FixAgentError::SourceNotEligible(reason) => write!(f, "{reason}"),
+            FixAgentError::PrBaseDiverged(reason) => write!(f, "{reason}"),
             FixAgentError::Busy => write!(
                 f,
                 "another local fix is already in progress; only one runs at a time"
@@ -1447,8 +1454,12 @@ impl SchedulerService {
     ///    command against edited code, so it must be local + non-prod).
     /// 5. **idempotency** — one fix per failed run; a second dispatch replays.
     /// 6. **rate cap** — global per-hour ceiling across DISTINCT failed runs.
-    /// 7. **exclusivity lease (M6)** — one local fix in flight at a time.
-    /// 8. **single-flight claim** — insert the durable audit/claim row BEFORE the
+    /// 7. **PR-base preflight (option 1)** — refuse a workspace checkout whose
+    ///    HEAD has diverged from origin/main (origin/main not an ancestor of
+    ///    HEAD), so the base=main DRAFT PR cannot splice unrelated ancestry;
+    ///    fail-closed, and BEFORE any state mutation (lease/claim/spend/thread).
+    /// 8. **exclusivity lease (M6)** — one local fix in flight at a time.
+    /// 9. **single-flight claim** — insert the durable audit/claim row BEFORE the
     ///    agent runs; the orchestrator thread ROLLS IT BACK on any failure.
     ///
     /// Returns as soon as the flow is handed to its thread (status `dispatched`).
@@ -1541,6 +1552,24 @@ impl SchedulerService {
             return Err(FixAgentError::RateLimited {
                 max_per_hour: prefs.max_dispatches_per_hour,
             });
+        }
+
+        // Option-1 PR-base preflight (Bugbot: PR-base divergence). The fix flow
+        // opens its DRAFT PR against a CONSTANT base of `main` (FIX_LOCAL_PR_BASE).
+        // If the workspace checkout's HEAD has DIVERGED from origin/main
+        // (origin/main is NOT an ancestor of HEAD — a feature-branch / ahead
+        // checkout), a base=main PR would splice UNRELATED ancestry beside the
+        // fix. Refuse here — the LAST read-only gate, AFTER idempotency + the
+        // rate cap (so a duplicate still replays its existing PR, and a legit
+        // dispatch shells out to git only once) and BEFORE any state mutation
+        // (lease / claim / spend / thread / worktree / agent), so a refusal
+        // leaves ZERO side effects. Fail-closed (an unverifiable ancestry is
+        // treated as a divergence); a parameterized/feature-branch base is a
+        // deliberately-deferred future enhancement.
+        if let Err(refusal) =
+            crate::fix_worktree::ensure_pr_base_not_diverged(&SystemProcessRunner, workspace_root)
+        {
+            return Err(FixAgentError::PrBaseDiverged(refusal.to_string()));
         }
 
         // M6: take the process-global exclusivity slot BEFORE claiming, so a
@@ -3715,6 +3744,53 @@ mod tests {
         remote
     }
 
+    /// A real one-commit repo on `main` whose HEAD descends from origin/main, so
+    /// the option-1 PR-base preflight in `dispatch_fix_agent_local` ALLOWS the
+    /// flow. Used by dispatch-level tests that must reach the gates AFTER the
+    /// preflight (lease / claim / spend / thread). origin/main is published at
+    /// HEAD — a commit is its own ancestor — the minimal "not diverged" state.
+    fn init_git_repo_on_main_ancestor() -> std::path::PathBuf {
+        let repo = init_git_repo();
+        let out = real_git(
+            &[
+                "update-ref".to_string(),
+                "refs/remotes/origin/main".to_string(),
+                "HEAD".to_string(),
+            ],
+            repo.to_str(),
+        );
+        assert!(
+            out.status.success(),
+            "failed to seed refs/remotes/origin/main"
+        );
+        repo
+    }
+
+    /// Pre-create + check out the throwaway fix branch for `source_run_id` in
+    /// `repo`, so a later `create_fix_worktree` (`git worktree add -b
+    /// chaos-fix/<id>`) fails DETERMINISTICALLY on the dispatch thread — BEFORE
+    /// the real `cursor-agent` would run. Now that the fail-closed PR-base
+    /// preflight rejects a bare non-repo workspace up front, this is how the
+    /// claim/spend/rollback dispatch tests force a hermetic thread-side failure
+    /// without an external agent. `-B … HEAD` is idempotent across loop rounds.
+    fn occupy_fix_branch(repo: &std::path::Path, source_run_id: &str) {
+        let branch = format!("chaos-fix/{source_run_id}");
+        let out = real_git(
+            &[
+                "checkout".to_string(),
+                "-q".to_string(),
+                "-B".to_string(),
+                branch,
+                "HEAD".to_string(),
+            ],
+            repo.to_str(),
+        );
+        assert!(
+            out.status.success(),
+            "failed to pre-occupy the fix branch for the hermetic thread-failure setup"
+        );
+    }
+
     /// Seed a non-cron `command` source workflow (local-tree-reading) in
     /// `environment` whose command is `command`, plus a FAILED run for it.
     fn seed_failed_local_source(
@@ -4524,6 +4600,9 @@ mod tests {
     fn local_fix_dispatch_is_busy_when_a_fix_is_already_in_flight() {
         // M6: the process-global exclusivity lease bounds the flow to one fix at
         // a time; a second dispatch while the lease is held is refused as Busy.
+        if !git_available() {
+            return;
+        }
         let _serial = crate::fix_worktree::LEASE_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -4533,14 +4612,18 @@ mod tests {
         let fix = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
         enable_fix_agent(&db, &fix, 5);
         let (_wf, src_run) = seed_failed_local_source(&db, "sandbox", "true");
+        // A non-diverged checkout so the flow reaches the lease gate (the
+        // option-1 PR-base preflight runs just BEFORE the lease).
+        let repo = init_git_repo_on_main_ancestor();
 
         let held = crate::fix_worktree::acquire_worktree_lease().expect("test holds the lease");
         let err = svc
-            .dispatch_fix_agent_local(dir.to_str().unwrap(), "python3", &src_run, "ui")
+            .dispatch_fix_agent_local(repo.to_str().unwrap(), "python3", &src_run, "ui")
             .unwrap_err();
         assert!(matches!(err, FixAgentError::Busy));
         drop(held);
         let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]
@@ -4548,8 +4631,12 @@ mod tests {
         // Notes: the single-flight claim is inserted in the preflight BEFORE the
         // agent runs, on the orchestrator's OWN thread, and is ROLLED BACK if the
         // flow fails — so a corrected re-dispatch is not permanently blocked.
-        // Here `workspace_root` is NOT a git repo, so worktree creation fails
-        // FIRST (the agent never runs), which also proves claim-before-agent.
+        // The workspace passes the PR-base preflight (non-diverged), but the fix
+        // branch is pre-occupied so worktree creation fails FIRST on the thread
+        // (the agent never runs) — a hermetic proof of claim-before-agent.
+        if !git_available() {
+            return;
+        }
         let _serial = crate::fix_worktree::LEASE_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -4559,10 +4646,11 @@ mod tests {
         let fix = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
         enable_fix_agent(&db, &fix, 5);
         let (_wf, src_run) = seed_failed_local_source(&db, "sandbox", "true");
-        let not_a_repo = tmpdir();
+        let repo = init_git_repo_on_main_ancestor();
+        occupy_fix_branch(&repo, &src_run);
 
         let outcome = svc
-            .dispatch_fix_agent_local(not_a_repo.to_str().unwrap(), "python3", &src_run, "ui")
+            .dispatch_fix_agent_local(repo.to_str().unwrap(), "python3", &src_run, "ui")
             .expect("dispatch hands off to its thread");
         assert_eq!(outcome.status, "dispatched");
 
@@ -4585,7 +4673,7 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
-        let _ = std::fs::remove_dir_all(not_a_repo);
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]
@@ -4593,10 +4681,14 @@ mod tests {
         // corr-F3: a FAILED local fix DELETES its single-flight claim (so a
         // corrected re-dispatch is not blocked), but its SPEND must still count
         // toward the hourly cap — otherwise an endlessly-failing agent could be
-        // retried without bound. Two real failed dispatches (non-repo workspace
-        // -> worktree creation fails on the thread -> claim rolled back) each
-        // leave an append-only spend row; the THIRD dispatch is then refused by
-        // the cap even though ZERO claims remain.
+        // retried without bound. Two real failed dispatches (non-diverged
+        // workspace that passes the PR-base preflight, but the fix branch
+        // pre-occupied so worktree creation fails on the thread -> claim rolled
+        // back) each leave an append-only spend row; the THIRD dispatch is then
+        // refused by the cap even though ZERO claims remain.
+        if !git_available() {
+            return;
+        }
         let _serial = crate::fix_worktree::LEASE_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -4605,12 +4697,13 @@ mod tests {
         let svc = service_with_db(db.clone(), vec![], false);
         let fix = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
         enable_fix_agent(&db, &fix, 2); // cap = 2 per hour
-        let not_a_repo = tmpdir();
+        let repo = init_git_repo_on_main_ancestor();
 
         for _ in 0..2 {
             let (_wf, src) = seed_failed_local_source(&db, "sandbox", "true");
+            occupy_fix_branch(&repo, &src);
             let outcome = svc
-                .dispatch_fix_agent_local(not_a_repo.to_str().unwrap(), "python3", &src, "ui")
+                .dispatch_fix_agent_local(repo.to_str().unwrap(), "python3", &src, "ui")
                 .expect("dispatch hands off to its thread");
             assert_eq!(outcome.status, "dispatched");
             // Wait for the thread to roll the claim back...
@@ -4647,10 +4740,11 @@ mod tests {
             "both failed attempts counted toward spend"
         );
 
-        // The third dispatch trips the cap despite NO live claim.
+        // The third dispatch trips the cap despite NO live claim. It is refused
+        // at the rate gate, which runs BEFORE the PR-base preflight.
         let (_wf3, src3) = seed_failed_local_source(&db, "sandbox", "true");
         let err = svc
-            .dispatch_fix_agent_local(not_a_repo.to_str().unwrap(), "python3", &src3, "ui")
+            .dispatch_fix_agent_local(repo.to_str().unwrap(), "python3", &src3, "ui")
             .unwrap_err();
         assert!(
             matches!(err, FixAgentError::RateLimited { max_per_hour: 2 }),
@@ -4658,7 +4752,7 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
-        let _ = std::fs::remove_dir_all(not_a_repo);
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]
@@ -4876,6 +4970,71 @@ mod tests {
             "a refused mode-confusion dispatch records no spend"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn local_fix_dispatch_refuses_a_diverged_checkout_pr_base_preflight() {
+        // Option-1 PR-base preflight wired into the orchestrator: when the
+        // workspace checkout's HEAD has DIVERGED from origin/main (origin/main is
+        // NOT an ancestor of HEAD), a base=main DRAFT PR would show unrelated
+        // ancestry, so dispatch refuses UP FRONT — before any claim, spend,
+        // thread, or lease. (The pure gate + git probe are tested in fix_local /
+        // fix_worktree; this asserts the orchestrator wires them in.)
+        if !git_available() {
+            return;
+        }
+        let repo = init_git_repo(); // main @ C1, HEAD = C1
+        {
+            let g = |args: &[&str]| {
+                let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+                assert!(
+                    real_git(&owned, repo.to_str()).status.success(),
+                    "git {args:?} failed in diverged-repo setup"
+                );
+            };
+            // feature advances to a commit main never sees ...
+            g(&["checkout", "-q", "-b", "feature"]);
+            std::fs::write(repo.join("feature.txt"), b"f").unwrap();
+            g(&["add", "-A"]);
+            g(&["commit", "-qm", "feature C2"]);
+            // ... while main advances to a DIFFERENT commit, published as origin/main.
+            g(&["checkout", "-q", "main"]);
+            std::fs::write(repo.join("main.txt"), b"m").unwrap();
+            g(&["add", "-A"]);
+            g(&["commit", "-qm", "main C3"]);
+            g(&["update-ref", "refs/remotes/origin/main", "main"]);
+            // HEAD back on the diverged feature branch.
+            g(&["checkout", "-q", "feature"]);
+        }
+
+        let db_dir = tmpdir();
+        let db = Arc::new(Database::new(&db_dir));
+        let svc = service_with_db(db.clone(), vec![], false);
+        let fix = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        enable_fix_agent(&db, &fix, 5);
+        let (_src_wf, src_run) = seed_failed_local_source(&db, "sandbox", "true");
+
+        let err = svc
+            .dispatch_fix_agent_local(repo.to_str().unwrap(), "python3", &src_run, "ui")
+            .unwrap_err();
+        assert!(
+            matches!(err, FixAgentError::PrBaseDiverged(_)),
+            "a diverged checkout must be refused up front, got {err:?}"
+        );
+        // Refused before the commitment point: no claim and no spend recorded.
+        assert!(db
+            .get_fix_agent_dispatch_for_source_run(&src_run)
+            .unwrap()
+            .is_none());
+        let since = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        assert_eq!(
+            db.count_fix_agent_spend_since(&since).unwrap(),
+            0,
+            "a refused diverged-checkout dispatch records no spend"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&db_dir);
     }
 
     #[test]
