@@ -1353,10 +1353,12 @@ impl SchedulerService {
         }
 
         // Rate cap: global ceiling over the trailing hour, across distinct runs.
+        // Counts the append-only spend ledger (corr-F3) so BOTH modes share one
+        // faithful per-hour tally.
         let since = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
         let recent = self
             .db
-            .count_fix_agent_dispatches_since(&since)
+            .count_fix_agent_spend_since(&since)
             .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?;
         if recent >= prefs.max_dispatches_per_hour {
             return Err(FixAgentError::RateLimited {
@@ -1398,6 +1400,9 @@ impl SchedulerService {
                 "cloud",
             )
             .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?;
+        // corr-F3: record spend on the shared append-only ledger so cloud
+        // dispatches count toward the same hourly cap as local ones.
+        let _ = self.db.record_fix_agent_spend(source_run_id, "cloud");
 
         Ok(outcome)
     }
@@ -1502,10 +1507,13 @@ impl SchedulerService {
         }
 
         // Rate cap: global ceiling over the trailing hour across distinct runs.
+        // Counts the APPEND-ONLY spend ledger (corr-F3), NOT the mutable claim
+        // table — a failed attempt deletes its claim (to allow a corrected
+        // re-dispatch) but its spend persists, so retries cannot bypass the cap.
         let since = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
         let recent = self
             .db
-            .count_fix_agent_dispatches_since(&since)
+            .count_fix_agent_spend_since(&since)
             .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?;
         if recent >= prefs.max_dispatches_per_hour {
             return Err(FixAgentError::RateLimited {
@@ -1525,6 +1533,10 @@ impl SchedulerService {
             .db
             .insert_fix_agent_dispatch(source_run_id, &fix_workflow_id, None, initiator, "local")
             .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?;
+        // corr-F3: record spend NOW (append-only, synchronous in the preflight)
+        // so this attempt counts toward the hourly cap EVEN IF the flow later
+        // fails and rolls the claim back on its thread.
+        let _ = self.db.record_fix_agent_spend(source_run_id, "local");
 
         // The prompt describes the SOURCE failure (fenced untrusted stderr).
         let prompt = build_fix_agent_prompt(&source_workflow.name, &source_run);
@@ -4511,6 +4523,79 @@ mod tests {
         assert!(
             rolled_back,
             "the single-flight claim must be rolled back when the flow fails"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(not_a_repo);
+    }
+
+    #[test]
+    fn local_fix_failed_attempts_count_toward_the_hourly_cap_f3() {
+        // corr-F3: a FAILED local fix DELETES its single-flight claim (so a
+        // corrected re-dispatch is not blocked), but its SPEND must still count
+        // toward the hourly cap — otherwise an endlessly-failing agent could be
+        // retried without bound. Two real failed dispatches (non-repo workspace
+        // -> worktree creation fails on the thread -> claim rolled back) each
+        // leave an append-only spend row; the THIRD dispatch is then refused by
+        // the cap even though ZERO claims remain.
+        let _serial = crate::fix_worktree::LEASE_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec![], false);
+        let fix = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        enable_fix_agent(&db, &fix, 2); // cap = 2 per hour
+        let not_a_repo = tmpdir();
+
+        for _ in 0..2 {
+            let (_wf, src) = seed_failed_local_source(&db, "sandbox", "true");
+            let outcome = svc
+                .dispatch_fix_agent_local(not_a_repo.to_str().unwrap(), "python3", &src, "ui")
+                .expect("dispatch hands off to its thread");
+            assert_eq!(outcome.status, "dispatched");
+            // Wait for the thread to roll the claim back...
+            let mut rolled = false;
+            for _ in 0..200 {
+                if db
+                    .get_fix_agent_dispatch_for_source_run(&src)
+                    .unwrap()
+                    .is_none()
+                {
+                    rolled = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            assert!(rolled, "each failed attempt rolls back its claim");
+            // ...and for the exclusivity lease to be RELEASED before the next
+            // dispatch (acquire+drop proves it is free), so the next attempt is
+            // gated by the CAP, never a transient Busy.
+            for _ in 0..200 {
+                if let Ok(l) = crate::fix_worktree::acquire_worktree_lease() {
+                    drop(l);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+
+        // Zero claims remain, but both failed attempts recorded spend.
+        let since = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        assert_eq!(
+            db.count_fix_agent_spend_since(&since).unwrap(),
+            2,
+            "both failed attempts counted toward spend"
+        );
+
+        // The third dispatch trips the cap despite NO live claim.
+        let (_wf3, src3) = seed_failed_local_source(&db, "sandbox", "true");
+        let err = svc
+            .dispatch_fix_agent_local(not_a_repo.to_str().unwrap(), "python3", &src3, "ui")
+            .unwrap_err();
+        assert!(
+            matches!(err, FixAgentError::RateLimited { max_per_hour: 2 }),
+            "failed attempts must count toward the hourly cap, got {err:?}"
         );
 
         let _ = std::fs::remove_dir_all(dir);

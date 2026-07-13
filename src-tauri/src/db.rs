@@ -1169,7 +1169,7 @@ pub enum IdempotencyReservation {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 16;
+pub const CURRENT_SCHEMA_VERSION: i64 = 17;
 
 pub struct Database {
     path: String,
@@ -1591,6 +1591,13 @@ impl Database {
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_fix_agent_dispatches_source_run ON fix_agent_dispatches(source_run_id);
             CREATE INDEX IF NOT EXISTS idx_fix_agent_dispatches_dispatched_at ON fix_agent_dispatches(dispatched_at);
+            CREATE TABLE IF NOT EXISTS fix_agent_spend (
+                id TEXT PRIMARY KEY,
+                source_run_id TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                spent_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_fix_agent_spend_spent_at ON fix_agent_spend(spent_at);
             CREATE INDEX IF NOT EXISTS idx_runs_workflow_started ON runs(workflow_id, started_at DESC);
             CREATE INDEX IF NOT EXISTS idx_queued_runs_queue_status ON queued_runs(queue_name, status, priority DESC, queued_at ASC);
             CREATE INDEX IF NOT EXISTS idx_queued_runs_workflow_status ON queued_runs(workflow_id, status);
@@ -1669,7 +1676,33 @@ impl Database {
             (14, Self::migrate_v14_fix_agent_dispatches),
             (15, Self::migrate_v15_fix_agent_local_mode),
             (16, Self::migrate_v16_queued_run_suppress_completion),
+            (17, Self::migrate_v17_fix_agent_spend),
         ]
+    }
+
+    /// v17: add the append-only `fix_agent_spend` ledger (corr-F3). The rate cap
+    /// (`max_dispatches_per_hour`) previously counted rows in
+    /// `fix_agent_dispatches`, but a FAILED local fix DELETES its single-flight
+    /// claim there (so a corrected re-dispatch is not blocked) — which meant
+    /// failed attempts did NOT count toward the cap, so an agent that kept
+    /// failing could be retried without bound. Spend is now recorded in a
+    /// SEPARATE append-only table that is never deleted, so every attempt
+    /// (settled or failed) counts. No FK/CASCADE: spend is decoupled from run
+    /// retention too, so pruning a source run cannot reopen the under-count.
+    ///
+    /// Additive and idempotent (`IF NOT EXISTS`); fresh DBs get the table from
+    /// the base schema in `init`.
+    fn migrate_v17_fix_agent_spend(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS fix_agent_spend (
+                id TEXT PRIMARY KEY,
+                source_run_id TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                spent_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_fix_agent_spend_spent_at ON fix_agent_spend(spent_at);",
+        )?;
+        Ok(())
     }
 
     /// v16: persist `suppress_completion_triggers` on `queued_runs` so a
@@ -6352,14 +6385,31 @@ impl Database {
         }
     }
 
-    /// Count fix-agent dispatches with `dispatched_at >= since` (an RFC3339
-    /// instant). Backs the global `max_dispatches_per_hour` ceiling, which
-    /// spans DISTINCT failed runs (per-source-run idempotency alone does not
-    /// bound spend — each failed run has a distinct id).
-    pub fn count_fix_agent_dispatches_since(&self, since: &str) -> rusqlite::Result<u32> {
+    /// Record one APPEND-ONLY fix-agent spend entry (corr-F3). Unlike the
+    /// single-flight CLAIM in `fix_agent_dispatches` (which is DELETED on a
+    /// failed attempt so a corrected re-dispatch is not permanently blocked), a
+    /// spend row is NEVER deleted by the app — so failed attempts still count
+    /// toward `max_dispatches_per_hour` and the rate cap cannot be bypassed by
+    /// simply letting the fix fail and retrying.
+    pub fn record_fix_agent_spend(&self, source_run_id: &str, mode: &str) -> rusqlite::Result<()> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO fix_agent_spend (id, source_run_id, mode, spent_at) VALUES (?1, ?2, ?3, ?4)",
+            params![id, source_run_id, mode, now],
+        )?;
+        Ok(())
+    }
+
+    /// Count append-only fix-agent spend entries with `spent_at >= since` (an
+    /// RFC3339 instant). Backs the global `max_dispatches_per_hour` ceiling —
+    /// counts EVERY attempt (settled OR failed), independent of the mutable
+    /// single-flight claim (corr-F3).
+    pub fn count_fix_agent_spend_since(&self, since: &str) -> rusqlite::Result<u32> {
         let conn = self.conn()?;
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM fix_agent_dispatches WHERE dispatched_at >= ?1",
+            "SELECT COUNT(*) FROM fix_agent_spend WHERE spent_at >= ?1",
             params![since],
             |row| row.get(0),
         )?;
@@ -7625,7 +7675,7 @@ mod tests {
         // Tripwire: refresh this fixture (seed schema + asserted columns) the
         // next time a migration lands so the newest N-1 -> N paths stay covered.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 16,
+            CURRENT_SCHEMA_VERSION, 17,
             "add a v(N-1)->v(N) fixture when a new migration ships"
         );
 
@@ -11297,6 +11347,53 @@ SUMMARY_JSON:{\"title\":\"current\"}
             )
             .unwrap();
         assert_eq!(suppressed, 1, "fix-rerun queued rows persist suppression");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migrate_v17_adds_fix_agent_spend_table() {
+        // v17 adds the append-only `fix_agent_spend` ledger (corr-F3): the rate
+        // cap counts spend (never deleted) rather than the single-flight claim
+        // (deleted on a failed attempt), so failed attempts still count.
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        let db = Database {
+            path: db_path.to_string_lossy().to_string(),
+        };
+
+        // A v16 DB has no spend table yet; stamp user_version=16 so ONLY v17 runs.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch("PRAGMA user_version = 16;").unwrap();
+            let has_table: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fix_agent_spend'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(has_table, 0, "pre-v17 DB has no fix_agent_spend table");
+        }
+
+        let conn = db.conn().unwrap();
+        db.run_migrations(&conn, 16).unwrap();
+
+        let has_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fix_agent_spend'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_table, 1, "v17 must add the fix_agent_spend table");
+
+        // Spend rows persist independently of the claim table (append-only).
+        db.record_fix_agent_spend("run-x", "local").unwrap();
+        db.record_fix_agent_spend("run-y", "cloud").unwrap();
+        let since = "2000-01-01T00:00:00Z";
+        assert_eq!(db.count_fix_agent_spend_since(since).unwrap(), 2);
 
         let _ = std::fs::remove_dir_all(dir);
     }
