@@ -491,34 +491,47 @@ fn worktree_git_checked(
 }
 
 /// Poll the source rerun to a terminal state with a bounded budget (M6). The
-/// rerun runs INLINE (status `admitted`, `run_id` set) when there is capacity,
-/// or QUEUES (a worker drains it later); either way it is resolved by its
-/// dispatch identity (`FIX_RERUN_TRIGGER_KIND` + `rerun_of = source_run_id`), so
-/// both paths converge on the same run row.
+/// rerun runs INLINE (status `admitted`, `dispatch.run_id` set) when there is
+/// capacity, or QUEUES (`dispatch.queued_run_id` set; a worker drains it later).
+///
+/// Resolution is tied STRICTLY to THIS dispatch's identity — the inline run id,
+/// or the exact queued entry whose `run_id` is populated at admission — never a
+/// broad `(workflow, trigger_kind, rerun_of)` match. A prior attempt (that timed
+/// out and was rolled back) leaves its own rerun row behind with the SAME broad
+/// key, so a retry that queued could otherwise inherit that stale terminal row
+/// and report a false green/red. Binding to the queued-run id closes that.
 #[allow(dead_code)]
 fn await_rerun_terminal(
     db: &Arc<Database>,
     dispatch: &DispatchOutcome,
-    source_workflow_id: &str,
-    source_run_id: &str,
     timeout: std::time::Duration,
     poll_interval: std::time::Duration,
 ) -> Result<Run, FixAgentError> {
     let deadline = std::time::Instant::now() + timeout;
     let mut known_run_id = dispatch.run_id.clone();
     loop {
+        // Resolve the run id from THIS dispatch's queued entry once admitted.
         if known_run_id.is_none() {
-            if let Some(run) = db
-                .find_run_by_dispatch_context(
-                    source_workflow_id,
-                    Some(FIX_RERUN_TRIGGER_KIND),
-                    None,
-                    None,
-                    Some(source_run_id),
-                )
-                .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?
-            {
-                known_run_id = Some(run.id);
+            if let Some(queued_id) = &dispatch.queued_run_id {
+                if let Some((run_id, status)) = db
+                    .get_queued_run_progress(queued_id)
+                    .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?
+                {
+                    match run_id {
+                        Some(id) => known_run_id = Some(id),
+                        // No run id yet: still eligible only while queued/admitted.
+                        // Any other status (cancelled / cascade-skipped) means the
+                        // rerun died before running — a terminal non-success.
+                        None if !status.eq_ignore_ascii_case("queued")
+                            && !status.eq_ignore_ascii_case("admitted") =>
+                        {
+                            return Err(FixAgentError::Local(
+                                "the fix validation rerun was cancelled before it ran".to_string(),
+                            ));
+                        }
+                        None => {}
+                    }
+                }
             }
         }
         if let Some(run_id) = &known_run_id {
@@ -661,15 +674,20 @@ pub(crate) fn run_local_fix_flow(
     )
     .map_err(|e| FixAgentError::Local(format!("failed to dispatch the validation rerun: {e}")))?;
 
-    // 5. Await terminal with a bounded budget.
-    let rerun = await_rerun_terminal(
-        db,
-        &dispatch,
-        &flow.source_workflow.id,
-        flow.source_run_id,
-        flow.rerun_timeout,
-        flow.poll_interval,
-    )?;
+    // 5. Await terminal with a bounded budget. On timeout (or any await error)
+    //    best-effort CANCEL the still-queued rerun before we return: the caller's
+    //    FixWorktree Drop hard-restores the worktree, and a later drain of the
+    //    orphaned rerun would otherwise run against a now-missing tree (M2 also
+    //    fails closed there, but cancelling avoids the pointless orphan run).
+    let rerun = match await_rerun_terminal(db, &dispatch, flow.rerun_timeout, flow.poll_interval) {
+        Ok(run) => run,
+        Err(e) => {
+            if let Some(queued_id) = &dispatch.queued_run_id {
+                let _ = db.cancel_queued_run(queued_id);
+            }
+            return Err(e);
+        }
+    };
     let rerun_ok = crate::db::run_status::ended_ok(&rerun.status);
 
     if !rerun_ok {
@@ -698,12 +716,19 @@ pub(crate) fn run_local_fix_flow(
 
     let title =
         crate::fix_local::build_fix_pr_title(&flow.source_workflow.name, flow.source_run_id);
+    // Surface the command the rerun ACTUALLY executed (a generic step-flow runs
+    // its steps, not the placeholder script_path) so the reviewer sees the real
+    // check (M4).
+    let rerun_command = crate::fix_local::describe_rerun_command(
+        &flow.source_workflow.script_path,
+        flow.source_workflow.spec_json.as_deref(),
+    );
     let body = crate::fix_local::build_fix_pr_body(&crate::fix_local::FixPrBody {
         source_workflow_name: &flow.source_workflow.name,
         source_run_id: flow.source_run_id,
         fix_branch: &branch,
         diff_stat: &diff_stat,
-        rerun_command: &flow.source_workflow.script_path,
+        rerun_command: &rerun_command,
     });
     let body_path = flow.worktree.path().join(".chaos-fix-pr-body.md");
     std::fs::write(&body_path, &body)
@@ -3692,13 +3717,74 @@ mod tests {
         let err = await_rerun_terminal(
             &db,
             &dispatch,
-            "wf-absent",
-            "src-absent",
             std::time::Duration::from_millis(0),
             std::time::Duration::from_millis(1),
         )
         .unwrap_err();
         assert!(matches!(err, FixAgentError::Local(_)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn await_rerun_terminal_resolves_by_the_exact_queued_entry_not_a_stale_match() {
+        // Bugbot fold (finding 1): a queued rerun is resolved via THIS dispatch's
+        // queued_run_id (whose run_id is set at admission), never a broad
+        // (workflow, trigger_kind, rerun_of) match. Here a queued entry that was
+        // cancelled before admission is reported as a terminal non-success, not a
+        // stale green inherited from a prior attempt.
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let wf = db
+            .create_workflow(
+                "Src",
+                None,
+                "true",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "sandbox",
+                None,
+                None,
+                Some(r#"{"queue":"sandbox-default"}"#),
+            )
+            .unwrap();
+        let queued_id = db
+            .upsert_queued_run_with_context(
+                &wf.id,
+                "sandbox-default",
+                5,
+                Some(FIX_RERUN_TRIGGER_KIND),
+                None,
+                None,
+                None,
+                Some("src-run-1"),
+                true,
+            )
+            .unwrap();
+        // The queued rerun is cancelled before it ever admits (never gets a run).
+        db.cancel_queued_run(&queued_id).unwrap();
+        let dispatch = DispatchOutcome {
+            workflow_id: wf.id.clone(),
+            status: "queued".to_string(),
+            run_id: None,
+            queued_run_id: Some(queued_id),
+            queue_name: String::new(),
+            trigger_kind: Some(FIX_RERUN_TRIGGER_KIND.to_string()),
+            trigger_payload: None,
+            reason: None,
+        };
+        let err = await_rerun_terminal(
+            &db,
+            &dispatch,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(5),
+        )
+        .unwrap_err();
+        match err {
+            FixAgentError::Local(msg) => assert!(msg.contains("cancelled before it ran")),
+            other => panic!("expected a cancelled-before-run Local error, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

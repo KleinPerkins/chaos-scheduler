@@ -3676,6 +3676,17 @@ pub fn start_scheduler_loop(
         {
             log::warn!("Failed to cancel orphaned fix-rerun queued runs on startup: {e}");
         }
+        // M6: a crash mid-fix also strands the durable single-flight CLAIM (the
+        // orchestrator thread that would have rolled it back died with the
+        // process). Clear non-terminal LOCAL claims so the source run can be
+        // re-dispatched instead of being permanently blocked as a "duplicate".
+        match db.clear_orphaned_local_fix_dispatches() {
+            Ok(n) if n > 0 => {
+                log::info!("Cleared {n} orphaned local fix-agent claim(s) on startup")
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("Failed to clear orphaned local fix-agent claims on startup: {e}"),
+        }
         let worker_count = scheduler_worker_count();
         let worker_pool = SchedulerWorkerPool::new(
             worker_count,

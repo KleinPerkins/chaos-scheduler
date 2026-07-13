@@ -6861,6 +6861,24 @@ impl Database {
         )
     }
 
+    /// Read one queued run's `(run_id, status)` by id. The LOCAL fix orchestrator
+    /// uses this to resolve its OWN rerun by the exact queued entry (whose
+    /// `run_id` is populated at admission) rather than a broad dispatch-context
+    /// match that could inherit a prior attempt's rerun row. Returns `None` if
+    /// the queued row is absent.
+    pub fn get_queued_run_progress(
+        &self,
+        id: &str,
+    ) -> rusqlite::Result<Option<(Option<String>, String)>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT run_id, status FROM queued_runs WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+    }
+
     /// M6 (D05 LOCAL fix crash recovery): cancel every still-queued source RERUN
     /// (`trigger_kind` = the reserved fix-rerun kind). Its dedicated worktree is
     /// reclaimed by the startup sweep, so draining it later would fail closed
@@ -6877,6 +6895,26 @@ impl Database {
             "UPDATE queued_runs SET status = 'cancelled', finished_at = ?2 \
              WHERE status = 'queued' AND trigger_kind = ?1",
             params![fix_rerun_trigger_kind, now],
+        )
+    }
+
+    /// M6 (D05 LOCAL fix crash recovery): delete every LOCAL fix dispatch claim
+    /// that never reached a terminal status (`pr_opened` / `rerun_failed`).
+    ///
+    /// The claim is inserted in the preflight BEFORE the agent runs and the
+    /// orchestrator thread rolls it back on failure — but a crash/kill mid-fix
+    /// kills that thread, stranding a non-terminal claim. Left in place it makes
+    /// its source run permanently un-re-dispatchable (the idempotency gate treats
+    /// any existing row as a live/settled dispatch). This runs at startup, when
+    /// no local fix can be in flight yet, so clearing non-terminal LOCAL claims
+    /// is always safe. CLOUD claims (`mode = 'cloud'`) are never touched — they
+    /// are a fire-and-forget audit record with no terminal lifecycle here.
+    pub fn clear_orphaned_local_fix_dispatches(&self) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM fix_agent_dispatches \
+             WHERE mode = 'local' AND status NOT IN ('pr_opened', 'rerun_failed')",
+            [],
         )
     }
 
@@ -9350,6 +9388,75 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(
             ordinary_row.status, "queued",
             "an ordinary queued run must NOT be cancelled"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clear_orphaned_local_fix_dispatches_removes_only_nonterminal_local_claims() {
+        // Bugbot fold (finding 2): a crash mid-fix strands a non-terminal LOCAL
+        // claim; startup recovery deletes it so the source run is re-dispatchable,
+        // while terminal LOCAL claims (audit) and CLOUD claims are left intact.
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let wf = db
+            .create_workflow(
+                "Fixer",
+                None,
+                "unused",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "sandbox",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let mk_run = || {
+            db.create_run_with_context(&wf.id, Some("cron"), None, None, None, None)
+                .unwrap()
+                .id
+        };
+        let orphan = mk_run();
+        let settled = mk_run();
+        let cloud = mk_run();
+
+        // A non-terminal LOCAL claim (crash orphan), a TERMINAL local claim, and
+        // a CLOUD claim.
+        db.insert_fix_agent_dispatch(&orphan, &wf.id, None, "ui", "local")
+            .unwrap();
+        let settled_claim = db
+            .insert_fix_agent_dispatch(&settled, &wf.id, None, "ui", "local")
+            .unwrap();
+        db.update_fix_agent_dispatch(&settled_claim.id, "rerun_failed", None, None, None, None)
+            .unwrap();
+        db.insert_fix_agent_dispatch(&cloud, &wf.id, None, "ui", "cloud")
+            .unwrap();
+
+        let cleared = db.clear_orphaned_local_fix_dispatches().unwrap();
+        assert_eq!(cleared, 1, "only the non-terminal LOCAL claim is cleared");
+
+        assert!(
+            db.get_fix_agent_dispatch_for_source_run(&orphan)
+                .unwrap()
+                .is_none(),
+            "orphaned local claim removed → source run re-dispatchable"
+        );
+        assert!(
+            db.get_fix_agent_dispatch_for_source_run(&settled)
+                .unwrap()
+                .is_some(),
+            "terminal local claim (audit) preserved"
+        );
+        assert!(
+            db.get_fix_agent_dispatch_for_source_run(&cloud)
+                .unwrap()
+                .is_some(),
+            "cloud claim is never touched"
         );
 
         let _ = std::fs::remove_dir_all(dir);

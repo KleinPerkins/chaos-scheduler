@@ -23,18 +23,28 @@ use crate::workflow_spec::{WorkflowKind, WorkflowSpec};
 // M1 — credential isolation for the cursor-agent child.
 // ---------------------------------------------------------------------------
 
-/// Git/GitHub push-credential env vars UNSET for the cursor-agent child (M1).
+/// Push-credential env vars UNSET for the cursor-agent child (M1).
 /// `run_cli` launches `cursor-agent … --force` (autonomous auto-approve) which
 /// inherits the parent env; left intact the agent would be strictly MORE
 /// privileged than the scheduler's own git/gh — it could itself `git push` /
 /// `gh pr merge` / echo the token, defeating every downstream containment. So we
 /// strip these for the agent child specifically; the scheduler provides the
-/// token ONLY to its OWN single push + PR-create step.
+/// credentials ONLY to its OWN single push + PR-create step.
+///
+/// This covers BOTH publish channels: the HTTPS token vars AND the SSH agent
+/// socket / custom ssh command. The `chaos-scheduler` origin is an `ssh://`
+/// remote, so scrubbing only the token would leave a `--force` agent able to
+/// `git push` over the operator's loaded SSH keys — the SSH vars close that.
+/// The scheduler's own push runs with the full inherited env, so it keeps both.
 pub const AGENT_CREDENTIAL_SCRUB_VARS: &[&str] = &[
     "GITHUB_TOKEN",
     "GH_TOKEN",
     "GH_ENTERPRISE_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
 ];
 
 /// The env mutation applied to the cursor-agent child for credential isolation:
@@ -211,6 +221,36 @@ pub fn build_fix_pr_body(body: &FixPrBody) -> String {
     )
 }
 
+/// A faithful, human-readable rendering of the command the source rerun actually
+/// executes — surfaced verbatim in the PR body (M4) so a reviewer can see the
+/// exact check that passed. A legacy single-script source runs its `script_path`;
+/// a GENERIC step-flow runs its ordered steps (its `script_path` is unused), so
+/// we render the steps instead of the misleading placeholder field.
+pub fn describe_rerun_command(script_path: &str, spec_json: Option<&str>) -> String {
+    if let Some(json) = spec_json {
+        if let Ok(spec) = WorkflowSpec::from_json(json) {
+            if let Some(generic) = spec.generic {
+                let steps: Vec<String> = generic
+                    .steps
+                    .iter()
+                    .map(|s| {
+                        let cmd = s
+                            .command
+                            .as_deref()
+                            .or(s.script.as_deref())
+                            .unwrap_or("(no command)");
+                        format!("{}: {}", s.id, cmd)
+                    })
+                    .collect();
+                if !steps.is_empty() {
+                    return steps.join("\n");
+                }
+            }
+        }
+    }
+    script_path.to_string()
+}
+
 /// `git push` argv for the fix branch. Uses the `--` separator (precedent in
 /// `operators.rs`) so a hostile-looking branch name can never be read as an
 /// option.
@@ -255,6 +295,10 @@ mod tests {
         // The push tokens are UNSET for the agent child.
         assert!(iso.env_remove.contains(&"GITHUB_TOKEN"));
         assert!(iso.env_remove.contains(&"GH_TOKEN"));
+        // The SSH publish channel is closed too — the origin is an ssh:// remote,
+        // so a `--force` agent must not inherit the operator's loaded keys.
+        assert!(iso.env_remove.contains(&"SSH_AUTH_SOCK"));
+        assert!(iso.env_remove.contains(&"GIT_SSH_COMMAND"));
         // gh + git auth discovery is neutralized.
         let set: std::collections::HashMap<_, _> = iso.env_set.iter().cloned().collect();
         assert_eq!(
@@ -387,6 +431,31 @@ mod tests {
             argv[sep + 1],
             "chaos-fix/run-123",
             "branch is a positional after --"
+        );
+    }
+
+    #[test]
+    fn m4_rerun_command_uses_script_path_for_a_legacy_command_source() {
+        assert_eq!(
+            describe_rerun_command("python3 scripts/etl.py --check", None),
+            "python3 scripts/etl.py --check"
+        );
+    }
+
+    #[test]
+    fn m4_rerun_command_renders_the_steps_for_a_generic_step_flow_source() {
+        // A generic step-flow's real check lives in its steps, NOT script_path
+        // (which is an unused placeholder) — the body must show the true command.
+        let spec = r#"{"kind":"generic","generic":{"steps":[
+            {"id":"build","command":"cargo build","depends_on":[]},
+            {"id":"test","command":"cargo test","depends_on":["build"]}
+        ]}}"#;
+        let rendered = describe_rerun_command("unused", Some(spec));
+        assert!(rendered.contains("build: cargo build"));
+        assert!(rendered.contains("test: cargo test"));
+        assert!(
+            !rendered.contains("unused"),
+            "must not surface the placeholder script_path for a step-flow"
         );
     }
 }
