@@ -598,6 +598,45 @@ pub struct FixAgentDispatch {
     pub fix_run_id: Option<String>,
     pub initiator: String,
     pub dispatched_at: String,
+    /// Dispatch mode: `"cloud"` (agent-direct) or `"local"` (rerun-gated). See
+    /// [`Database::migrate_v15_fix_agent_local_mode`].
+    pub mode: String,
+    /// Orchestration lifecycle marker (`claimed`, `agent_running`,
+    /// `rerun_running`, `rerun_ok`, `pr_opened`, `failed`, …).
+    pub status: String,
+    /// Derived `chaos-fix/<source_run_id>` fix branch (LOCAL mode).
+    pub branch: Option<String>,
+    /// Resulting reviewable DRAFT PR URL (never auto-merged).
+    pub pr_url: Option<String>,
+    /// Throwaway `git worktree` path used for the fix + rerun (LOCAL mode);
+    /// the crash-recovery sweep reads it to remove an orphaned worktree.
+    pub worktree_path: Option<String>,
+    /// App-authored short status note (never raw stderr / agent free-text).
+    pub detail: Option<String>,
+    /// Last lifecycle-transition timestamp (RFC3339).
+    pub updated_at: Option<String>,
+}
+
+/// Map a `fix_agent_dispatches` row to a [`FixAgentDispatch`]. The SELECT column
+/// order MUST be: `id, source_run_id, fix_workflow_id, fix_run_id, initiator,
+/// dispatched_at, mode, status, branch, pr_url, worktree_path, detail,
+/// updated_at`.
+fn row_to_fix_agent_dispatch(row: &rusqlite::Row) -> rusqlite::Result<FixAgentDispatch> {
+    Ok(FixAgentDispatch {
+        id: row.get(0)?,
+        source_run_id: row.get(1)?,
+        fix_workflow_id: row.get(2)?,
+        fix_run_id: row.get(3)?,
+        initiator: row.get(4)?,
+        dispatched_at: row.get(5)?,
+        mode: row.get(6)?,
+        status: row.get(7)?,
+        branch: row.get(8)?,
+        pr_url: row.get(9)?,
+        worktree_path: row.get(10)?,
+        detail: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1126,7 +1165,7 @@ pub enum IdempotencyReservation {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 14;
+pub const CURRENT_SCHEMA_VERSION: i64 = 15;
 
 pub struct Database {
     path: String,
@@ -1536,7 +1575,14 @@ impl Database {
                 fix_workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
                 fix_run_id TEXT,
                 initiator TEXT NOT NULL,
-                dispatched_at TEXT NOT NULL
+                dispatched_at TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'cloud',
+                status TEXT NOT NULL DEFAULT 'dispatched',
+                branch TEXT,
+                pr_url TEXT,
+                worktree_path TEXT,
+                detail TEXT,
+                updated_at TEXT
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_fix_agent_dispatches_source_run ON fix_agent_dispatches(source_run_id);
             CREATE INDEX IF NOT EXISTS idx_fix_agent_dispatches_dispatched_at ON fix_agent_dispatches(dispatched_at);
@@ -1616,7 +1662,51 @@ impl Database {
             (12, Self::migrate_v12_queue_occupancy_samples),
             (13, Self::migrate_v13_run_environment_snapshot),
             (14, Self::migrate_v14_fix_agent_dispatches),
+            (15, Self::migrate_v15_fix_agent_local_mode),
         ]
+    }
+
+    /// v15: evolve the `fix_agent_dispatches` audit row for the D05 LOCAL
+    /// rerun-gated fix agent. The v14 row only recorded the initial CLOUD
+    /// dispatch (agent-direct, propose-only). LOCAL mode is a multi-step
+    /// orchestration (agent edits a throwaway worktree -> the scheduler reruns
+    /// the source job -> only an `ended_ok` rerun opens a draft PR), so the row
+    /// now tracks a lifecycle rather than a single point-in-time dispatch:
+    ///
+    /// - `mode` — `'cloud'` (agent-direct) or `'local'` (rerun-gated).
+    /// - `status` — the orchestration lifecycle marker (e.g. `claimed`,
+    ///   `agent_running`, `rerun_running`, `rerun_ok`, `pr_opened`, `failed`).
+    /// - `branch` — the derived `chaos-fix/<source_run_id>` fix branch.
+    /// - `pr_url` — the resulting reviewable DRAFT PR (never auto-merged).
+    /// - `worktree_path` — the throwaway `git worktree` path; the crash-recovery
+    ///   sweep (M6) reads it to remove an orphaned worktree after an app kill.
+    /// - `detail` — an APP-AUTHORED short status note (never raw stderr / agent
+    ///   free-text; origin is a public repo).
+    /// - `updated_at` — the last lifecycle-transition timestamp.
+    ///
+    /// Additive and idempotent: every `ALTER` is a no-op when the column already
+    /// exists (fresh DBs get the full shape from the base schema in `init`), so
+    /// each runs under its own error-swallowing `execute_batch` (mirrors
+    /// `migrate_v13`). Existing v14 rows take the `mode='cloud'` /
+    /// `status='dispatched'` defaults, preserving history. No index, uniqueness,
+    /// or foreign-key change — the single-fix-per-failed-run UNIQUE index on
+    /// `source_run_id` and the per-hour `dispatched_at` count are untouched.
+    fn migrate_v15_fix_agent_local_mode(conn: &Connection) -> rusqlite::Result<()> {
+        // One ALTER per column, each independently idempotent: a single batched
+        // statement would abort the rest of the batch on the first
+        // duplicate-column error (fresh DBs already have every column).
+        for ddl in [
+            "ALTER TABLE fix_agent_dispatches ADD COLUMN mode TEXT NOT NULL DEFAULT 'cloud';",
+            "ALTER TABLE fix_agent_dispatches ADD COLUMN status TEXT NOT NULL DEFAULT 'dispatched';",
+            "ALTER TABLE fix_agent_dispatches ADD COLUMN branch TEXT;",
+            "ALTER TABLE fix_agent_dispatches ADD COLUMN pr_url TEXT;",
+            "ALTER TABLE fix_agent_dispatches ADD COLUMN worktree_path TEXT;",
+            "ALTER TABLE fix_agent_dispatches ADD COLUMN detail TEXT;",
+            "ALTER TABLE fix_agent_dispatches ADD COLUMN updated_at TEXT;",
+        ] {
+            let _ = conn.execute_batch(ddl);
+        }
+        Ok(())
     }
 
     /// v14: add the `fix_agent_dispatches` audit + spend-control table for the
@@ -6217,25 +6307,19 @@ impl Database {
     /// Read the single fix-agent dispatch audit row for a failed source run, if
     /// one exists. Backs service-layer idempotency: a second dispatch for the
     /// same failed run returns the original fix run rather than spending again.
+    ///
+    /// Column order MUST match [`row_to_fix_agent_dispatch`].
     pub fn get_fix_agent_dispatch_for_source_run(
         &self,
         source_run_id: &str,
     ) -> rusqlite::Result<Option<FixAgentDispatch>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, source_run_id, fix_workflow_id, fix_run_id, initiator, dispatched_at
+            "SELECT id, source_run_id, fix_workflow_id, fix_run_id, initiator, dispatched_at,
+                    mode, status, branch, pr_url, worktree_path, detail, updated_at
              FROM fix_agent_dispatches WHERE source_run_id = ?1",
         )?;
-        let mut rows = stmt.query_map(params![source_run_id], |row| {
-            Ok(FixAgentDispatch {
-                id: row.get(0)?,
-                source_run_id: row.get(1)?,
-                fix_workflow_id: row.get(2)?,
-                fix_run_id: row.get(3)?,
-                initiator: row.get(4)?,
-                dispatched_at: row.get(5)?,
-            })
-        })?;
+        let mut rows = stmt.query_map(params![source_run_id], row_to_fix_agent_dispatch)?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),
@@ -6266,14 +6350,17 @@ impl Database {
         fix_workflow_id: &str,
         fix_run_id: Option<&str>,
         initiator: &str,
+        mode: &str,
     ) -> rusqlite::Result<FixAgentDispatch> {
         let id = uuid::Uuid::new_v4().to_string();
-        let dispatched_at = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now().to_rfc3339();
+        let status = "dispatched";
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO fix_agent_dispatches (id, source_run_id, fix_workflow_id, fix_run_id, initiator, dispatched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, source_run_id, fix_workflow_id, fix_run_id, initiator, dispatched_at],
+            "INSERT INTO fix_agent_dispatches
+                (id, source_run_id, fix_workflow_id, fix_run_id, initiator, dispatched_at, mode, status, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?6)",
+            params![id, source_run_id, fix_workflow_id, fix_run_id, initiator, now, mode, status],
         )?;
         Ok(FixAgentDispatch {
             id,
@@ -6281,7 +6368,14 @@ impl Database {
             fix_workflow_id: fix_workflow_id.to_string(),
             fix_run_id: fix_run_id.map(str::to_string),
             initiator: initiator.to_string(),
-            dispatched_at,
+            dispatched_at: now.clone(),
+            mode: mode.to_string(),
+            status: status.to_string(),
+            branch: None,
+            pr_url: None,
+            worktree_path: None,
+            detail: None,
+            updated_at: Some(now),
         })
     }
 
@@ -7391,7 +7485,7 @@ mod tests {
         // Tripwire: refresh this fixture (seed schema + asserted columns) the
         // next time a migration lands so the newest N-1 -> N paths stay covered.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 14,
+            CURRENT_SCHEMA_VERSION, 15,
             "add a v(N-1)->v(N) fixture when a new migration ships"
         );
 
@@ -10717,6 +10811,106 @@ SUMMARY_JSON:{\"title\":\"current\"}
             dup.is_err(),
             "a second dispatch row for the same source_run_id must be rejected by the UNIQUE index"
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migrate_v15_adds_local_mode_columns_to_fix_agent_dispatches() {
+        // v15 evolves the `fix_agent_dispatches` audit row for the D05 LOCAL
+        // rerun-gated fix agent: it must carry the dispatch `mode` (cloud vs
+        // local), a lifecycle `status`, the derived fix `branch`, the resulting
+        // `pr_url`, the throwaway `worktree_path` (crash-recovery target), an
+        // app-authored `detail`, and an `updated_at` lifecycle timestamp. This
+        // is additive; existing v14 rows keep working with the column defaults.
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        let db = Database {
+            path: db_path.to_string_lossy().to_string(),
+        };
+
+        // Seed a v14-shaped DB (the pre-v15 `fix_agent_dispatches` shape) and
+        // stamp user_version=14 so ONLY the v15 migration is pending.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runs (id TEXT PRIMARY KEY, workflow_id TEXT, started_at TEXT, status TEXT);
+                 CREATE TABLE workflows (id TEXT PRIMARY KEY, name TEXT);
+                 CREATE TABLE fix_agent_dispatches (
+                     id TEXT PRIMARY KEY,
+                     source_run_id TEXT NOT NULL,
+                     fix_workflow_id TEXT NOT NULL,
+                     fix_run_id TEXT,
+                     initiator TEXT NOT NULL,
+                     dispatched_at TEXT NOT NULL
+                 );
+                 INSERT INTO runs (id) VALUES ('run-a');
+                 INSERT INTO runs (id) VALUES ('run-b');
+                 INSERT INTO workflows (id, name) VALUES ('wf-fix', 'Fixer');
+                 INSERT INTO fix_agent_dispatches (id, source_run_id, fix_workflow_id, fix_run_id, initiator, dispatched_at)
+                     VALUES ('d0', 'run-a', 'wf-fix', 'run-fix-0', 'ui', '2026-01-01T00:00:00Z');
+                 PRAGMA user_version = 14;",
+            )
+            .unwrap();
+        }
+
+        let conn = db.conn().unwrap();
+        db.run_migrations(&conn, 14).unwrap();
+
+        // Every new local-mode column must exist post-migration.
+        for column in [
+            "mode",
+            "status",
+            "branch",
+            "pr_url",
+            "worktree_path",
+            "detail",
+            "updated_at",
+        ] {
+            assert!(
+                Database::table_has_column(&conn, "fix_agent_dispatches", column),
+                "v15 must add the `{column}` column to fix_agent_dispatches"
+            );
+        }
+
+        // The pre-existing v14 row must have taken the additive defaults
+        // (`mode='cloud'`, `status='dispatched'`) — history is preserved.
+        let (mode, status): (String, String) = conn
+            .query_row(
+                "SELECT mode, status FROM fix_agent_dispatches WHERE id = 'd0'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            mode, "cloud",
+            "legacy rows default to the cloud dispatch mode"
+        );
+        assert_eq!(
+            status, "dispatched",
+            "legacy rows default to the dispatched lifecycle status"
+        );
+
+        // A local-mode row round-trips through the new columns.
+        conn.execute(
+            "INSERT INTO fix_agent_dispatches
+                (id, source_run_id, fix_workflow_id, fix_run_id, initiator, dispatched_at, mode, status, branch, pr_url, worktree_path, detail, updated_at)
+             VALUES ('d1', 'run-b', 'wf-fix', NULL, 'ui', '2026-01-02T00:00:00Z', 'local', 'claimed', 'chaos-fix/run-b', NULL, '/tmp/wt', 'claimed working tree', '2026-01-02T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let (rt_mode, rt_status, rt_branch, rt_worktree): (String, String, String, String) = conn
+            .query_row(
+                "SELECT mode, status, branch, worktree_path FROM fix_agent_dispatches WHERE id = 'd1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(rt_mode, "local");
+        assert_eq!(rt_status, "claimed");
+        assert_eq!(rt_branch, "chaos-fix/run-b");
+        assert_eq!(rt_worktree, "/tmp/wt");
 
         let _ = std::fs::remove_dir_all(dir);
     }
