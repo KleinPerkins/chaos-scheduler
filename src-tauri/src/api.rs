@@ -682,6 +682,7 @@ fn dispatch_with_idempotency(
             payload,
             rerun_of_run_id,
             input_json,
+            false,
         )
         .map_err(|e| match e {
             // The gate maps by ServiceError status; a free-form admission error

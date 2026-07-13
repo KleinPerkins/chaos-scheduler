@@ -537,6 +537,7 @@ impl SchedulerService {
     /// on-completion chains, and the queue drainer keep calling the engine
     /// directly and never route through here.
     #[allow(clippy::too_many_arguments)] // Threads the full manual-dispatch context.
+    #[allow(clippy::too_many_arguments)] // Threads the full manual-dispatch context.
     pub fn dispatch_manual_run(
         &self,
         workspace_root: &str,
@@ -547,6 +548,7 @@ impl SchedulerService {
         payload: Option<&str>,
         rerun_of: Option<&str>,
         input_json: Option<&str>,
+        suppress_completion_triggers: bool,
     ) -> Result<DispatchOutcome, ManualDispatchError> {
         self.ensure_workflow_execution_allowed(workflow_id)
             .map_err(ManualDispatchError::Gate)?;
@@ -593,7 +595,7 @@ impl SchedulerService {
             upstream_run_id: None,
             input_json,
             rerun_of_run_id: rerun_of,
-            suppress_completion_triggers: false,
+            suppress_completion_triggers,
             dedupe: false,
             app_handle: None,
         };
@@ -738,6 +740,7 @@ impl SchedulerService {
                 None, // payload: NONE — the prompt rides input_json, never payload
                 None, // rerun_of
                 Some(&input_json),
+                false, // suppress_completion_triggers: cloud dispatch keeps default chains
             )
             .map_err(FixAgentError::Dispatch)?;
 
@@ -1901,6 +1904,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             )
             .expect("dispatch should succeed");
 
@@ -1934,6 +1938,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             )
             .expect("first dispatch should succeed");
         assert_eq!(first.status, "queued");
@@ -1950,6 +1955,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             )
             .expect("second dispatch should replay");
         assert_eq!(second.status, "duplicate");
@@ -1986,6 +1992,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             )
             .expect("dispatch should succeed");
 
@@ -1993,6 +2000,97 @@ mod tests {
         assert_eq!(outcome.status, "admitted");
         assert!(outcome.run_id.is_some());
         assert!(outcome.queued_run_id.is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// M5 (D05): the LOCAL fix-agent rerun must NOT cascade downstream
+    /// on-completion chains — a successful rerun proves only "exit 0 after the
+    /// agent's edits," and firing dependent workflows would trigger their real
+    /// side effects off unreviewed code. `dispatch_manual_run` must therefore
+    /// thread `suppress_completion_triggers` all the way to the persisted queued
+    /// row so the intent survives the enqueue -> drain boundary (before schema
+    /// v16 the bit lived only in the in-memory dispatch options and was dropped
+    /// when a run QUEUED). This drives the `ui_fix_rerun` trigger kind through a
+    /// forced QUEUE (unmet dependency) so no real work runs inline.
+    #[test]
+    fn dispatch_manual_run_threads_suppress_completion_triggers_on_fix_rerun() {
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec![], false);
+        let id = seed_workflow(
+            &db,
+            "Fix Rerun Source",
+            "scripts/noop.py",
+            r#"{"queue":"production-default","depends_on":["upstream-never"]}"#,
+        );
+
+        let outcome = svc
+            .dispatch_manual_run(
+                dir.to_str().unwrap(),
+                "python3",
+                &id,
+                "ui_fix_rerun",
+                None,
+                None,
+                None,
+                None,
+                true,
+            )
+            .expect("dispatch should queue");
+
+        assert_eq!(outcome.status, "queued");
+        assert!(outcome.queued_run_id.is_some());
+
+        // The suppression intent is persisted on the queued row so the drain
+        // path can honor it. Without the v16 threading this asserts `false`.
+        let rows = db.list_queued_runs(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].suppress_completion_triggers,
+            "fix rerun must persist suppress_completion_triggers=true on the queued row"
+        );
+        assert_eq!(rows[0].trigger_kind.as_deref(), Some("ui_fix_rerun"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The default (non-fix) dispatch path must keep firing completion chains,
+    /// so the suppression bit is opt-in: a plain `ui_enqueue` that queues
+    /// persists `suppress_completion_triggers=false`.
+    #[test]
+    fn dispatch_manual_run_defaults_suppress_completion_triggers_false() {
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec![], false);
+        let id = seed_workflow(
+            &db,
+            "Normal Enqueue",
+            "scripts/noop.py",
+            r#"{"queue":"production-default","depends_on":["upstream-never"]}"#,
+        );
+
+        let outcome = svc
+            .dispatch_manual_run(
+                dir.to_str().unwrap(),
+                "python3",
+                &id,
+                "ui_enqueue",
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .expect("dispatch should queue");
+
+        assert_eq!(outcome.status, "queued");
+        let rows = db.list_queued_runs(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            !rows[0].suppress_completion_triggers,
+            "normal dispatch must not suppress downstream completion chains"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

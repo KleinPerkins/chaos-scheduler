@@ -455,6 +455,7 @@ pub fn enqueue_workflow(
             None,
             None,
             None,
+            false,
         )
         .map_err(|e| e.to_string())
 }
@@ -537,6 +538,7 @@ fn dispatch_rerun(
             Some(&payload),
             source_run_id.as_deref(),
             input_override_json.as_deref(),
+            false,
         )
         .map_err(|e| e.to_string())
 }
