@@ -3240,8 +3240,22 @@ mod tests {
             });
             match program {
                 "cursor-agent" => {
+                    // Test double: simulate the agent creating one marker file in
+                    // its working dir. Path-injection guard (defense in depth for
+                    // a test-only sink): canonicalize the base dir, strip the
+                    // marker to its final path component (`file_name`), and confirm
+                    // the join stays directly inside the canonical base before
+                    // writing — no attacker-influenced component can redirect it.
                     if let (Some(dir), Some(file)) = (cwd, &self.agent_creates_file) {
-                        let _ = std::fs::write(std::path::Path::new(dir).join(file), b"fix");
+                        if let (Ok(base), Some(name)) = (
+                            std::fs::canonicalize(dir),
+                            std::path::Path::new(file).file_name(),
+                        ) {
+                            let target = base.join(name);
+                            if target.parent() == Some(base.as_path()) {
+                                let _ = std::fs::write(target, b"fix");
+                            }
+                        }
                     }
                     Ok(if self.agent_exit_ok {
                         fake_ok(r#"{"result":"agent done"}"#)
