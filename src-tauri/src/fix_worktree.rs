@@ -438,11 +438,25 @@ mod tests {
             .unwrap_or(false)
     }
 
+    /// A `git` command with any inherited git-hook context stripped, so the
+    /// real-git tests below are hermetic even when `cargo test` runs inside this
+    /// project's own pre-push hook (which exports `GIT_DIR`/`GIT_INDEX_FILE` —
+    /// and `GIT_DIR` overrides `current_dir`, redirecting git at the primary
+    /// checkout). This mirrors what [`SystemProcessRunner`] now does for our own
+    /// git plumbing, keeping the direct-`Command` test helpers consistent.
+    fn git_cmd() -> Command {
+        let mut cmd = Command::new("git");
+        for key in crate::service::INHERITED_GIT_CONTEXT_VARS {
+            cmd.env_remove(key);
+        }
+        cmd
+    }
+
     fn init_repo() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("chaos-fix-it-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let run = |args: &[&str]| {
-            let ok = Command::new("git")
+            let ok = git_cmd()
                 .args(args)
                 .current_dir(&dir)
                 .output()
@@ -591,7 +605,7 @@ mod tests {
         );
 
         // The branch is live while the worktree exists.
-        let branches = Command::new("git")
+        let branches = git_cmd()
             .args(["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
             .current_dir(&repo)
             .output()
@@ -601,7 +615,7 @@ mod tests {
         // FINALLY: dropping tears down the worktree AND deletes the branch.
         drop(wt);
         assert!(!wt_path.exists(), "worktree dir removed on drop");
-        let after = Command::new("git")
+        let after = git_cmd()
             .args(["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
             .current_dir(&repo)
             .output()
@@ -634,7 +648,7 @@ mod tests {
         sweep_orphaned_fix_worktrees(&runner, repo_str);
 
         assert!(!wt_path.exists(), "sweep removed the orphaned worktree");
-        let after = Command::new("git")
+        let after = git_cmd()
             .args(["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
             .current_dir(&repo)
             .output()
