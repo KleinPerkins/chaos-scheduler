@@ -1375,6 +1375,16 @@ impl SchedulerService {
         ) {
             return Err(FixAgentError::SourceNotEligible(refusal.to_string()));
         }
+        // sec-F5 / corr-M3: the pure M3 gate only special-cases the literal
+        // "production". ALSO refuse any environment the deployment has CONFIGURED
+        // as protected (`protected_environments`, e.g. "prod" / "live") — the
+        // rerun runs the source's REAL command with real side effects, so it is
+        // confined to the same non-protected set every other execution write is.
+        if self.is_protected_environment_name(&source_workflow.environment) {
+            return Err(FixAgentError::SourceNotEligible(
+                crate::fix_local::FixRerunSourceRefusal::ProductionEnvironment.to_string(),
+            ));
+        }
 
         // Idempotency: one fix per failed run — replay an existing dispatch.
         if let Some(existing) = self
@@ -3730,6 +3740,32 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, FixAgentError::SourceNotEligible(_)));
         // Nothing was claimed (rejected before the single-flight insert).
+        assert!(db
+            .get_fix_agent_dispatch_for_source_run(&source_id)
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn local_fix_dispatch_refuses_a_configured_protected_env_not_named_production() {
+        // sec-F5 / corr-M3: a source in a CONFIGURED protected environment — here
+        // "prod", NOT the literal "production" the pure M3 gate special-cases —
+        // is refused with the production-class refusal, before any claim.
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec!["prod"], false);
+        let fix = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        enable_fix_agent(&db, &fix, 5);
+        // A local-tree-reading command source that would pass the pure M3 gate
+        // ("prod" != "production"), but sits in the configured-protected env.
+        let (_wf, source_id) = seed_failed_local_source(&db, "prod", "true");
+
+        let err = svc
+            .dispatch_fix_agent_local(dir.to_str().unwrap(), "python3", &source_id, "ui")
+            .unwrap_err();
+        assert!(matches!(err, FixAgentError::SourceNotEligible(_)));
+        // Rejected before the single-flight claim (no thread, no lease).
         assert!(db
             .get_fix_agent_dispatch_for_source_run(&source_id)
             .unwrap()
