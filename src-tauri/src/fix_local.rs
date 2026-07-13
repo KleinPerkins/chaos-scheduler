@@ -288,10 +288,13 @@ pub fn describe_rerun_command(script_path: &str, spec_json: Option<&str>) -> Str
 
 /// `git push` argv for the fix branch. Uses the `--` separator (precedent in
 /// `operators.rs`) so a hostile-looking branch name can never be read as an
-/// option.
+/// option. `--no-verify` (sec-F2) skips the pre-push hook on the scheduler's OWN
+/// credentialed push — a caller ALSO points `core.hooksPath` at an empty dir
+/// (belt-and-suspenders; that override also defeats non-`--no-verify` hooks).
 pub fn git_push_argv(remote: &str, branch: &str) -> Vec<String> {
     vec![
         "push".to_string(),
+        "--no-verify".to_string(),
         "--set-upstream".to_string(),
         remote.to_string(),
         "--".to_string(),
@@ -500,6 +503,17 @@ mod tests {
             argv[sep + 1],
             "chaos-fix/run-123",
             "branch is a positional after --"
+        );
+    }
+
+    #[test]
+    fn f2_git_push_argv_skips_the_pre_push_hook() {
+        // sec-F2: the scheduler's own credentialed push must not fire an
+        // agent-planted pre-push hook.
+        let argv = git_push_argv("origin", "chaos-fix/run-123");
+        assert!(
+            argv.contains(&"--no-verify".to_string()),
+            "the scheduler's own push skips the pre-push hook"
         );
     }
 

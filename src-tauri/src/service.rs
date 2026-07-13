@@ -506,6 +506,52 @@ fn worktree_git_checked(
     )))
 }
 
+/// A scratch directory that is best-effort removed when dropped, so EVERY
+/// terminal path of the fix flow (Ok or any early `Err`) cleans up its temp
+/// artifacts without a manual remove at each return.
+#[allow(dead_code)]
+struct ScratchDir(std::path::PathBuf);
+
+#[allow(dead_code)]
+impl ScratchDir {
+    fn new(prefix: &str) -> std::io::Result<Self> {
+        let p = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&p)?;
+        Ok(ScratchDir(p))
+    }
+    fn path_str(&self) -> String {
+        self.0.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Run an app-authored git MUTATION (commit / push) with repo hooks fully
+/// DISABLED (sec-F2). The (untrusted) agent edits the tree FIRST, so an
+/// agent-planted `.git/hooks/*` — or a `core.hooksPath` written into the shared
+/// local config — would otherwise fire DURING the scheduler's OWN, CREDENTIALED
+/// commit/push. Pointing `core.hooksPath` at a guaranteed-EMPTY dir defeats
+/// EVERY hook (including the `post-*` hooks that `--no-verify` does NOT skip);
+/// callers additionally pass `--no-verify` where valid (belt-and-suspenders).
+/// This is the APP's own git plumbing, NOT a repo commit-guard bypass, and does
+/// not touch validation fidelity (the rerun is a separate, hooks-ENABLED run).
+#[allow(dead_code)]
+fn worktree_git_checked_no_hooks(
+    runner: &dyn ProcessRunner,
+    root: &str,
+    empty_hooks_dir: &str,
+    args: &[&str],
+) -> Result<(), FixAgentError> {
+    let hooks_kv = format!("core.hooksPath={empty_hooks_dir}");
+    let mut full: Vec<&str> = vec!["-c", &hooks_kv];
+    full.extend_from_slice(args);
+    worktree_git_checked(runner, root, &full)
+}
+
 /// Poll the source rerun to a terminal state with a bounded budget (M6). The
 /// rerun runs INLINE (status `admitted`, `dispatch.run_id` set) when there is
 /// capacity, or QUEUES (`dispatch.queued_run_id` set; a worker drains it later).
@@ -620,6 +666,13 @@ pub(crate) fn run_local_fix_flow(
     let root = flow.worktree.path_str();
     let branch = flow.worktree.branch().to_string();
 
+    // sec-F2: an empty hooks dir OUTSIDE the worktree that the scheduler's OWN
+    // commit + push point `core.hooksPath` at, so no agent-planted hook fires
+    // during our credentialed git steps. Dropped (removed) on every return.
+    let hooks_scratch = ScratchDir::new("chaos-fix-nohooks")
+        .map_err(|e| FixAgentError::Local(format!("failed to prepare the fix scratch dir: {e}")))?;
+    let empty_hooks = hooks_scratch.path_str();
+
     // 1. AGENT (M1 credential isolation). The empty gh-config scratch dir lives
     //    OUTSIDE the worktree so gh can never write config the fix commit would
     //    then sweep up via `git add -A`.
@@ -674,15 +727,17 @@ pub(crate) fn run_local_fix_flow(
     let commit_msg =
         crate::fix_local::build_fix_commit_message(&flow.source_workflow.name, flow.source_run_id);
     worktree_git_checked(flow.runner, root, &["add", "-A"])?;
-    worktree_git_checked(
+    worktree_git_checked_no_hooks(
         flow.runner,
         root,
+        &empty_hooks,
         &[
             "-c",
             "user.email=fix-agent@chaos-scheduler.local",
             "-c",
             "user.name=Chaos Scheduler Fix Agent",
             "commit",
+            "--no-verify",
             "-m",
             &commit_msg,
         ],
@@ -759,7 +814,7 @@ pub(crate) fn run_local_fix_flow(
 
     let push_argv = crate::fix_local::git_push_argv(FIX_LOCAL_PR_REMOTE, &branch);
     let push_refs: Vec<&str> = push_argv.iter().map(String::as_str).collect();
-    worktree_git_checked(flow.runner, root, &push_refs)?;
+    worktree_git_checked_no_hooks(flow.runner, root, &empty_hooks, &push_refs)?;
 
     let title =
         crate::fix_local::build_fix_pr_title(&flow.source_workflow.name, flow.source_run_id);
@@ -3302,6 +3357,10 @@ mod tests {
         pr_body: std::sync::Mutex<Option<String>>,
         agent_exit_ok: bool,
         agent_creates_file: Option<String>,
+        /// When true, `git push` is executed for REAL (needs a configured
+        /// remote) instead of stubbed — used by the sec-F2 hook and corr-F2
+        /// force-with-lease tests that must exercise the actual push.
+        real_push: bool,
     }
 
     impl FixFlowRunner {
@@ -3311,7 +3370,12 @@ mod tests {
                 pr_body: std::sync::Mutex::new(None),
                 agent_exit_ok,
                 agent_creates_file: agent_creates_file.map(str::to_string),
+                real_push: false,
             }
+        }
+        fn with_real_push(mut self) -> Self {
+            self.real_push = true;
+            self
         }
         fn calls(&self) -> Vec<RecordedCall> {
             self.calls.lock().unwrap().clone()
@@ -3359,8 +3423,15 @@ mod tests {
                     })
                 }
                 "git" => {
-                    if args.first().map(String::as_str) == Some("push") {
-                        Ok(fake_ok("")) // no remote under test
+                    // Detect the push by ANY arg (the scheduler's own git steps
+                    // are prefixed with `-c core.hooksPath=…` for sec-F2, so the
+                    // subcommand is no longer argv[0]).
+                    if args.iter().any(|a| a == "push") {
+                        if self.real_push {
+                            Ok(real_git(args, cwd))
+                        } else {
+                            Ok(fake_ok("")) // no remote under test
+                        }
                     } else {
                         Ok(real_git(args, cwd))
                     }
@@ -3461,6 +3532,31 @@ mod tests {
         git(&["add", "-A"]);
         git(&["commit", "-qm", "seed"]);
         dir
+    }
+
+    /// Add a bare `origin` remote to `repo` (shared by its worktrees via the
+    /// common dir) so the fix flow's push has a real destination. Returns the
+    /// bare remote path. Used by tests that must exercise the ACTUAL `git push`
+    /// (sec-F2 pre-push hook; corr-F2 force-with-lease over a stale remote).
+    fn add_bare_origin(repo: &std::path::Path) -> std::path::PathBuf {
+        let remote =
+            std::env::temp_dir().join(format!("chaos-fix-remote-{}.git", uuid::Uuid::new_v4()));
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "--bare", remote.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "bare remote init failed");
+        let mut cmd = std::process::Command::new("git");
+        for key in INHERITED_GIT_CONTEXT_VARS {
+            cmd.env_remove(key);
+        }
+        let out = cmd
+            .current_dir(repo)
+            .args(["remote", "add", "origin", remote.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git remote add origin failed");
+        remote
     }
 
     /// Seed a non-cron `command` source workflow (local-tree-reading) in
@@ -3578,7 +3674,7 @@ mod tests {
             .expect("a commit happened");
         let push_idx = calls
             .iter()
-            .position(|c| c.program == "git" && c.args.first().map(String::as_str) == Some("push"))
+            .position(|c| c.program == "git" && c.args.iter().any(|a| a == "push"))
             .expect("a push happened");
         assert!(commit_idx < push_idx, "edits committed before the push");
 
@@ -3588,6 +3684,96 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&db_dir);
+    }
+
+    #[test]
+    fn local_fix_disables_hooks_on_the_schedulers_own_git_f2() {
+        // sec-F2 (CRITICAL): the scheduler's OWN commit + push run in the shared
+        // worktree AFTER the (untrusted) agent has edited it, so an agent-planted
+        // hook must NOT fire during our CREDENTIALED git steps. We model the
+        // threat via a `core.hooksPath` written into the worktree's shared local
+        // config (one of the two vectors) pointing at hostile pre-commit /
+        // post-commit / pre-push hooks. The fix points core.hooksPath at an empty
+        // dir AND passes --no-verify, so NONE of them fire. (post-commit proves
+        // the core.hooksPath override — --no-verify does not skip post-* hooks.)
+        if !git_available() {
+            return;
+        }
+        let repo = init_git_repo();
+        add_bare_origin(&repo);
+        let db_dir = tmpdir();
+        let db = Arc::new(Database::new(&db_dir));
+        let (src_wf_id, src_run_id) =
+            seed_failed_local_source(&db, "sandbox", "CHECK=1 && test -f fixed.txt");
+        let src_wf = db.get_workflow(&src_wf_id).unwrap();
+        let fix_wf_id = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        let claim = db
+            .insert_fix_agent_dispatch(&src_run_id, &fix_wf_id, None, "ui", "local")
+            .unwrap();
+        let worktree =
+            crate::fix_worktree::create_fix_worktree(repo.to_str().unwrap(), &src_run_id).unwrap();
+
+        // Hostile hooks: each drops a distinctly-named sentinel when it runs.
+        let hooks_dir = repo.join("agent-hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let sentinels =
+            std::env::temp_dir().join(format!("chaos-fix-sentinels-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&sentinels).unwrap();
+        for hook in ["pre-commit", "post-commit", "pre-push"] {
+            let p = hooks_dir.join(hook);
+            std::fs::write(
+                &p,
+                format!("#!/bin/sh\ntouch \"{}/{hook}\"\n", sentinels.display()),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        // Plant core.hooksPath in the worktree's shared local config (the threat).
+        let set_hooks = std::process::Command::new("git")
+            .current_dir(worktree.path())
+            .args(["config", "core.hooksPath", hooks_dir.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(set_hooks.status.success(), "planting core.hooksPath failed");
+
+        // real_push so the pre-push hook is genuinely exercised against origin.
+        let runner = FixFlowRunner::new(true, Some("fixed.txt")).with_real_push();
+        let outcome = run_local_fix_flow(
+            &db,
+            LocalFixFlow {
+                workspace_root: repo.to_str().unwrap(),
+                python_path: "python3",
+                source_run_id: &src_run_id,
+                source_workflow: &src_wf,
+                prompt: "please fix",
+                worktree: &worktree,
+                claim_id: &claim.id,
+                runner: &runner,
+                rerun_timeout: std::time::Duration::from_secs(30),
+                poll_interval: std::time::Duration::from_millis(10),
+            },
+        )
+        .expect("flow should open a PR");
+        assert_eq!(outcome.status, "pr_opened");
+
+        let fired: Vec<String> = std::fs::read_dir(&sentinels)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            fired.is_empty(),
+            "no agent-planted hook may fire during the scheduler's credentialed git steps; fired: {fired:?}"
+        );
+
+        drop(worktree);
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&db_dir);
+        let _ = std::fs::remove_dir_all(&sentinels);
     }
 
     #[test]
@@ -3639,7 +3825,7 @@ mod tests {
             !runner
                 .calls()
                 .iter()
-                .any(|c| c.program == "git" && c.args.first().map(String::as_str) == Some("push")),
+                .any(|c| c.program == "git" && c.args.iter().any(|a| a == "push")),
             "no push on a red rerun"
         );
         // Bugbot fold (finding 2): a `rerun_failed` rolls the claim BACK so the
