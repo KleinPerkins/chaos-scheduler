@@ -3733,6 +3733,10 @@ mod tests {
 
     #[test]
     fn local_fix_flow_opens_a_draft_pr_after_a_green_rerun() {
+        // Serialize against tests that flip the process-global SHUTDOWN flag: this
+        // test runs a REAL validation rerun, and a SHUTDOWN flip mid-rerun would
+        // SIGKILL that child (scheduler exec loop) and flake it red.
+        let _shutdown = crate::scheduler::lock_shutdown_test_state();
         // Happy path end-to-end: agent edits (M1-scrubbed), commit-before-rerun,
         // the source's REAL command reruns GREEN in the worktree (M2), and the
         // app-authored DRAFT PR (M4) surfaces the diff + exact rerun command.
@@ -3831,6 +3835,9 @@ mod tests {
 
     #[test]
     fn local_fix_disables_hooks_on_the_schedulers_own_git_f2() {
+        // Serialize against SHUTDOWN-flipping tests (real rerun; see the happy-path
+        // test) so a mid-rerun SIGKILL cannot flake this red.
+        let _shutdown = crate::scheduler::lock_shutdown_test_state();
         // sec-F2 (CRITICAL): the scheduler's OWN commit + push run in the shared
         // worktree AFTER the (untrusted) agent has edited it, so an agent-planted
         // hook must NOT fire during our CREDENTIALED git steps. We model the
@@ -3921,6 +3928,9 @@ mod tests {
 
     #[test]
     fn local_fix_squashes_agent_commits_into_one_app_commit_f6() {
+        // Serialize against SHUTDOWN-flipping tests (real rerun; see the happy-path
+        // test) so a mid-rerun SIGKILL cannot flake this red.
+        let _shutdown = crate::scheduler::lock_shutdown_test_state();
         // sec-F6/corr-F5: the agent makes its OWN commit (hostile author) AND
         // leaves an extra unstaged edit. The pushed branch must carry EXACTLY ONE
         // app-authored commit (no agent commit metadata reaches origin) and the
@@ -3997,6 +4007,9 @@ mod tests {
 
     #[test]
     fn local_fix_detects_a_self_committing_agent_as_an_edit_f5() {
+        // Serialize against SHUTDOWN-flipping tests (real rerun; see the happy-path
+        // test) so a mid-rerun SIGKILL cannot flake this red.
+        let _shutdown = crate::scheduler::lock_shutdown_test_state();
         // corr-F5: an agent that COMMITS all its edits leaves a CLEAN working
         // tree. A bare `status --porcelain` check would misread that as "no
         // changes → nothing to fix"; detection vs the branch base treats the
@@ -4044,6 +4057,9 @@ mod tests {
 
     #[test]
     fn local_fix_push_overwrites_a_stale_remote_branch_f2force() {
+        // Serialize against SHUTDOWN-flipping tests (real rerun; see the happy-path
+        // test) so a mid-rerun SIGKILL cannot flake this red.
+        let _shutdown = crate::scheduler::lock_shutdown_test_state();
         // corr-F2: a prior FAILED attempt left a DIVERGED remote chaos-fix/<run>.
         // Because the branch is app-owned + deterministic, the re-dispatch push
         // must still succeed (fetch + --force-with-lease), overwriting the stale
@@ -4158,6 +4174,9 @@ mod tests {
 
     #[test]
     fn local_fix_flow_opens_no_pr_when_the_rerun_still_fails() {
+        // Serialize against SHUTDOWN-flipping tests so this fails for the RIGHT
+        // reason (the source command genuinely fails), not a mid-rerun SIGKILL.
+        let _shutdown = crate::scheduler::lock_shutdown_test_state();
         // The gate's whole point: if the source's REAL command STILL fails after
         // the agent's edits, NO PR is opened (no push, no gh) — the outcome is a
         // terminal `rerun_failed`, not a proposal.
@@ -4224,6 +4243,9 @@ mod tests {
 
     #[test]
     fn local_fix_flow_suppresses_source_completion_triggers() {
+        // Serialize against SHUTDOWN-flipping tests (real rerun; see the happy-path
+        // test) so a mid-rerun SIGKILL cannot flake this red.
+        let _shutdown = crate::scheduler::lock_shutdown_test_state();
         // M5: a GREEN fix rerun must NOT cascade the source's on-completion
         // downstream workflows (their real side effects). A downstream wired to
         // fire on the source's success must have ZERO runs after the fix rerun.
@@ -4292,6 +4314,9 @@ mod tests {
 
     #[test]
     fn local_fix_rerun_does_not_spawn_the_background_monitor_f1() {
+        // Serialize against SHUTDOWN-flipping tests (real rerun; see the happy-path
+        // test) so a mid-rerun SIGKILL cannot flake this red.
+        let _shutdown = crate::scheduler::lock_shutdown_test_state();
         // corr-F1: a source that prints a background-launch line ("launched (PID
         // N)") must NOT spawn the background-completion monitor during the fix
         // rerun (its later finish would fire a completion trigger that cascades).
@@ -4358,6 +4383,9 @@ mod tests {
 
     #[test]
     fn local_fix_rerun_does_not_spawn_child_subworkflows_f4() {
+        // Serialize against SHUTDOWN-flipping tests (real rerun; see the happy-path
+        // test) so a mid-rerun SIGKILL cannot flake this red.
+        let _shutdown = crate::scheduler::lock_shutdown_test_state();
         // corr-F4: a source that emits a `subworkflow_requested` task event must
         // spawn ZERO child workflows during the fix rerun. Subworkflow requests
         // are RUNTIME task events (not a static spec field), so the child spawn
@@ -4622,6 +4650,9 @@ mod tests {
 
     #[test]
     fn local_fix_push_failure_surfaces_local_error_and_teardown_is_orphan_safe() {
+        // Serialize against SHUTDOWN-flipping tests (real rerun; see the happy-path
+        // test) so a mid-rerun SIGKILL cannot flake this red.
+        let _shutdown = crate::scheduler::lock_shutdown_test_state();
         // Missing-test: gh/git/push FAILURE contract. The app's OWN credentialed
         // push fails for real here (the repo has NO `origin` remote), so
         // run_local_fix_flow surfaces an APP-AUTHORED Local error (never raw git
@@ -4708,6 +4739,9 @@ mod tests {
 
     #[test]
     fn local_fix_is_idempotent_a_second_local_dispatch_opens_no_second_pr() {
+        // Serialize against SHUTDOWN-flipping tests (real rerun; see the happy-path
+        // test) so a mid-rerun SIGKILL cannot flake this red.
+        let _shutdown = crate::scheduler::lock_shutdown_test_state();
         // Missing-test: end-to-end idempotency — the DRAFT PR is opened exactly
         // ONCE. A GREEN rerun opens the PR and KEEPS its single-flight claim
         // (status pr_opened), so a SECOND local dispatch for the SAME source run
