@@ -241,6 +241,15 @@ impl std::error::Error for ManualDispatchError {}
 /// never a re-typed literal.
 pub const FIX_AGENT_TRIGGER_KIND: &str = "ui_fix_agent";
 
+/// Trigger kind for the D05 LOCAL fix-agent's source RERUN. RESERVED for the
+/// orchestrator: it is the signal the scheduler uses to execute the rerun inside
+/// the fix's dedicated throwaway worktree (M2) rather than the primary checkout.
+/// No external dispatch surface sets a caller-supplied `trigger_kind` (they hard-
+/// code `ui_enqueue`/`ui_rerun`/…), so this cannot be spoofed from outside; the
+/// execution path additionally FAILS CLOSED (never falls back to the primary
+/// tree) if the derived worktree is absent.
+pub const FIX_RERUN_TRIGGER_KIND: &str = "ui_fix_rerun";
+
 /// Idempotency-key namespace for fix-agent dispatch. The key is
 /// `ui-fix-agent:<failed_run_id>`, so a re-dispatch for the same failed run
 /// replays the original rather than spawning (and spending) again.

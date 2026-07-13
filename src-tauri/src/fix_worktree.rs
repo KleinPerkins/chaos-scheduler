@@ -44,6 +44,15 @@ pub fn fix_worktree_base() -> PathBuf {
     std::env::temp_dir().join("chaos-scheduler-fixes")
 }
 
+/// The deterministic throwaway-worktree path for a source run — the single
+/// source of truth for where a LOCAL fix + its rerun live. Derived purely from
+/// [`fix_worktree_base`] + a sanitized `source_run_id`, so the orchestrator (at
+/// create time) and the rerun's execution cwd (derived from the run's own
+/// identity, no persisted column) resolve the SAME directory.
+pub fn fix_worktree_path_for(source_run_id: &str) -> PathBuf {
+    fix_worktree_base().join(sanitize_component(source_run_id))
+}
+
 /// Derive and validate the throwaway branch name for a source run. Reuses the
 /// same `validate_git_ref` guard as `git_pull` (defense in depth on top of the
 /// `--` positional separator used on every git argv below).
@@ -199,7 +208,7 @@ pub fn create_fix_worktree(
     let base = fix_worktree_base();
     std::fs::create_dir_all(&base)
         .map_err(|e| format!("failed to create fix worktree base {}: {e}", base.display()))?;
-    let path = base.join(sanitize_component(source_run_id));
+    let path = fix_worktree_path_for(source_run_id);
     let path_str = path
         .to_str()
         .ok_or_else(|| "fix worktree path is not valid UTF-8".to_string())?

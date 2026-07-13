@@ -6821,6 +6821,25 @@ impl Database {
         )
     }
 
+    /// M6 (D05 LOCAL fix crash recovery): cancel every still-queued source RERUN
+    /// (`trigger_kind` = the reserved fix-rerun kind). Its dedicated worktree is
+    /// reclaimed by the startup sweep, so draining it later would fail closed
+    /// anyway; cancelling here keeps the queue clean and unblocks a re-dispatch.
+    /// Returns the number of rows cancelled. Takes the reserved kind as an
+    /// argument so the caller binds one constant (never a re-typed literal).
+    pub fn cancel_orphaned_fix_rerun_queued_runs(
+        &self,
+        fix_rerun_trigger_kind: &str,
+    ) -> rusqlite::Result<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE queued_runs SET status = 'cancelled', finished_at = ?2 \
+             WHERE status = 'queued' AND trigger_kind = ?1",
+            params![fix_rerun_trigger_kind, now],
+        )
+    }
+
     pub fn mark_queued_run_terminal_by_id(
         &self,
         queued_run_id: &str,
@@ -9220,6 +9239,78 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(db.cancel_queued_run(&queued_id_2).unwrap(), 1);
         let rows = db.list_queued_runs(10).unwrap();
         assert!(rows.iter().any(|row| row.status == "cancelled"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cancel_orphaned_fix_rerun_queued_runs_targets_only_the_reserved_kind() {
+        // M6: on startup (after a crash reclaimed the fix worktrees), stale
+        // QUEUED source reruns must be cancelled, while every other queued run
+        // (a normal enqueue, a plain rerun, …) is left untouched.
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = db
+            .create_workflow(
+                "Fix Source",
+                None,
+                "true",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                None,
+                Some(r#"{"queue":"production-default","priority":5}"#),
+            )
+            .unwrap();
+
+        // A stale fix source rerun (reserved kind) + an ordinary queued run.
+        let fix_rerun_id = db
+            .upsert_queued_run_with_context(
+                &workflow.id,
+                "production-default",
+                5,
+                Some(crate::service::FIX_RERUN_TRIGGER_KIND),
+                None,
+                None,
+                None,
+                Some("src-run-1"),
+                true,
+            )
+            .unwrap();
+        let ordinary_id = db
+            .upsert_queued_run_with_context(
+                &workflow.id,
+                "production-default",
+                4,
+                Some("ui_enqueue"),
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+
+        let cancelled = db
+            .cancel_orphaned_fix_rerun_queued_runs(crate::service::FIX_RERUN_TRIGGER_KIND)
+            .unwrap();
+        assert_eq!(
+            cancelled, 1,
+            "only the reserved fix-rerun kind is cancelled"
+        );
+
+        let rows = db.list_queued_runs(10).unwrap();
+        let fix_row = rows.iter().find(|r| r.id == fix_rerun_id).unwrap();
+        let ordinary_row = rows.iter().find(|r| r.id == ordinary_id).unwrap();
+        assert_eq!(fix_row.status, "cancelled", "stale fix rerun is cancelled");
+        assert_eq!(
+            ordinary_row.status, "queued",
+            "an ordinary queued run must NOT be cancelled"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

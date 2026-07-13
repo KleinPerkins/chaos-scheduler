@@ -1803,6 +1803,33 @@ pub fn execute_workflow_with_context(
     suppress_completion_triggers: bool,
     app_handle: Option<tauri::AppHandle>,
 ) -> Result<RunResult, String> {
+    // M2 (D05 LOCAL fix): a fix-agent source RERUN must execute inside the fix's
+    // dedicated throwaway worktree, NEVER the shared primary checkout (editing +
+    // rerunning there would race the other scheduler workers). The worktree path
+    // is DERIVED from the run's own identity — the reserved fix-rerun trigger
+    // kind plus the source run it reruns — so both the inline dispatch and the
+    // queued-drain path resolve the SAME directory with no persisted column.
+    // Shadowing `chaos_labs_root` here routes the whole execution (command build,
+    // step-flow, typed operator, child/background dispatch) into the worktree.
+    // FAIL CLOSED: if the worktree is absent (e.g. a post-crash stale queued
+    // rerun whose worktree the startup sweep already reclaimed), refuse rather
+    // than silently running agent-edited code against the primary tree.
+    let fix_rerun_root;
+    let chaos_labs_root: &str = if trigger_kind == Some(crate::service::FIX_RERUN_TRIGGER_KIND) {
+        let source_run_id =
+            rerun_of_run_id.ok_or_else(|| "fix rerun is missing its source run id".to_string())?;
+        let worktree = crate::fix_worktree::fix_worktree_path_for(source_run_id);
+        if !worktree.is_dir() {
+            return Err(format!(
+                "fix rerun worktree is missing for source run {source_run_id}; \
+                 refusing to run against the primary checkout"
+            ));
+        }
+        fix_rerun_root = worktree.to_string_lossy().into_owned();
+        &fix_rerun_root
+    } else {
+        chaos_labs_root
+    };
     let workflow = db
         .get_workflow(workflow_id)
         .map_err(|e| format!("Failed to get workflow: {}", e))?;
@@ -3640,6 +3667,15 @@ pub fn start_scheduler_loop(
             &crate::service::SystemProcessRunner,
             &chaos_labs_root,
         );
+        // M6: a fix source rerun may have been QUEUED (at capacity / mutex-busy)
+        // when the crash hit. Its worktree was just reclaimed above, so cancel
+        // the stale queued rerun too — otherwise it would drain later and
+        // fail closed against the missing worktree.
+        if let Err(e) =
+            db.cancel_orphaned_fix_rerun_queued_runs(crate::service::FIX_RERUN_TRIGGER_KIND)
+        {
+            log::warn!("Failed to cancel orphaned fix-rerun queued runs on startup: {e}");
+        }
         let worker_count = scheduler_worker_count();
         let worker_pool = SchedulerWorkerPool::new(
             worker_count,
@@ -6253,6 +6289,125 @@ not json
             "suppression intent must reach the drain job so a fix rerun does not cascade"
         );
         assert_eq!(candidate.trigger_kind.as_deref(), Some("ui_fix_rerun"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fix_rerun_executes_in_the_derived_worktree_not_the_primary_tree() {
+        // M2: a fix source rerun (reserved trigger kind) must execute inside the
+        // fix's dedicated throwaway worktree, NEVER the shared primary checkout.
+        let (db, dir) = structured_test_db();
+        // A command workflow that records its execution cwd via a marker file.
+        let wf = db
+            .create_workflow(
+                "Fix Source",
+                None,
+                "MARKER=1 && pwd > pwd_marker.txt",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "production",
+                None,
+                None,
+                Some(r#"{"queue":"production-default"}"#),
+            )
+            .unwrap();
+
+        let source_run_id = format!("src-{}", uuid::Uuid::new_v4());
+        // The orchestrator creates this worktree; here we just need the directory
+        // to exist so the derive resolves and the command has a cwd.
+        let worktree = crate::fix_worktree::fix_worktree_path_for(&source_run_id);
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let result = execute_workflow_with_context(
+            &db,
+            dir.to_str().unwrap(), // primary checkout
+            "python3",
+            &wf.id,
+            false,
+            false,
+            false,
+            Some(crate::service::FIX_RERUN_TRIGGER_KIND),
+            None,
+            None,
+            None,
+            Some(&source_run_id), // rerun_of => derives the worktree cwd
+            None,
+            true, // suppress_completion_triggers (M5)
+            None,
+        )
+        .expect("fix rerun executes");
+
+        assert!(result.success, "the source command should exit 0");
+        assert!(
+            worktree.join("pwd_marker.txt").exists(),
+            "fix rerun must execute in the derived worktree"
+        );
+        assert!(
+            !dir.join("pwd_marker.txt").exists(),
+            "fix rerun must NOT execute in the primary checkout"
+        );
+
+        let _ = std::fs::remove_dir_all(&worktree);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fix_rerun_fails_closed_when_its_worktree_is_absent() {
+        // M2 safety: a fix rerun whose worktree is gone (e.g. a post-crash stale
+        // queued rerun the startup sweep already reclaimed) must REFUSE, never
+        // silently run agent-edited code against the primary checkout.
+        let (db, dir) = structured_test_db();
+        let wf = db
+            .create_workflow(
+                "Fix Source",
+                None,
+                "MARKER=1 && pwd > pwd_marker.txt",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "production",
+                None,
+                None,
+                Some(r#"{"queue":"production-default"}"#),
+            )
+            .unwrap();
+
+        let source_run_id = format!("src-{}", uuid::Uuid::new_v4());
+        let worktree = crate::fix_worktree::fix_worktree_path_for(&source_run_id);
+        assert!(!worktree.exists(), "worktree deliberately absent");
+
+        let result = execute_workflow_with_context(
+            &db,
+            dir.to_str().unwrap(),
+            "python3",
+            &wf.id,
+            false,
+            false,
+            false,
+            Some(crate::service::FIX_RERUN_TRIGGER_KIND),
+            None,
+            None,
+            None,
+            Some(&source_run_id),
+            None,
+            true,
+            None,
+        );
+        match result {
+            Err(e) => assert!(
+                e.contains("worktree is missing"),
+                "expected a fail-closed refusal, got: {e}"
+            ),
+            Ok(_) => panic!("must refuse when the fix-rerun worktree is missing"),
+        }
+        assert!(
+            !dir.join("pwd_marker.txt").exists(),
+            "must never fall back to the primary checkout"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
