@@ -82,9 +82,15 @@ pub trait ProcessRunner: Send + Sync {
     /// with `GITHUB_TOKEN`/`GH_TOKEN`/gh-config REMOVED, so a `--force`
     /// autonomous agent cannot itself `git push` / `gh pr merge` / echo the
     /// token — those credentials are provided ONLY to the scheduler's OWN single
-    /// push + PR-create step. The default delegates to [`ProcessRunner::run`]
-    /// (ignoring removals) so existing fakes keep compiling unchanged; the real
-    /// runner and the isolation tests override it.
+    /// push + PR-create step.
+    ///
+    /// sec-F7 — NON-SILENT scrub: the default no longer silently ignores
+    /// `env_remove`. A runner that does not override this method (e.g. a fake
+    /// that only implements [`ProcessRunner::run`]) HARD-ERRORS when a scrub is
+    /// requested, rather than spawning the child with the M1 credential removals
+    /// SILENTLY DROPPED. An empty `env_remove` still delegates to `run` so the
+    /// no-scrub call sites keep working unchanged; the real
+    /// [`SystemProcessRunner`] and the isolation tests override this to honor it.
     fn run_with_env(
         &self,
         program: &str,
@@ -93,7 +99,17 @@ pub trait ProcessRunner: Send + Sync {
         env_set: &[(String, String)],
         env_remove: &[&str],
     ) -> std::io::Result<Output> {
-        let _ = env_remove;
+        if !env_remove.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!(
+                    "ProcessRunner::run_with_env was asked to scrub {} env var(s) but this runner \
+                     does not implement the scrub; refusing to spawn '{program}' with the M1 \
+                     credential isolation SILENTLY DROPPED",
+                    env_remove.len()
+                ),
+            ));
+        }
         self.run(program, args, cwd, env_set)
     }
 }
@@ -3218,6 +3234,44 @@ mod tests {
     // runner for cursor-agent/gh + a real source rerun) and the dispatch
     // preflight (M3/M6 gates, single-flight claim + rollback on its own thread).
     // =====================================================================
+
+    /// A runner that ONLY implements `run` — it relies on the trait's default
+    /// `run_with_env`, exactly like a future runner that forgot the M1 scrub.
+    struct RunOnlyRunner;
+    impl ProcessRunner for RunOnlyRunner {
+        fn run(
+            &self,
+            _program: &str,
+            _args: &[String],
+            _cwd: Option<&str>,
+            _env: &[(String, String)],
+        ) -> std::io::Result<Output> {
+            Ok(std::process::Command::new("true").output().unwrap())
+        }
+    }
+
+    #[test]
+    fn run_with_env_default_hard_errors_on_a_dropped_scrub_f7() {
+        // sec-F7: the default `run_with_env` must NOT silently drop an M1
+        // credential scrub. A runner that does not override it hard-errors when
+        // asked to remove any env var, so a future runner can never spawn the
+        // agent child with the push tokens SILENTLY retained.
+        let runner = RunOnlyRunner;
+        let err = runner
+            .run_with_env(
+                "cursor-agent",
+                &["-p".to_string()],
+                None,
+                &[],
+                &["GITHUB_TOKEN", "GH_TOKEN"],
+            )
+            .expect_err("a requested scrub the runner cannot honor must hard-error");
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        // With NO scrub requested it still delegates to `run` (unchanged path).
+        assert!(runner
+            .run_with_env("git", &["status".to_string()], None, &[], &[])
+            .is_ok());
+    }
 
     #[derive(Clone)]
     struct RecordedCall {
