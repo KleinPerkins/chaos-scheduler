@@ -5019,16 +5019,20 @@ mod tests {
             reason: None,
         };
 
-        let timeout = std::time::Duration::from_millis(300);
-        // Background: admit at ~150ms (well inside the 300ms queue budget), then
-        // finish the run at ~380ms — PAST the 300ms a single start-anchored
-        // deadline would allow, but inside the fresh run-phase budget
-        // (admission ~150ms + 300ms = ~450ms).
+        // CI-robust wall-clock margins: this raced on loaded CI at the old
+        // 300ms/150ms budget (parallel-test scheduling jitter exceeded the 150ms
+        // admission margin). Scaled ~5x so realistic runner jitter is negligible
+        // (~600ms margins on both phases) while the SEMANTIC is preserved.
+        let timeout = std::time::Duration::from_millis(1500);
+        // Background: admit at ~900ms (600ms inside the 1500ms queue budget),
+        // then finish at ~1800ms — PAST the 1500ms a single start-anchored
+        // deadline would allow, but well inside the fresh run-phase budget
+        // (admission ~900ms + 1500ms = ~2400ms).
         let bg_db = Arc::clone(&db);
         let bg_wf = wf.id.clone();
         let bg_queued = queued_id.clone();
         let handle = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(150));
+            std::thread::sleep(std::time::Duration::from_millis(900));
             let run = bg_db
                 .create_run_with_context(
                     &bg_wf,
@@ -5044,15 +5048,17 @@ mod tests {
             bg_db
                 .mark_queued_run_terminal_by_id(&bg_queued, &run.id, "running")
                 .unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(230));
+            std::thread::sleep(std::time::Duration::from_millis(900));
             bg_db.finish_run(&run.id, 0, "", "", None).unwrap();
         });
 
-        let run =
-            await_rerun_terminal(&db, &dispatch, timeout, std::time::Duration::from_millis(5))
-                .expect(
-                    "a late-admitted, still-running rerun is awaited to terminal, not abandoned",
-                );
+        let run = await_rerun_terminal(
+            &db,
+            &dispatch,
+            timeout,
+            std::time::Duration::from_millis(10),
+        )
+        .expect("a late-admitted, still-running rerun is awaited to terminal, not abandoned");
         assert!(
             crate::db::run_status::ended_ok(&run.status),
             "the completed rerun resolves green"
