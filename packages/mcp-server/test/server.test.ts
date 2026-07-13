@@ -37,8 +37,48 @@ const ROUTES: Record<string, unknown> = {
   },
   "GET /api/v1/workflows": {
     workflows: [
-      { id: "w1", name: "A", environment: "sandbox" },
+      {
+        id: "w1",
+        name: "A",
+        environment: "sandbox",
+        kind: "generic",
+        spec_json: JSON.stringify({
+          kind: "generic",
+          generic: {
+            steps: [{ id: "run", command: "echo ok" }],
+          },
+          on_failure: [
+            {
+              type: "webhook",
+              url: "https://example.com/hook",
+              secret: "outbound-secret",
+            },
+          ],
+          nested: {
+            cursor_api_key: "cursor-secret",
+            smtp_password: "smtp-secret",
+          },
+        }),
+        trigger_config: JSON.stringify([
+          {
+            kind: "file_arrival",
+            path: "inbox/*.json",
+            signature_secret: "trigger-secret",
+          },
+        ]),
+        queue_config: JSON.stringify({
+          queue: "sandbox-default",
+          metadata: { secret: "queue-secret" },
+        }),
+        internal_only: "must-not-cross-resource-boundary",
+      },
       { id: "w2", name: "Prod", environment: "production" },
+      {
+        id: "w3",
+        name: "Malformed",
+        environment: "sandbox",
+        spec_json: '{"secret":"malformed-secret"',
+      },
     ],
   },
   "GET /api/v1/workflows/w1": {
@@ -46,6 +86,36 @@ const ROUTES: Record<string, unknown> = {
       id: "w1",
       name: "A",
       environment: "sandbox",
+      kind: "generic",
+      spec_json: JSON.stringify({
+        kind: "generic",
+        generic: {
+          steps: [{ id: "run", command: "echo ok" }],
+        },
+        on_failure: [
+          {
+            type: "webhook",
+            url: "https://example.com/hook",
+            secret: "outbound-secret",
+          },
+        ],
+        nested: {
+          cursor_api_key: "cursor-secret",
+          smtp_password: "smtp-secret",
+        },
+      }),
+      trigger_config: JSON.stringify([
+        {
+          kind: "file_arrival",
+          path: "inbox/*.json",
+          signature_secret: "trigger-secret",
+        },
+      ]),
+      queue_config: JSON.stringify({
+        queue: "sandbox-default",
+        metadata: { secret: "queue-secret" },
+      }),
+      internal_only: "must-not-cross-resource-boundary",
     },
   },
   "GET /api/v1/workflows/w2": {
@@ -286,9 +356,26 @@ describe("Chaos MCP server", () => {
   it("registers resources and prompts", async () => {
     const { client } = await connectedPair();
     const { resources } = await client.listResources();
-    expect(resources.map((r) => r.uri)).toContain("chaos://environments");
-    expect(resources.map((r) => r.uri)).toContain("chaos://workflows");
-    expect(resources.map((r) => r.uri)).toContain("chaos://email-profiles");
+    expect(resources.map((r) => r.uri).sort()).toEqual(
+      [
+        "chaos://email-profiles",
+        "chaos://environments",
+        "chaos://queued-runs",
+        "chaos://queues",
+        "chaos://version",
+        "chaos://workflows",
+      ].sort(),
+    );
+
+    const { resourceTemplates } = await client.listResourceTemplates();
+    expect(resourceTemplates.map((r) => r.uriTemplate).sort()).toEqual(
+      [
+        "chaos://runs/{id}",
+        "chaos://runs/{id}/logs",
+        "chaos://workflows/{id}",
+        "chaos://workflows/{id}/runs",
+      ].sort(),
+    );
 
     const { prompts } = await client.listPrompts();
     expect(prompts.map((p) => p.name).sort()).toEqual(
@@ -395,6 +482,89 @@ describe("Chaos MCP server", () => {
     const res = await client.readResource({ uri: "chaos://workflows" });
     const text = (res.contents[0] as { text: string }).text;
     expect(JSON.parse(text)[0].id).toBe("w1");
+  });
+
+  it("redacts nested secrets and allowlists workflow resource fields", async () => {
+    const { client } = await connectedPair();
+
+    const listResult = await client.readResource({ uri: "chaos://workflows" });
+    const listText = (listResult.contents[0] as { text: string }).text;
+    const workflows = JSON.parse(listText) as Array<Record<string, unknown>>;
+    const listed = workflows.find((workflow) => workflow.id === "w1");
+    expect(listed).toBeDefined();
+    expect(listed).not.toHaveProperty("internal_only");
+    expect(listText).not.toMatch(
+      /outbound-secret|cursor-secret|smtp-secret|trigger-secret|queue-secret|must-not-cross/,
+    );
+
+    const listedSpec = JSON.parse(String(listed!.spec_json));
+    expect(listedSpec.on_failure[0].secret).toBe("__redacted__");
+    expect(listedSpec.nested.cursor_api_key).toBe("__redacted__");
+    expect(listedSpec.nested.smtp_password).toBe("__redacted__");
+    const listedTriggers = JSON.parse(String(listed!.trigger_config));
+    expect(listedTriggers[0].signature_secret).toBe("__redacted__");
+    const listedQueue = JSON.parse(String(listed!.queue_config));
+    expect(listedQueue.metadata.secret).toBe("__redacted__");
+
+    const singleResult = await client.readResource({
+      uri: "chaos://workflows/w1",
+    });
+    const singleText = (singleResult.contents[0] as { text: string }).text;
+    expect(singleText).not.toMatch(
+      /outbound-secret|cursor-secret|smtp-secret|trigger-secret|queue-secret|must-not-cross/,
+    );
+    expect(JSON.parse(singleText).id).toBe("w1");
+  });
+
+  it("never echoes malformed stored JSON through workflow resources", async () => {
+    const { client } = await connectedPair();
+    const result = await client.readResource({ uri: "chaos://workflows" });
+    const text = (result.contents[0] as { text: string }).text;
+    const workflows = JSON.parse(text) as Array<Record<string, unknown>>;
+    const malformed = workflows.find((workflow) => workflow.id === "w3");
+
+    expect(malformed?.spec_json).toBe("__redacted_invalid_json__");
+    expect(text).not.toContain("malformed-secret");
+  });
+
+  it("maps missing workflow resources to a sanitized resource error", async () => {
+    const { client } = await connectedPair();
+
+    await expect(
+      client.readResource({ uri: "chaos://workflows/missing" }),
+    ).rejects.toThrow(/resource not found/i);
+  });
+
+  it("does not expose backend error bodies through resource errors", async () => {
+    const fetch: FetchLike = async () => ({
+      ok: false,
+      status: 500,
+      text: async () =>
+        JSON.stringify({ error: "backend-secret-response-body" }),
+    });
+    const config = configFromEnv({ CHAOS_SCHEDULER_API_KEY: "id.secret" });
+    const sdk = new ChaosSchedulerClient({
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      fetch,
+    });
+    const server = buildServer({ client: sdk, config });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    let message = "";
+    try {
+      await client.readResource({ uri: "chaos://workflows/w1" });
+    } catch (err) {
+      message = String(err);
+    }
+    expect(message).toMatch(/scheduler resource read failed/i);
+    expect(message).not.toContain("backend-secret-response-body");
   });
 
   it("reads a templated run resource", async () => {
