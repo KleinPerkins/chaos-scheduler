@@ -111,14 +111,21 @@ Outbound completion webhooks use a **different** scheme: HMAC-SHA256 over the
 | Webhook / operator secrets in workflow JSON | Stored in `spec_json` / `trigger_config`            | Replaced with `__redacted__` sentinel |
 | Cursor / SMTP settings                      | Local SQLite settings                               | Desktop IPC only (not REST)           |
 
-**Read-scope redaction** (`read` scope, MCP tools, `chaos://` resources): nested
-fields named `secret`, `signature_secret`, `cursor_api_key`, or `smtp_password`
-in workflow spec/trigger JSON are replaced with the stable sentinel
-`__redacted__` (distinct from empty/unset). Applied in the service layer so all
-read surfaces inherit identical behavior.
+**Read-scope redaction** (`read` scope and MCP tools): nested fields named
+`secret`, `signature_secret`, `cursor_api_key`, or `smtp_password` in workflow
+spec/trigger JSON are replaced with the stable sentinel `__redacted__`
+(distinct from empty/unset). Applied in the service layer so REST/SDK/tool reads
+inherit identical behavior.
 
-**Write/admin round-trip**: callers with `write` or `admin` scope receive full
-secrets so the desktop edit flow and PATCH round-trips keep working.
+**Resource projection** (`chaos://workflows` and
+`chaos://workflows/{id}`): MCP applies an additional scope-independent boundary
+before workflow state enters agent context. Known secret fields are always
+redacted across spec, trigger, and queue JSON; parsing is bounded; malformed or
+oversized nested JSON is replaced with `__redacted_invalid_json__`.
+
+**Write/admin round-trip**: REST/SDK and MCP tool callers with `write` or `admin`
+scope receive full secrets so edit and PATCH round-trips keep working. Workflow
+resources are intentionally not write round-trip payloads.
 
 ## Child-process environment scrubbing
 

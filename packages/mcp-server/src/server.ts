@@ -12,9 +12,11 @@ import {
   McpServer,
   ResourceTemplate,
 } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type {
-  CallToolResult,
-  ReadResourceResult,
+import {
+  ErrorCode,
+  McpError,
+  type CallToolResult,
+  type ReadResourceResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { ChaosApiError, ChaosSchedulerClient } from "@chaos-scheduler/sdk";
 import { z } from "zod";
@@ -25,6 +27,10 @@ import {
   ToolBudget,
 } from "./guardrails.js";
 import { SERVER_ICONS, SERVER_WEBSITE_URL } from "./icon.js";
+import {
+  projectWorkflowForResource,
+  projectWorkflowsForResource,
+} from "./resource-projection.js";
 
 export const SERVER_NAME = "chaos-scheduler";
 export const SERVER_VERSION = "0.1.0";
@@ -64,6 +70,51 @@ function jsonResource(uri: URL, data: unknown): ReadResourceResult {
       },
     ],
   };
+}
+
+const RESOURCE_NOT_FOUND = -32002;
+
+function mapResourceError(uri: URL, err: unknown): McpError {
+  if (err instanceof McpError) return err;
+  if (err instanceof ChaosApiError && err.isNotFound) {
+    return new McpError(RESOURCE_NOT_FOUND, "Resource not found", {
+      uri: uri.href,
+    });
+  }
+  if (err instanceof ChaosApiError) {
+    return new McpError(
+      ErrorCode.InternalError,
+      "Scheduler resource read failed",
+      { uri: uri.href, status: err.status },
+    );
+  }
+  return new McpError(
+    ErrorCode.InternalError,
+    "Scheduler resource read failed",
+    { uri: uri.href },
+  );
+}
+
+async function readJsonResource<T>(
+  uri: URL,
+  load: () => Promise<T>,
+  project: (data: T) => unknown = (data) => data,
+): Promise<ReadResourceResult> {
+  try {
+    return jsonResource(uri, project(await load()));
+  } catch (err) {
+    throw mapResourceError(uri, err);
+  }
+}
+
+function resourceIdentifier(uri: URL, value: unknown): string {
+  const id = Array.isArray(value) ? value.join("/") : String(value ?? "");
+  if (!id.trim()) {
+    throw new McpError(ErrorCode.InvalidParams, "Invalid resource identifier", {
+      uri: uri.href,
+    });
+  }
+  return id;
 }
 
 /**
@@ -628,7 +679,7 @@ export function buildServer(deps: ServerDeps): McpServer {
       description: "Product/version/schema info",
       mimeType: "application/json",
     },
-    async (uri) => jsonResource(uri, await client.getVersion()),
+    async (uri) => readJsonResource(uri, () => client.getVersion()),
   );
 
   server.registerResource(
@@ -639,7 +690,7 @@ export function buildServer(deps: ServerDeps): McpServer {
       description: "All execution environments",
       mimeType: "application/json",
     },
-    async (uri) => jsonResource(uri, await client.listEnvironments()),
+    async (uri) => readJsonResource(uri, () => client.listEnvironments()),
   );
 
   server.registerResource(
@@ -650,7 +701,12 @@ export function buildServer(deps: ServerDeps): McpServer {
       description: "All registered workflows",
       mimeType: "application/json",
     },
-    async (uri) => jsonResource(uri, await client.listWorkflows()),
+    async (uri) =>
+      readJsonResource(
+        uri,
+        () => client.listWorkflows(),
+        projectWorkflowsForResource,
+      ),
   );
 
   server.registerResource(
@@ -661,7 +717,7 @@ export function buildServer(deps: ServerDeps): McpServer {
       description: "All named SMTP delivery profiles (passwords masked)",
       mimeType: "application/json",
     },
-    async (uri) => jsonResource(uri, await client.listEmailProfiles()),
+    async (uri) => readJsonResource(uri, () => client.listEmailProfiles()),
   );
 
   server.registerResource(
@@ -672,8 +728,14 @@ export function buildServer(deps: ServerDeps): McpServer {
       description: "A single workflow by id",
       mimeType: "application/json",
     },
-    async (uri, variables) =>
-      jsonResource(uri, await client.getWorkflow(String(variables.id))),
+    async (uri, variables) => {
+      const id = resourceIdentifier(uri, variables.id);
+      return readJsonResource(
+        uri,
+        () => client.getWorkflow(id),
+        projectWorkflowForResource,
+      );
+    },
   );
 
   server.registerResource(
@@ -684,8 +746,10 @@ export function buildServer(deps: ServerDeps): McpServer {
       description: "Recent runs for a workflow",
       mimeType: "application/json",
     },
-    async (uri, variables) =>
-      jsonResource(uri, await client.listRuns(String(variables.id))),
+    async (uri, variables) => {
+      const id = resourceIdentifier(uri, variables.id);
+      return readJsonResource(uri, () => client.listRuns(id));
+    },
   );
 
   server.registerResource(
@@ -696,8 +760,10 @@ export function buildServer(deps: ServerDeps): McpServer {
       description: "A single run (result + logs)",
       mimeType: "application/json",
     },
-    async (uri, variables) =>
-      jsonResource(uri, await client.getRun(String(variables.id))),
+    async (uri, variables) => {
+      const id = resourceIdentifier(uri, variables.id);
+      return readJsonResource(uri, () => client.getRun(id));
+    },
   );
 
   server.registerResource(
@@ -708,8 +774,10 @@ export function buildServer(deps: ServerDeps): McpServer {
       description: "Stdout/stderr/exit metadata for a run",
       mimeType: "application/json",
     },
-    async (uri, variables) =>
-      jsonResource(uri, await client.getRunLogs(String(variables.id))),
+    async (uri, variables) => {
+      const id = resourceIdentifier(uri, variables.id);
+      return readJsonResource(uri, () => client.getRunLogs(id));
+    },
   );
 
   server.registerResource(
@@ -720,7 +788,7 @@ export function buildServer(deps: ServerDeps): McpServer {
       description: "Queue capacity snapshots",
       mimeType: "application/json",
     },
-    async (uri) => jsonResource(uri, await client.listQueues()),
+    async (uri) => readJsonResource(uri, () => client.listQueues()),
   );
 
   server.registerResource(
@@ -731,7 +799,7 @@ export function buildServer(deps: ServerDeps): McpServer {
       description: "Durable queued runs awaiting admission",
       mimeType: "application/json",
     },
-    async (uri) => jsonResource(uri, await client.listQueuedRuns()),
+    async (uri) => readJsonResource(uri, () => client.listQueuedRuns()),
   );
 
   // ---- Prompts (triage/reporting templates) ----

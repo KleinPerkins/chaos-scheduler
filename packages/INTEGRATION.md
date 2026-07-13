@@ -154,11 +154,15 @@ For deeper run detail and scheduler state:
   counts and caps).
 - `listQueuedRuns()` — durable queued runs awaiting or undergoing admission.
 
-**Read-scope redaction** — `getWorkflow` / `listWorkflows` (and MCP
-`get_workflow` + `chaos://workflows/{id}`) replace nested secret fields
-(`secret`, `signature_secret`, `cursor_api_key`, `smtp_password`) with the
-stable sentinel `__redacted__` when the caller has **read** scope only.
-**Write/admin** scopes receive full values so PATCH round-trips work. See
+**Read-scope redaction** — REST/SDK `getWorkflow` / `listWorkflows` and the MCP
+`get_workflow` tool replace nested secret fields (`secret`,
+`signature_secret`, `cursor_api_key`, `smtp_password`) with the stable sentinel
+`__redacted__` when the caller has **read** scope only. **Write/admin** tool
+calls receive full values so PATCH round-trips work. MCP workflow resources
+(`chaos://workflows` and `chaos://workflows/{id}`) add a second, scope-independent
+projection: they always redact those fields before injecting workflow state
+into agent context, bound nested JSON parsing, and replace malformed nested JSON
+with `__redacted_invalid_json__`. See
 [SECURITY.md](../SECURITY.md#secrets-storage--read-scope-redaction).
 
 Terminal run `status` values include `success`, `failed`, `cancelled`,

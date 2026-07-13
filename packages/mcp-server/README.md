@@ -124,6 +124,12 @@ unchanged, but prefer `enqueue_workflow`.
 `chaos://email-profiles`.
 Freshness is pull-based (Cursor does not document resource subscriptions).
 
+Workflow resources are safe context projections, not write round-trip payloads.
+They always redact known nested secret fields regardless of API-key scope,
+bound parsing of `spec_json` / `trigger_config` / `queue_config`, and replace
+malformed nested JSON with `__redacted_invalid_json__` rather than exposing the
+raw value. Use workflow write tools, not a resource payload, for mutations.
+
 ### Prompts
 
 `triage_failed_run(run_id)`, `summarize_workflow_health(environment)`,
