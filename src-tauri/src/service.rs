@@ -776,6 +776,24 @@ pub(crate) fn run_local_fix_flow(
     //    into THIS worktree) with completion triggers SUPPRESSED (M5). Dispatched
     //    via the free admission fn directly (no idempotency wrapper): the rerun
     //    is a fresh execution and must not collapse into the old failed run.
+    //
+    //    ACCEPTED RESIDUAL — threat-model posture: TRUSTED-LOCAL-TOOL. This
+    //    validation rerun executes the AGENT-EDITED code in the workflow's NORMAL
+    //    environment — the user's credentials + network — exactly as re-running
+    //    the failed job by hand would (the whole point of "re-run it to check the
+    //    fix"). We deliberately do NOT scrub this child and do NOT sandbox it: the
+    //    local fix agent is the SAME `cursor-agent` the user already runs by hand
+    //    against this machine/repo, treated as a TRUSTED LOCAL TOOL, not a
+    //    sandboxed hostile agent. A green rerun proves only "exit 0 after the
+    //    edits," NOT correctness. The containment guarantees that make this
+    //    acceptable are enforced elsewhere and hold regardless of what the rerun
+    //    does: never auto-merge + never auto-apply (M4 opens a DRAFT PR only —
+    //    see `open_draft_pr`), non-production + non-protected source only (M3 /
+    //    sec-F5 preflight), and NO downstream cascade during validation (the
+    //    `suppress_completion_triggers` flag below, backed by corr-F1/corr-F4 in
+    //    the executor). The M1 credential scrub is applied to the AGENT EDIT child
+    //    ONLY (it needs no creds to edit) — cheap defense-in-depth that does not
+    //    touch this rerun's fidelity.
     let options = NonCronDispatchOptions {
         notify_on_success: false,
         notify_on_failure: false,
