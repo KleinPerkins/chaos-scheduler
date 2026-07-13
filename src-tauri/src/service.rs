@@ -316,10 +316,20 @@ fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
 ///
 /// Honest scope: fencing is a MITIGATION, not a guarantee — a determined prompt
 /// injection can still address the model. The real containment is that the
-/// dispatch is PROPOSE-ONLY: at execution the seam forces `auto_create_pr=true`
-/// so the agent can only open a reviewable DRAFT PR (a human reviews + merges),
-/// never mutate the running system (B3), backed by the human-consent + rate
-/// gates (B4). The app has no PR-merge code path, so a fix is never auto-applied.
+/// dispatch is PROPOSE-ONLY, which rests on two APP-STRUCTURAL guarantees plus
+/// one accepted external dependency:
+///
+/// - (app-forced) the app has NO PR-merge code path AND the seam never sets
+///   `workOnCurrentBranch`, so the agent always pushes to a NEW branch and only
+///   opens a PR — a fix is NEVER auto-merged and NEVER auto-applied to the
+///   running system (B3);
+/// - (app-forced) at execution the seam FORCES `auto_create_pr=true`, so a
+///   dispatch always yields a reviewable PR rather than a silent branch;
+/// - (external default) the opened PR being a DRAFT is Cursor Cloud's documented
+///   default for a programmatic dispatch — an accepted external dependency, NOT
+///   something this code byte-forces.
+///
+/// A human always reviews + merges, backed by the human-consent + rate gates (B4).
 fn build_fix_agent_prompt(workflow_name: &str, run: &Run) -> String {
     let raw_stderr = run.stderr.as_deref().unwrap_or("");
     // Neutralize the fence delimiter inside the untrusted text so it cannot
