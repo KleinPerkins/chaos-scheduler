@@ -1419,8 +1419,12 @@ impl SchedulerService {
             )
             .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?;
         // corr-F3: record spend on the shared append-only ledger so cloud
-        // dispatches count toward the same hourly cap as local ones.
-        let _ = self.db.record_fix_agent_spend(source_run_id, "cloud");
+        // dispatches count toward the same hourly cap as local ones. Propagate a
+        // ledger-write failure (Bugbot) — consistent with the audit insert above
+        // — instead of silently under-counting the cap.
+        self.db
+            .record_fix_agent_spend(source_run_id, "cloud")
+            .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?;
 
         Ok(outcome)
     }
@@ -1553,8 +1557,17 @@ impl SchedulerService {
             .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?;
         // corr-F3: record spend NOW (append-only, synchronous in the preflight)
         // so this attempt counts toward the hourly cap EVEN IF the flow later
-        // fails and rolls the claim back on its thread.
-        let _ = self.db.record_fix_agent_spend(source_run_id, "local");
+        // fails and rolls the claim back on its thread. Fail CLOSED if the
+        // ledger write itself fails (Bugbot): silently swallowing the error would
+        // let a repeatedly-failing agent bypass `max_dispatches_per_hour`, so
+        // roll the just-inserted claim back and refuse rather than dispatch with
+        // the cap under-counted.
+        if let Err(e) = self.db.record_fix_agent_spend(source_run_id, "local") {
+            let _ = self.db.delete_fix_agent_dispatch(&claim.id);
+            return Err(FixAgentError::Service(ServiceError::Internal(
+                e.to_string(),
+            )));
+        }
 
         // The prompt describes the SOURCE failure (fenced untrusted stderr).
         let prompt = build_fix_agent_prompt(&source_workflow.name, &source_run);
