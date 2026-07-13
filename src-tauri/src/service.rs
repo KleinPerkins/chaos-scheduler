@@ -200,10 +200,11 @@ impl std::error::Error for ManualDispatchError {}
 
 /// Trigger kind stamped on every Cursor fix-agent dispatch (D05 / F10). It is
 /// the SOLE key the operator seam keys the prompt overlay + forced
-/// `auto_create_pr=false` on (see `scheduler::execute_typed_operator`), so a
-/// plain rerun/backfill/child dispatch of the same `cursor_agent` workflow —
-/// which never carries this kind — is NEVER hijacked. Exported so the seam and
-/// tests reference one constant, never a re-typed literal.
+/// `auto_create_pr=true` (propose-only DRAFT PR) on (see
+/// `scheduler::execute_typed_operator`), so a plain rerun/backfill/child
+/// dispatch of the same `cursor_agent` workflow — which never carries this kind
+/// — is NEVER hijacked. Exported so the seam and tests reference one constant,
+/// never a re-typed literal.
 pub const FIX_AGENT_TRIGGER_KIND: &str = "ui_fix_agent";
 
 /// Idempotency-key namespace for fix-agent dispatch. The key is
@@ -233,8 +234,6 @@ pub enum FixAgentError {
     NoFixWorkflow,
     /// The designated fix-agent workflow is not a `cursor_agent` cloud workflow.
     NotCursorAgent,
-    /// The designated fix-agent workflow targets a production environment (B3).
-    ProductionTarget(String),
     /// The source run is not in a `failed` terminal state.
     SourceNotFailed(String),
     /// The global per-hour dispatch ceiling has been reached (B4).
@@ -259,10 +258,6 @@ impl std::fmt::Display for FixAgentError {
             FixAgentError::NotCursorAgent => write!(
                 f,
                 "the designated fix-agent workflow is not a cursor_agent cloud workflow"
-            ),
-            FixAgentError::ProductionTarget(env) => write!(
-                f,
-                "the designated fix-agent workflow targets production environment '{env}'; fix agents must run in a sandbox / non-production environment"
             ),
             FixAgentError::SourceNotFailed(status) => write!(
                 f,
@@ -320,9 +315,11 @@ fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
 /// - stderr and the whole prompt are byte-capped.
 ///
 /// Honest scope: fencing is a MITIGATION, not a guarantee — a determined prompt
-/// injection can still address the model. The real containment is the non-prod
-/// target gate + forced `auto_create_pr=false` at execution (B3) and the
-/// human-consent + rate gates (B4).
+/// injection can still address the model. The real containment is that the
+/// dispatch is PROPOSE-ONLY: at execution the seam forces `auto_create_pr=true`
+/// so the agent can only open a reviewable DRAFT PR (a human reviews + merges),
+/// never mutate the running system (B3), backed by the human-consent + rate
+/// gates (B4). The app has no PR-merge code path, so a fix is never auto-applied.
 fn build_fix_agent_prompt(workflow_name: &str, run: &Run) -> String {
     let raw_stderr = run.stderr.as_deref().unwrap_or("");
     // Neutralize the fence delimiter inside the untrusted text so it cannot
@@ -620,16 +617,6 @@ impl SchedulerService {
         Ok(outcome)
     }
 
-    /// Whether an environment must be refused as a fix-agent target (B3). The
-    /// hard floor is the canonical `production` name (rejected regardless of the
-    /// backend's protected-environment config, which defaults empty so the
-    /// UI/API can still manage production workflows); any operator-configured
-    /// protected environment is refused too.
-    fn fix_agent_target_is_production(&self, environment: &str) -> bool {
-        normalize_environment_name(environment) == "production"
-            || self.is_protected_environment_name(environment)
-    }
-
     /// Dispatch an operator-designated Cursor **cloud** fix agent against a
     /// FAILED run (D05 / F10). OPT-IN and SAFE BY DEFAULT. There is NO automated
     /// caller — every dispatch originates from the explicit human-consent Modal
@@ -638,8 +625,9 @@ impl SchedulerService {
     ///
     /// 1. **enabled** — refuse unless the integration is turned on.
     /// 2. **designated workflow** — refuse unless a fix workflow is configured,
-    ///    it resolves, it is a `cursor_agent` typed workflow, and it lives in a
-    ///    NON-production environment (B3 gate, not a recommendation).
+    ///    it resolves, and it is a `cursor_agent` typed workflow. It may target
+    ///    ANY environment, production included: the dispatch is PROPOSE-ONLY, so
+    ///    the old non-production / sandbox target gate is gone (B3).
     /// 3. **source failed** — refuse unless the source run is `failed`.
     /// 4. **idempotency** — one fix per failed run: a second dispatch replays the
     ///    original (no second spend, no second audit row). This also bounds the
@@ -652,9 +640,10 @@ impl SchedulerService {
     /// rides `input_json` ONLY — never `payload` (which feeds the idempotency
     /// fingerprint). It supplies ONLY the prompt; repository / mode /
     /// `auto_create_pr` are read from the fix workflow's stored CONFIG at
-    /// execution (the B3 whitelist / forced-`auto_create_pr=false` overlay lives
-    /// on the operator seam). Never mutates the source run. Writes ONE audit row
-    /// (no prompt body).
+    /// execution, where the seam forces `auto_create_pr=true` so the agent opens
+    /// a reviewable DRAFT PR (the B3 prompt-only whitelist + forced-draft overlay
+    /// live on the operator seam). Never mutates the source run. Writes ONE audit
+    /// row (no prompt body).
     pub fn dispatch_fix_agent(
         &self,
         workspace_root: &str,
@@ -682,18 +671,15 @@ impl SchedulerService {
             return Err(FixAgentError::SourceNotFailed(source_run.status.clone()));
         }
 
-        // Resolve + gate the designated fix workflow: must exist, be a
-        // cursor_agent typed workflow, and NOT target production (B3).
+        // Resolve + gate the designated fix workflow: must exist and be a
+        // cursor_agent typed workflow. It may target ANY environment (production
+        // included) — the dispatch is PROPOSE-ONLY (draft PR), so there is no
+        // longer a non-production / sandbox target gate (B3).
         let fix_workflow = self
             .get_workflow(&fix_workflow_id)
             .map_err(FixAgentError::Service)?;
         if !workflow_is_cursor_agent(&fix_workflow) {
             return Err(FixAgentError::NotCursorAgent);
-        }
-        if self.fix_agent_target_is_production(&fix_workflow.environment) {
-            return Err(FixAgentError::ProductionTarget(
-                fix_workflow.environment.clone(),
-            ));
         }
 
         // Idempotency: if a fix was already dispatched for THIS failed run,
@@ -2201,27 +2187,33 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_fix_agent_rejects_a_production_target_workflow() {
+    fn dispatch_fix_agent_accepts_a_production_target_workflow() {
+        // PROPOSE-ONLY policy: the old fix-agent-specific "blocks designated
+        // production / requires a sandbox" target gate is GONE. A fix agent may
+        // now target the REAL repository (production included) because it can
+        // only ever open a reviewable DRAFT PR — it never mutates the running
+        // system. With the default (empty) protected-environment config — where
+        // the UI/API can already manage production workflows — a
+        // production-targeted fix workflow now dispatches instead of being
+        // refused.
         let dir = tmpdir();
         let db = Arc::new(Database::new(&dir));
-        // Empty protected list: the production refusal is a HARD FLOOR, not a
-        // function of the backend's (empty-by-default) protection config.
         let svc = service_with_db(db.clone(), vec![], false);
         let fix = seed_cursor_fix_workflow(&db, "Prod Fixer", "production");
         enable_fix_agent(&db, &fix, 5);
         let source_id = seed_failed_run(&db, "boom");
 
-        let err = svc
+        let outcome = svc
             .dispatch_fix_agent(dir.to_str().unwrap(), "python3", &source_id, "ui")
-            .expect_err("a production-targeted fix workflow must be refused");
-        assert!(matches!(err, FixAgentError::ProductionTarget(_)));
+            .expect("a production-targeted fix workflow is now ACCEPTED (propose-only draft PR)");
+        assert_eq!(outcome.status, "queued");
 
-        // Nothing was dispatched or audited.
-        assert!(db.list_queued_runs(10).unwrap().is_empty());
+        // The dispatch is real: one queued fix run and one audit row.
+        assert_eq!(db.list_queued_runs(10).unwrap().len(), 1);
         assert!(db
             .get_fix_agent_dispatch_for_source_run(&source_id)
             .unwrap()
-            .is_none());
+            .is_some());
 
         let _ = std::fs::remove_dir_all(dir);
     }
