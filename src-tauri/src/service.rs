@@ -673,6 +673,20 @@ pub(crate) fn run_local_fix_flow(
         .map_err(|e| FixAgentError::Local(format!("failed to prepare the fix scratch dir: {e}")))?;
     let empty_hooks = hooks_scratch.path_str();
 
+    // sec-F6/corr-F5: the fix branch's BASE — the commit the throwaway branch was
+    // cut from (its tip before the agent runs). Captured UP FRONT because the
+    // agent may itself COMMIT, moving HEAD. Used to (a) detect a self-committing
+    // agent's edits, (b) squash to exactly ONE app-authored commit, and (c)
+    // compute the full-range PR diff — so NO agent commit metadata rides onto the
+    // public branch and the body covers ALL of the agent's changes.
+    let base_out = worktree_git(flow.runner, root, &["rev-parse", "HEAD"])?;
+    let base = String::from_utf8_lossy(&base_out.stdout).trim().to_string();
+    if base.is_empty() {
+        return Err(FixAgentError::Local(
+            "could not resolve the fix branch base".to_string(),
+        ));
+    }
+
     // 1. AGENT (M1 credential isolation). The empty gh-config scratch dir lives
     //    OUTSIDE the worktree so gh can never write config the fix commit would
     //    then sweep up via `git add -A`.
@@ -711,21 +725,36 @@ pub(crate) fn run_local_fix_flow(
         ));
     }
 
-    // 2. Require an actual edit.
+    // 2. Require an actual edit — RELATIVE TO THE BASE, not just a dirty working
+    //    tree (corr-F5): an agent that COMMITS its own edits leaves a CLEAN tree,
+    //    which a bare `status --porcelain` would misread as "no changes". An edit
+    //    is EITHER an untracked/unstaged working change OR any difference from the
+    //    branch base (which captures the agent's own commit).
     let status_out = worktree_git(flow.runner, root, &["status", "--porcelain"])?;
-    if String::from_utf8_lossy(&status_out.stdout)
+    let working_dirty = !String::from_utf8_lossy(&status_out.stdout)
         .trim()
-        .is_empty()
-    {
+        .is_empty();
+    // `git diff --quiet <base>` exits non-zero when the working tree differs from
+    // base — true even when the agent committed (its content is on disk).
+    let differs_from_base = !worktree_git(flow.runner, root, &["diff", "--quiet", &base])?
+        .status
+        .success();
+    if !working_dirty && !differs_from_base {
         return Err(FixAgentError::Local(
             "the fix agent made no changes".to_string(),
         ));
     }
 
-    // 3. COMMIT the edits BEFORE the rerun (app-authored message; inline
-    //    identity so a bare CI/test repo without user.* config still commits).
+    // 3. COMMIT the edits BEFORE the rerun as exactly ONE app-authored commit
+    //    (sec-F6). `reset --soft <base>` first drops any agent-authored commit(s)
+    //    from the branch (keeping their content staged), so NO agent commit
+    //    metadata rides onto the PUBLIC branch; `add -A` then also stages
+    //    untracked/unstaged edits so the single commit carries EVERYTHING. Inline
+    //    identity lets a bare CI/test repo without user.* config still commit;
+    //    hooks are OFF (sec-F2).
     let commit_msg =
         crate::fix_local::build_fix_commit_message(&flow.source_workflow.name, flow.source_run_id);
+    worktree_git_checked(flow.runner, root, &["reset", "--soft", &base])?;
     worktree_git_checked(flow.runner, root, &["add", "-A"])?;
     worktree_git_checked_no_hooks(
         flow.runner,
@@ -809,7 +838,9 @@ pub(crate) fn run_local_fix_flow(
     // 6. GREEN rerun → app-author the DRAFT PR (M4). Capture the committed diff
     //    summary for the body, push the branch, then open a DRAFT PR. This push +
     //    PR-create is the ONLY credentialed step (the agent had none).
-    let diff_out = worktree_git(flow.runner, root, &["diff", "--stat", "HEAD~1", "HEAD"])?;
+    // Full-range diff from the branch base (corr-F5), so the body covers ALL the
+    // agent's changes even if it made multiple commits (now squashed to one).
+    let diff_out = worktree_git(flow.runner, root, &["diff", "--stat", &base, "HEAD"])?;
     let diff_stat = String::from_utf8_lossy(&diff_out.stdout).to_string();
 
     let push_argv = crate::fix_local::git_push_argv(FIX_LOCAL_PR_REMOTE, &branch);
@@ -3361,6 +3392,12 @@ mod tests {
         /// remote) instead of stubbed — used by the sec-F2 hook and corr-F2
         /// force-with-lease tests that must exercise the actual push.
         real_push: bool,
+        /// When true, the simulated agent COMMITS its own edit (distinct hostile
+        /// author) — exercises the sec-F6 squash + corr-F5 self-commit detection.
+        agent_self_commit: bool,
+        /// An extra file the simulated agent leaves UNSTAGED after its self-commit
+        /// (exercises "one app commit covers committed + unstaged changes").
+        agent_extra_unstaged: Option<String>,
     }
 
     impl FixFlowRunner {
@@ -3371,10 +3408,20 @@ mod tests {
                 agent_exit_ok,
                 agent_creates_file: agent_creates_file.map(str::to_string),
                 real_push: false,
+                agent_self_commit: false,
+                agent_extra_unstaged: None,
             }
         }
         fn with_real_push(mut self) -> Self {
             self.real_push = true;
+            self
+        }
+        fn with_agent_self_commit(mut self) -> Self {
+            self.agent_self_commit = true;
+            self
+        }
+        fn with_agent_extra_unstaged(mut self, name: &str) -> Self {
+            self.agent_extra_unstaged = Some(name.to_string());
             self
         }
         fn calls(&self) -> Vec<RecordedCall> {
@@ -3413,6 +3460,39 @@ mod tests {
                             let target = base.join(name);
                             if target.parent() == Some(base.as_path()) {
                                 let _ = std::fs::write(target, b"fix");
+                            }
+                        }
+                    }
+                    // sec-F6/corr-F5: optionally simulate an agent that COMMITS
+                    // its own edit under a DISTINCT (hostile) author, so the test
+                    // can prove `reset --soft` drops that commit and its metadata.
+                    if self.agent_self_commit {
+                        if let Some(dir) = cwd {
+                            let _ = agent_git(dir, &["add", "-A"]);
+                            let _ = agent_git(
+                                dir,
+                                &[
+                                    "-c",
+                                    "user.email=agent@hostile.example",
+                                    "-c",
+                                    "user.name=Hostile Agent",
+                                    "commit",
+                                    "-m",
+                                    "agent self-commit (should never reach origin)",
+                                ],
+                            );
+                        }
+                    }
+                    // An extra file left AFTER the self-commit stays UNSTAGED, so
+                    // the app's single commit must fold in committed + unstaged.
+                    if let (Some(dir), Some(extra)) = (cwd, &self.agent_extra_unstaged) {
+                        if let (Ok(base), Some(name)) = (
+                            std::fs::canonicalize(dir),
+                            std::path::Path::new(extra).file_name(),
+                        ) {
+                            let target = base.join(name);
+                            if target.parent() == Some(base.as_path()) {
+                                let _ = std::fs::write(target, b"extra");
                             }
                         }
                     }
@@ -3485,6 +3565,28 @@ mod tests {
 
     fn fake_fail() -> Output {
         std::process::Command::new("false").output().unwrap()
+    }
+
+    /// Run a git command as the SIMULATED AGENT inside its worktree (hermetic).
+    /// Distinct from the scheduler's own git — used only by the test double to
+    /// stage an agent self-commit.
+    fn agent_git(dir: &str, args: &[&str]) -> Output {
+        let mut cmd = std::process::Command::new("git");
+        for key in INHERITED_GIT_CONTEXT_VARS {
+            cmd.env_remove(key);
+        }
+        cmd.current_dir(dir).args(args);
+        cmd.output().unwrap()
+    }
+
+    /// Read-only git query in `dir` (hermetic), returning trimmed stdout.
+    fn git_read(dir: &std::path::Path, args: &[&str]) -> String {
+        let mut cmd = std::process::Command::new("git");
+        for key in INHERITED_GIT_CONTEXT_VARS {
+            cmd.env_remove(key);
+        }
+        let out = cmd.current_dir(dir).args(args).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
     /// Run the scheduler's own `git` for real, scrubbing inherited git context so
@@ -3774,6 +3876,129 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&db_dir);
         let _ = std::fs::remove_dir_all(&sentinels);
+    }
+
+    #[test]
+    fn local_fix_squashes_agent_commits_into_one_app_commit_f6() {
+        // sec-F6/corr-F5: the agent makes its OWN commit (hostile author) AND
+        // leaves an extra unstaged edit. The pushed branch must carry EXACTLY ONE
+        // app-authored commit (no agent commit metadata reaches origin) and the
+        // PR body diff must cover ALL changes (the committed file AND the unstaged
+        // one) — computed over the full range from the branch base.
+        if !git_available() {
+            return;
+        }
+        let repo = init_git_repo();
+        let db_dir = tmpdir();
+        let db = Arc::new(Database::new(&db_dir));
+        let (src_wf_id, src_run_id) =
+            seed_failed_local_source(&db, "sandbox", "CHECK=1 && test -f fixed.txt");
+        let src_wf = db.get_workflow(&src_wf_id).unwrap();
+        let fix_wf_id = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        let claim = db
+            .insert_fix_agent_dispatch(&src_run_id, &fix_wf_id, None, "ui", "local")
+            .unwrap();
+        let worktree =
+            crate::fix_worktree::create_fix_worktree(repo.to_str().unwrap(), &src_run_id).unwrap();
+        let base = git_read(worktree.path(), &["rev-parse", "HEAD"]);
+
+        let runner = FixFlowRunner::new(true, Some("fixed.txt"))
+            .with_agent_self_commit()
+            .with_agent_extra_unstaged("extra.txt");
+        let outcome = run_local_fix_flow(
+            &db,
+            LocalFixFlow {
+                workspace_root: repo.to_str().unwrap(),
+                python_path: "python3",
+                source_run_id: &src_run_id,
+                source_workflow: &src_wf,
+                prompt: "please fix",
+                worktree: &worktree,
+                claim_id: &claim.id,
+                runner: &runner,
+                rerun_timeout: std::time::Duration::from_secs(30),
+                poll_interval: std::time::Duration::from_millis(10),
+            },
+        )
+        .expect("flow should open a PR");
+        assert_eq!(outcome.status, "pr_opened");
+
+        // Exactly ONE commit on top of base, authored by the APP — the hostile
+        // agent's self-commit was squashed away by `reset --soft`.
+        let count = git_read(
+            worktree.path(),
+            &["rev-list", "--count", &format!("{base}..HEAD")],
+        );
+        assert_eq!(count, "1", "exactly one app-authored commit on the branch");
+        let authors = git_read(
+            worktree.path(),
+            &["log", &format!("{base}..HEAD"), "--format=%an"],
+        );
+        assert_eq!(
+            authors, "Chaos Scheduler Fix Agent",
+            "no hostile-agent commit metadata rides onto the public branch"
+        );
+
+        // The PR body diff covers BOTH the committed and the unstaged change.
+        let body = runner
+            .pr_body
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("body captured");
+        assert!(body.contains("fixed.txt"), "committed change in body diff");
+        assert!(body.contains("extra.txt"), "unstaged change in body diff");
+
+        drop(worktree);
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&db_dir);
+    }
+
+    #[test]
+    fn local_fix_detects_a_self_committing_agent_as_an_edit_f5() {
+        // corr-F5: an agent that COMMITS all its edits leaves a CLEAN working
+        // tree. A bare `status --porcelain` check would misread that as "no
+        // changes → nothing to fix"; detection vs the branch base treats the
+        // self-commit correctly as an edit, so the flow proceeds to a PR.
+        if !git_available() {
+            return;
+        }
+        let repo = init_git_repo();
+        let db_dir = tmpdir();
+        let db = Arc::new(Database::new(&db_dir));
+        let (src_wf_id, src_run_id) =
+            seed_failed_local_source(&db, "sandbox", "CHECK=1 && test -f fixed.txt");
+        let src_wf = db.get_workflow(&src_wf_id).unwrap();
+        let fix_wf_id = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        let claim = db
+            .insert_fix_agent_dispatch(&src_run_id, &fix_wf_id, None, "ui", "local")
+            .unwrap();
+        let worktree =
+            crate::fix_worktree::create_fix_worktree(repo.to_str().unwrap(), &src_run_id).unwrap();
+
+        // The agent commits everything → clean tree (no extra unstaged edit).
+        let runner = FixFlowRunner::new(true, Some("fixed.txt")).with_agent_self_commit();
+        let outcome = run_local_fix_flow(
+            &db,
+            LocalFixFlow {
+                workspace_root: repo.to_str().unwrap(),
+                python_path: "python3",
+                source_run_id: &src_run_id,
+                source_workflow: &src_wf,
+                prompt: "please fix",
+                worktree: &worktree,
+                claim_id: &claim.id,
+                runner: &runner,
+                rerun_timeout: std::time::Duration::from_secs(30),
+                poll_interval: std::time::Duration::from_millis(10),
+            },
+        )
+        .expect("a self-commit is an edit, not a false 'no changes'");
+        assert_eq!(outcome.status, "pr_opened");
+
+        drop(worktree);
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&db_dir);
     }
 
     #[test]
