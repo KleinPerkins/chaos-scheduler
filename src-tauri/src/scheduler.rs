@@ -242,6 +242,7 @@ impl WorkflowScheduler {
                         upstream_run_id: row.upstream_run_id.clone(),
                         input_json: row.input_json.clone(),
                         rerun_of_run_id: row.rerun_of_run_id.clone(),
+                        suppress_completion_triggers: row.suppress_completion_triggers,
                     };
                     due.push(candidate);
                 }
@@ -331,6 +332,7 @@ impl WorkflowScheduler {
                             upstream_run_id: None,
                             input_json: None,
                             rerun_of_run_id: None,
+                            suppress_completion_triggers: false,
                         };
                         if self.admit_or_skip_due_workflow(&workflow, &queue_config, &candidate) {
                             let now_str = now.to_rfc3339();
@@ -358,6 +360,7 @@ impl WorkflowScheduler {
                         upstream_run_id: None,
                         input_json: None,
                         rerun_of_run_id: None,
+                        suppress_completion_triggers: false,
                     };
                     if self.admit_or_skip_due_workflow(&workflow, &queue_config, &candidate) {
                         due.push(candidate);
@@ -380,6 +383,7 @@ impl WorkflowScheduler {
                         upstream_run_id: None,
                         input_json: None,
                         rerun_of_run_id: None,
+                        suppress_completion_triggers: false,
                     };
                     if self.admit_or_skip_due_workflow(&workflow, &queue_config, &candidate) {
                         due.push(candidate);
@@ -422,6 +426,7 @@ impl WorkflowScheduler {
                         candidate.upstream_run_id.as_deref(),
                         candidate.input_json.as_deref(),
                         candidate.rerun_of_run_id.as_deref(),
+                        candidate.suppress_completion_triggers,
                     );
                     false
                 }
@@ -450,6 +455,7 @@ impl WorkflowScheduler {
                     candidate.upstream_run_id.as_deref(),
                     candidate.input_json.as_deref(),
                     candidate.rerun_of_run_id.as_deref(),
+                    candidate.suppress_completion_triggers,
                 );
                 false
             }
@@ -684,6 +690,11 @@ pub struct DueWorkflow {
     pub upstream_run_id: Option<String>,
     pub input_json: Option<String>,
     pub rerun_of_run_id: Option<String>,
+    /// Carried from the queued row (v16): when true, draining this run must NOT
+    /// fire on-completion trigger chains (D05 fix-rerun gate, M5). Always false
+    /// for cron / file-arrival / asset-update admissions (they have no queued
+    /// row to carry the intent).
+    pub suppress_completion_triggers: bool,
 }
 
 fn due_workflow_pending_key(workflow: &DueWorkflow) -> String {
@@ -1146,6 +1157,7 @@ pub fn dispatch_non_cron_workflow(
                 options.upstream_run_id,
                 options.input_json,
                 options.rerun_of_run_id,
+                options.suppress_completion_triggers,
             )
             .map_err(|e| format!("Failed to queue workflow: {}", e))?;
         let _ = db.insert_queue_event(
@@ -1227,6 +1239,7 @@ pub fn dispatch_non_cron_workflow(
         options.input_json,
         options.rerun_of_run_id,
         None,
+        options.suppress_completion_triggers,
         options.app_handle.clone(),
     )?;
     if result.completed && !options.suppress_completion_triggers {
@@ -1787,6 +1800,7 @@ pub fn execute_workflow_with_context(
     input_json: Option<&str>,
     rerun_of_run_id: Option<&str>,
     queued_run_id: Option<&str>,
+    suppress_completion_triggers: bool,
     app_handle: Option<tauri::AppHandle>,
 ) -> Result<RunResult, String> {
     let workflow = db
@@ -1829,6 +1843,7 @@ pub fn execute_workflow_with_context(
                 upstream_run_id,
                 input_json,
                 rerun_of_run_id,
+                suppress_completion_triggers,
             );
             return Err(format!(
                 "Queue {} is at capacity or constrained by global/tag caps",
@@ -2218,6 +2233,7 @@ fn trigger_on_completion_with_chain(
                     Some(upstream_run_id),
                     None,
                     None,
+                    false,
                 );
                 continue;
             }
@@ -2253,6 +2269,7 @@ fn trigger_on_completion_with_chain(
             None,
             None,
             None,
+            false,
             None,
         ) {
             Ok(result) if result.completed => trigger_on_completion_with_chain(
@@ -3714,10 +3731,16 @@ pub fn start_scheduler_loop(
                             wf.input_json.as_deref(),
                             wf.rerun_of_run_id.as_deref(),
                             wf.queued_run_id.as_deref(),
+                            wf.suppress_completion_triggers,
                             Some(app.clone()),
                         ) {
                             Ok(result) => {
-                                if result.completed {
+                                // M5: a drained run that asked to suppress
+                                // completion chains (persisted on the queued
+                                // row, v16) must NOT cascade downstream — the
+                                // intent is honored here, not just on the inline
+                                // dispatch path.
+                                if result.completed && !wf.suppress_completion_triggers {
                                     trigger_on_completion(
                                         &db,
                                         &root,
@@ -3815,6 +3838,7 @@ fn enqueue_chained_workflow(
                 Some(&upstream_run.id),
                 None,
                 None,
+                false,
             ) {
                 log::warn!("run_workflow action failed to enqueue {workflow_id}: {e}");
             }
@@ -5110,6 +5134,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
         )
         .unwrap();
@@ -5151,6 +5176,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
         )
         .unwrap();
@@ -5405,6 +5431,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             None,
         )
         .unwrap();
@@ -6160,6 +6187,65 @@ not json
         let rows = db.list_queued_runs(10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].trigger_kind.as_deref(), Some("backfill"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// M5 (D05): the queued-drain job decides whether to fire on-completion
+    /// chains via `DueWorkflow.suppress_completion_triggers`, which it reads from
+    /// the persisted queued row (`find_due_workflows`). This proves the
+    /// suppression intent survives the enqueue -> drain boundary: a queued
+    /// `ui_fix_rerun` with the bit set is surfaced to the drain job as `true`, so
+    /// `if result.completed && !wf.suppress_completion_triggers` skips the
+    /// cascade. Before schema v16 the bit was dropped on the queued path (no
+    /// column / no `DueWorkflow` field), so a drained fix rerun cascaded
+    /// downstream side effects.
+    #[test]
+    fn find_due_workflows_carries_suppress_completion_triggers_to_drain() {
+        let (db, dir) = structured_test_db();
+        let wf = db
+            .create_workflow(
+                "Suppressing Rerun",
+                None,
+                "true",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "production",
+                None,
+                None,
+                Some(r#"{"queue":"production-default"}"#),
+            )
+            .unwrap();
+
+        // Seed a queued run carrying the suppression intent, exactly as the
+        // dispatch/queued path would when a fix rerun is admission-queued. No
+        // unmet dependency, so it becomes due on the next scan.
+        db.upsert_queued_run_with_context(
+            &wf.id,
+            "production-default",
+            5,
+            Some("ui_fix_rerun"),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+
+        let scheduler = WorkflowScheduler::new(db.clone());
+        let due = scheduler.find_due_workflows(dir.to_str().unwrap());
+        let candidate = due
+            .iter()
+            .find(|d| d.id == wf.id)
+            .expect("queued run with a met dependency should be due");
+        assert!(
+            candidate.suppress_completion_triggers,
+            "suppression intent must reach the drain job so a fix rerun does not cascade"
+        );
+        assert_eq!(candidate.trigger_kind.as_deref(), Some("ui_fix_rerun"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

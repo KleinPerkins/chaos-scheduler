@@ -314,6 +314,10 @@ pub struct QueuedRun {
     pub upstream_run_id: Option<String>,
     pub input_json: Option<String>,
     pub rerun_of_run_id: Option<String>,
+    /// When true, draining this queued run must NOT fire on-completion trigger
+    /// chains (D05 fix-rerun gate). Persisted (v16) so the intent survives
+    /// enqueue -> drain across ticks / restarts.
+    pub suppress_completion_triggers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1165,7 +1169,7 @@ pub enum IdempotencyReservation {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 15;
+pub const CURRENT_SCHEMA_VERSION: i64 = 16;
 
 pub struct Database {
     path: String,
@@ -1288,7 +1292,8 @@ impl Database {
                 trigger_payload TEXT,
                 upstream_run_id TEXT,
                 input_json TEXT,
-                rerun_of_run_id TEXT
+                rerun_of_run_id TEXT,
+                suppress_completion_triggers INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS workflow_mutex_locks (
                 mutex_key TEXT PRIMARY KEY,
@@ -1663,7 +1668,28 @@ impl Database {
             (13, Self::migrate_v13_run_environment_snapshot),
             (14, Self::migrate_v14_fix_agent_dispatches),
             (15, Self::migrate_v15_fix_agent_local_mode),
+            (16, Self::migrate_v16_queued_run_suppress_completion),
         ]
+    }
+
+    /// v16: persist `suppress_completion_triggers` on `queued_runs` so a
+    /// dispatch that asks to suppress on-completion chains keeps that intent
+    /// when it QUEUES and is later drained on a different scheduler tick (or
+    /// after an app restart). Before this, the bit lived only in the in-memory
+    /// `NonCronDispatchOptions` and was honored only on the INLINE dispatch
+    /// path; a queued-then-drained run silently fired its completion chain (the
+    /// D05 M5 correctness gap — a successful fix RERUN must NOT cascade
+    /// downstream workflows and their real side effects).
+    ///
+    /// Additive and idempotent: the `ALTER` is a no-op when the column already
+    /// exists (fresh DBs get it from the base schema in `init`). Existing rows
+    /// default to `0` (do-not-suppress), preserving today's behavior for every
+    /// non-fix dispatch.
+    fn migrate_v16_queued_run_suppress_completion(conn: &Connection) -> rusqlite::Result<()> {
+        let _ = conn.execute_batch(
+            "ALTER TABLE queued_runs ADD COLUMN suppress_completion_triggers INTEGER NOT NULL DEFAULT 0;",
+        );
+        Ok(())
     }
 
     /// v15: evolve the `fix_agent_dispatches` audit row for the D05 LOCAL
@@ -6504,7 +6530,7 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, COALESCE(NULLIF(w.environment, ''), 'production'), q.priority, q.status, q.queued_at, q.admitted_at, q.finished_at,
-                    q.trigger_kind, q.trigger_payload, q.upstream_run_id, q.input_json, q.rerun_of_run_id
+                    q.trigger_kind, q.trigger_payload, q.upstream_run_id, q.input_json, q.rerun_of_run_id, COALESCE(q.suppress_completion_triggers, 0)
              FROM queued_runs q
              LEFT JOIN workflows w ON q.workflow_id = w.id
              ORDER BY
@@ -6533,6 +6559,7 @@ impl Database {
                 upstream_run_id: row.get(13)?,
                 input_json: row.get(14)?,
                 rerun_of_run_id: row.get(15)?,
+                suppress_completion_triggers: row.get::<_, i64>(16)? != 0,
             })
         })?;
         rows.collect()
@@ -6584,7 +6611,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT q.id, q.run_id, q.workflow_id, w.name, q.queue_name, COALESCE(NULLIF(w.environment, ''), 'production'), q.priority,
                     q.status, q.queued_at, q.admitted_at, q.finished_at, q.trigger_kind,
-                    q.trigger_payload, q.upstream_run_id, q.input_json, q.rerun_of_run_id
+                    q.trigger_payload, q.upstream_run_id, q.input_json, q.rerun_of_run_id, COALESCE(q.suppress_completion_triggers, 0)
              FROM queued_runs q
              LEFT JOIN workflows w ON q.workflow_id = w.id
              WHERE q.workflow_id = ?1
@@ -6623,6 +6650,7 @@ impl Database {
                     upstream_run_id: row.get(13)?,
                     input_json: row.get(14)?,
                     rerun_of_run_id: row.get(15)?,
+                    suppress_completion_triggers: row.get::<_, i64>(16)? != 0,
                 })
             },
         )
@@ -6645,9 +6673,17 @@ impl Database {
             None,
             None,
             None,
+            false,
         )
     }
 
+    /// Enqueue (or refresh) a queued run with full dispatch context.
+    ///
+    /// `suppress_completion_triggers` is PERSISTED so a dispatch that asks to
+    /// suppress on-completion chains keeps that intent across the enqueue ->
+    /// drain boundary (D05 fix-rerun gate, M5). The UPDATE path writes it too:
+    /// the last enqueue for an identical (workflow, trigger context) key wins,
+    /// which matches how the other context fields are refreshed here.
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_queued_run_with_context(
         &self,
@@ -6659,6 +6695,7 @@ impl Database {
         upstream_run_id: Option<&str>,
         input_json: Option<&str>,
         rerun_of_run_id: Option<&str>,
+        suppress_completion_triggers: bool,
     ) -> rusqlite::Result<String> {
         let conn = self.conn()?;
         let existing: rusqlite::Result<String> = conn.query_row(
@@ -6684,7 +6721,8 @@ impl Database {
             conn.execute(
                 "UPDATE queued_runs
                  SET queue_name = ?2, priority = ?3, trigger_kind = ?4, trigger_payload = ?5,
-                     upstream_run_id = ?6, input_json = ?7, rerun_of_run_id = ?8
+                     upstream_run_id = ?6, input_json = ?7, rerun_of_run_id = ?8,
+                     suppress_completion_triggers = ?9
                  WHERE id = ?1",
                 params![
                     id,
@@ -6694,7 +6732,8 @@ impl Database {
                     trigger_payload,
                     upstream_run_id,
                     input_json,
-                    rerun_of_run_id
+                    rerun_of_run_id,
+                    suppress_completion_triggers as i64
                 ],
             )?;
             return Ok(id);
@@ -6722,8 +6761,9 @@ impl Database {
         conn.execute(
             "INSERT INTO queued_runs
                 (id, workflow_id, queue_name, priority, status, queued_at,
-                 trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id)
-             VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?7, ?8, ?9, ?10)",
+                 trigger_kind, trigger_payload, upstream_run_id, input_json, rerun_of_run_id,
+                 suppress_completion_triggers)
+                 VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 id,
                 workflow_id,
@@ -6734,7 +6774,8 @@ impl Database {
                 trigger_payload,
                 upstream_run_id,
                 input_json,
-                rerun_of_run_id
+                rerun_of_run_id,
+                suppress_completion_triggers as i64
             ],
         )?;
         Ok(id)
@@ -7485,7 +7526,7 @@ mod tests {
         // Tripwire: refresh this fixture (seed schema + asserted columns) the
         // next time a migration lands so the newest N-1 -> N paths stay covered.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 15,
+            CURRENT_SCHEMA_VERSION, 16,
             "add a v(N-1)->v(N) fixture when a new migration ships"
         );
 
@@ -8443,6 +8484,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 None,
                 None,
                 None,
+                false,
             )
             .unwrap();
 
@@ -8494,6 +8536,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 None,
                 None,
                 None,
+                false,
             )
             .unwrap();
         assert!(matches!(
@@ -9212,6 +9255,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 Some("upstream-run"),
                 Some(r#"{"manual":true}"#),
                 Some("source-run"),
+                false,
             )
             .unwrap();
         let rows = db.list_queued_runs(10).unwrap();
@@ -9315,6 +9359,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 None,
                 Some(r#"{"backfill":{"logical_date":"2026-05-02T00:00:00Z"}}"#),
                 None,
+                false,
             )
             .unwrap();
         assert_eq!(
@@ -9457,6 +9502,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 None,
                 None,
                 None,
+                false,
             )
             .unwrap();
         db.mark_queued_run_terminal_by_id(&deletable_queue_id, &deletable.id, "success")
@@ -9471,6 +9517,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 None,
                 None,
                 None,
+                false,
             )
             .unwrap();
         db.mark_queued_run_terminal_by_id(&preserved_queue_id, &preserved.id, "dead_lettered")
@@ -10911,6 +10958,89 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(rt_status, "claimed");
         assert_eq!(rt_branch, "chaos-fix/run-b");
         assert_eq!(rt_worktree, "/tmp/wt");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migrate_v16_adds_suppress_completion_triggers_to_queued_runs() {
+        // v16 persists `suppress_completion_triggers` on `queued_runs` so the
+        // D05 fix-rerun's "do not cascade downstream" intent survives the
+        // enqueue -> drain boundary (M5). Additive: existing v15 queued rows
+        // default to 0 (do-not-suppress), preserving today's chaining behavior.
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        let db = Database {
+            path: db_path.to_string_lossy().to_string(),
+        };
+
+        // Seed a v15-shaped `queued_runs` (pre-v16 column set) and stamp
+        // user_version=15 so ONLY the v16 migration is pending.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE queued_runs (
+                     id TEXT PRIMARY KEY,
+                     run_id TEXT,
+                     workflow_id TEXT NOT NULL,
+                     queue_name TEXT NOT NULL,
+                     priority INTEGER NOT NULL DEFAULT 0,
+                     status TEXT NOT NULL DEFAULT 'queued',
+                     queued_at TEXT NOT NULL,
+                     admitted_at TEXT,
+                     finished_at TEXT,
+                     trigger_kind TEXT,
+                     trigger_payload TEXT,
+                     upstream_run_id TEXT,
+                     input_json TEXT,
+                     rerun_of_run_id TEXT
+                 );
+                 INSERT INTO queued_runs (id, workflow_id, queue_name, priority, status, queued_at, trigger_kind)
+                     VALUES ('q0', 'wf-legacy', 'production-default', 0, 'queued', '2026-01-01T00:00:00Z', 'ui_enqueue');
+                 PRAGMA user_version = 15;",
+            )
+            .unwrap();
+        }
+
+        let conn = db.conn().unwrap();
+        db.run_migrations(&conn, 15).unwrap();
+
+        assert!(
+            Database::table_has_column(&conn, "queued_runs", "suppress_completion_triggers"),
+            "v16 must add the `suppress_completion_triggers` column to queued_runs"
+        );
+
+        // The pre-existing v15 row takes the additive default (0 = do not
+        // suppress), so legacy queued runs keep firing their completion chains.
+        let legacy: i64 = conn
+            .query_row(
+                "SELECT suppress_completion_triggers FROM queued_runs WHERE id = 'q0'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            legacy, 0,
+            "legacy queued rows must default to do-not-suppress"
+        );
+
+        // A fix-rerun row round-trips the suppression intent.
+        conn.execute(
+            "INSERT INTO queued_runs
+                (id, workflow_id, queue_name, priority, status, queued_at, trigger_kind, suppress_completion_triggers)
+             VALUES ('q1', 'wf-fix', 'sandbox-default', 5, 'queued', '2026-01-02T00:00:00Z', 'ui_fix_rerun', 1)",
+            [],
+        )
+        .unwrap();
+        let suppressed: i64 = conn
+            .query_row(
+                "SELECT suppress_completion_triggers FROM queued_runs WHERE id = 'q1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(suppressed, 1, "fix-rerun queued rows persist suppression");
 
         let _ = std::fs::remove_dir_all(dir);
     }
