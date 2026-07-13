@@ -64,14 +64,16 @@ pub struct AgentCredentialIsolation {
 ///   so no system/global/local helper (osxkeychain, store, …) survives.
 /// - `credential.interactive=false` — never prompt for a credential.
 /// - `core.sshCommand=…` — an ssh that uses neither the agent nor any on-disk
-///   identity (`IdentityAgent=none`, `IdentitiesOnly=yes`, `IdentityFile=/dev/null`,
-///   `BatchMode=yes`), so an `ssh://` push cannot authenticate.
+///   identity (`-F /dev/null` so `~/.ssh/config` cannot re-add a `Host github.com
+///   IdentityFile …`, plus `IdentityAgent=none`, `IdentitiesOnly=yes`,
+///   `IdentityFile=/dev/null`, `BatchMode=yes`), so an `ssh://` push cannot
+///   authenticate (sec-F3).
 const AGENT_GIT_CONFIG_OVERRIDES: &[(&str, &str)] = &[
     ("credential.helper", ""),
     ("credential.interactive", "false"),
     (
         "core.sshCommand",
-        "ssh -o BatchMode=yes -o IdentityAgent=none -o IdentitiesOnly=yes -o IdentityFile=/dev/null",
+        "ssh -F /dev/null -o BatchMode=yes -o IdentityAgent=none -o IdentitiesOnly=yes -o IdentityFile=/dev/null",
     ),
 ];
 
@@ -371,6 +373,14 @@ mod tests {
                 |s| s.contains("IdentityAgent=none") && s.contains("IdentityFile=/dev/null")
             ),
             "core.sshCommand is overridden to a key-less, agent-less ssh"
+        );
+        // sec-F3: `-F /dev/null` makes the agent's ssh ignore ~/.ssh/config, so a
+        // `Host github.com\n  IdentityFile …` there cannot re-introduce a key.
+        assert!(
+            overrides
+                .get("core.sshCommand")
+                .is_some_and(|s| s.contains("-F /dev/null")),
+            "core.sshCommand ignores the user's ~/.ssh/config (-F /dev/null)"
         );
         // The scrub list never carries a value — it is purely a removal set.
         assert!(!iso
