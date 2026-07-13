@@ -1586,17 +1586,22 @@ fn run_possibly_blocking<T>(f: impl FnOnce() -> T) -> T {
 /// except a `ui_fix_agent`-triggered `cursor_agent` run, for which it:
 ///
 /// - overlays ONLY the `prompt` from `input_json` — a strict WHITELIST: no other
-///   `input_json` field (`repository` / `auto_create_pr` / `api_key_secret` / …)
-///   can reach the operator config, and
-/// - FORCES `auto_create_pr = false` regardless of the stored config OR any
-///   value smuggled in `input_json` (capability limit enforced AT EXECUTION, not
-///   merely defaulted).
+///   `input_json` field (`repository` / `auto_create_pr` / `workOnCurrentBranch`
+///   / `api_key_secret` / …) can reach the operator config, and
+/// - FORCES `auto_create_pr = true` regardless of the stored config OR any value
+///   smuggled in `input_json` (capability forced AT EXECUTION, not merely
+///   defaulted). This is the PROPOSE-ONLY posture: Cursor Cloud opens the result
+///   as a reviewable DRAFT PR for a programmatic dispatch (its documented
+///   behavior), and — because the seam never sets `workOnCurrentBranch` — the
+///   agent always pushes to a NEW branch and only opens a PR; it never commits to
+///   an existing PR head or the base ref. The app has no PR-merge code path, so
+///   a fix is NEVER auto-merged and NEVER auto-applied to the running system.
 ///
 /// repository / mode / model / api_key_secret therefore ALWAYS come from the
 /// designated fix workflow's STORED config, never from caller-supplied input.
 /// Gating on `trigger_kind == ui_fix_agent` (not merely `operator_type ==
 /// cursor_agent`) is what keeps a plain rerun/backfill/child dispatch of the
-/// same operator from having its prompt hijacked (M2).
+/// same operator from having its prompt hijacked or PR-forced (M2).
 fn fix_agent_config_overlay<'a>(
     operator_type: &str,
     trigger_kind: Option<&str>,
@@ -1621,8 +1626,9 @@ fn fix_agent_config_overlay<'a>(
     {
         obj.insert("prompt".to_string(), Value::String(prompt.to_string()));
     }
-    // Capability limit: a fix-agent dispatch never opens a PR.
-    obj.insert("auto_create_pr".to_string(), Value::Bool(false));
+    // Propose-only: a fix-agent dispatch ALWAYS opens a reviewable draft PR
+    // (Cursor Cloud drafts programmatic PRs) and never a silent direct push.
+    obj.insert("auto_create_pr".to_string(), Value::Bool(true));
     std::borrow::Cow::Owned(Value::Object(obj))
 }
 
@@ -1683,9 +1689,10 @@ fn execute_typed_operator(
     // cron scheduler loop or a Tauri sync-command context with no runtime).
     // Fix-agent seam (D05 / F10): for a `ui_fix_agent` dispatch of a
     // `cursor_agent` operator ONLY, overlay the diagnostic prompt from
-    // `input_json` and FORCE `auto_create_pr=false` at execution. Every other
-    // dispatch (rerun/backfill/child of the same operator) is untouched, so a
-    // stored prompt is never hijacked (M2). See [`fix_agent_config_overlay`].
+    // `input_json` and FORCE `auto_create_pr=true` (propose-only DRAFT PR) at
+    // execution. Every other dispatch (rerun/backfill/child of the same
+    // operator) is untouched, so a stored prompt/PR-setting is never hijacked
+    // (M2). See [`fix_agent_config_overlay`].
     let effective_config = fix_agent_config_overlay(
         &typed.operator_type,
         trigger_kind,
@@ -4949,16 +4956,21 @@ mod tests {
     // ---- D05 / F10: fix-agent operator-config overlay (seam) -------------
 
     #[test]
-    fn fix_agent_overlay_whitelists_prompt_and_forces_auto_create_pr_false() {
-        // Stored config carries a real repository + auto_create_pr:true.
+    fn fix_agent_overlay_whitelists_prompt_and_forces_draft_pr() {
+        // PROPOSE-ONLY policy: the fix-agent seam FORCES `auto_create_pr = true`
+        // so Cursor Cloud opens a reviewable DRAFT PR (its documented behavior
+        // for a programmatic dispatch). Attacker-influenced input cannot flip
+        // this: it tries to SUPPRESS the PR (`auto_create_pr:false`), push
+        // straight to an existing branch (`workOnCurrentBranch:true`), and
+        // redirect the repository — all must be ignored (strict prompt-only
+        // whitelist), and the capability is forced by the backend regardless.
         let stored = serde_json::json!({
             "repository": "https://github.com/owner/repo",
             "prompt": "STORED PROMPT",
-            "auto_create_pr": true,
+            "auto_create_pr": false,
             "api_key_secret": "cursor_api_key"
         });
-        // Caller input tries to smuggle repository + auto_create_pr past the prompt.
-        let input = r#"{"prompt":"DIAGNOSTIC PROMPT","auto_create_pr":true,"repository":"https://github.com/attacker/evil"}"#;
+        let input = r#"{"prompt":"DIAGNOSTIC PROMPT","auto_create_pr":false,"workOnCurrentBranch":true,"repository":"https://github.com/attacker/evil"}"#;
 
         let effective = fix_agent_config_overlay(
             "cursor_agent",
@@ -4972,16 +4984,20 @@ mod tests {
             effective.get("prompt").and_then(|v| v.as_str()),
             Some("DIAGNOSTIC PROMPT")
         );
-        // ...auto_create_pr is FORCED false despite input asking for true...
+        // ...auto_create_pr is FORCED true despite stored+input asking for false
+        // (a fix dispatch always opens a draft PR — never a silent direct push)...
         assert_eq!(
             effective.get("auto_create_pr").and_then(|v| v.as_bool()),
-            Some(false)
+            Some(true)
         );
         // ...repository stays the STORED value (input's is ignored — whitelist)...
         assert_eq!(
             effective.get("repository").and_then(|v| v.as_str()),
             Some("https://github.com/owner/repo")
         );
+        // ...the attacker's `workOnCurrentBranch` never reaches the config (only
+        // `prompt` is whitelisted), so the agent pushes to a NEW branch...
+        assert!(effective.get("workOnCurrentBranch").is_none());
         // ...and no attacker-supplied field leaked in.
         let serialized = effective.to_string();
         assert!(!serialized.contains("attacker/evil"));
@@ -5039,13 +5055,14 @@ mod tests {
     }
 
     #[test]
-    fn fix_agent_overlay_forces_auto_create_pr_false_without_input_prompt() {
+    fn fix_agent_overlay_forces_draft_pr_without_input_prompt() {
         // A fix-agent dispatch with no usable input prompt still forces the
-        // capability limit; the stored prompt is left in place.
+        // draft-PR capability (`auto_create_pr = true`) even when the stored
+        // config disabled it; the stored prompt is left in place.
         let stored = serde_json::json!({
             "repository": "https://github.com/o/r",
             "prompt": "STORED",
-            "auto_create_pr": true
+            "auto_create_pr": false
         });
 
         let effective = fix_agent_config_overlay(
@@ -5062,7 +5079,7 @@ mod tests {
         );
         assert_eq!(
             effective.get("auto_create_pr").and_then(|v| v.as_bool()),
-            Some(false)
+            Some(true)
         );
     }
 
