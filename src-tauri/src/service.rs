@@ -3725,6 +3725,146 @@ mod tests {
     }
 
     #[test]
+    fn local_fix_rerun_does_not_spawn_the_background_monitor_f1() {
+        // corr-F1: a source that prints a background-launch line ("launched (PID
+        // N)") must NOT spawn the background-completion monitor during the fix
+        // rerun (its later finish would fire a completion trigger that cascades).
+        // Background mode is a RUNTIME stdout signal (not a static spec field),
+        // so it is SUPPRESSED in the executor, not refused at preflight: the
+        // rerun resolves via its FOREGROUND exit and the fix completes green
+        // fast. A regression (monitor spawned) would leave the run non-terminal
+        // and time out the bounded await below.
+        if !git_available() {
+            return;
+        }
+        let repo = init_git_repo();
+        let db_dir = tmpdir();
+        let db = Arc::new(Database::new(&db_dir));
+        // Prints a launch line to stdout AND validates the fix. `CHECK=1 &&`
+        // forces the sh -c path (see build_workflow_command).
+        let (src_wf_id, src_run_id) = seed_failed_local_source(
+            &db,
+            "sandbox",
+            "CHECK=1 && echo 'context capture launched (PID 999)' && test -f fixed.txt",
+        );
+        let src_wf = db.get_workflow(&src_wf_id).unwrap();
+        let fix_wf_id = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        let claim = db
+            .insert_fix_agent_dispatch(&src_run_id, &fix_wf_id, None, "ui", "local")
+            .unwrap();
+        let worktree =
+            crate::fix_worktree::create_fix_worktree(repo.to_str().unwrap(), &src_run_id).unwrap();
+
+        let runner = FixFlowRunner::new(true, Some("fixed.txt"));
+        let outcome = run_local_fix_flow(
+            &db,
+            LocalFixFlow {
+                workspace_root: repo.to_str().unwrap(),
+                python_path: "python3",
+                source_run_id: &src_run_id,
+                source_workflow: &src_wf,
+                prompt: "please fix",
+                worktree: &worktree,
+                claim_id: &claim.id,
+                runner: &runner,
+                // Short budget: a regression that went background would leave the
+                // run non-terminal and TIME OUT here rather than complete green.
+                rerun_timeout: std::time::Duration::from_secs(8),
+                poll_interval: std::time::Duration::from_millis(10),
+            },
+        )
+        .expect("flow returns a terminal outcome");
+
+        assert!(
+            outcome.rerun_succeeded,
+            "bg-launch source rerun resolves via its foreground exit"
+        );
+        assert_eq!(outcome.status, "pr_opened");
+        // The rerun run row is genuinely terminal-success — not left 'running'
+        // for a background monitor to finish (and cascade) later.
+        let rerun = db.get_run(&outcome.rerun_run_id).unwrap();
+        assert!(crate::db::run_status::ended_ok(&rerun.status));
+
+        drop(worktree);
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&db_dir);
+    }
+
+    #[test]
+    fn local_fix_rerun_does_not_spawn_child_subworkflows_f4() {
+        // corr-F4: a source that emits a `subworkflow_requested` task event must
+        // spawn ZERO child workflows during the fix rerun. Subworkflow requests
+        // are RUNTIME task events (not a static spec field), so the child spawn
+        // is SUPPRESSED in the executor, not refused at preflight.
+        if !git_available() {
+            return;
+        }
+        let repo = init_git_repo();
+        let db_dir = tmpdir();
+        let db = Arc::new(Database::new(&db_dir));
+        let child = db
+            .create_workflow(
+                "Child",
+                None,
+                "true",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "sandbox",
+                None,
+                None,
+                Some(r#"{"queue":"sandbox-default"}"#),
+            )
+            .unwrap();
+        // Emit a subworkflow_requested event on the task channel (fd 3) AND
+        // validate the fix. `wait:false` so the event never blocks; `CHECK=1 &&`
+        // forces the sh -c path so `>&3` reaches the wired task channel.
+        let event = format!(
+            r#"{{"schema_version":"scheduler.task_event.v1","ts":"2026-05-19T00:00:00Z","task_id":"fanout","status":"subworkflow_requested","details":{{"workflow_id":"{}","inputs":{{}},"wait":false}}}}"#,
+            child.id
+        );
+        let cmd = format!("CHECK=1 && printf '%s\\n' '{event}' >&3 && test -f fixed.txt");
+        let (src_wf_id, src_run_id) = seed_failed_local_source(&db, "sandbox", &cmd);
+        let src_wf = db.get_workflow(&src_wf_id).unwrap();
+        let fix_wf_id = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        let claim = db
+            .insert_fix_agent_dispatch(&src_run_id, &fix_wf_id, None, "ui", "local")
+            .unwrap();
+        let worktree =
+            crate::fix_worktree::create_fix_worktree(repo.to_str().unwrap(), &src_run_id).unwrap();
+
+        let runner = FixFlowRunner::new(true, Some("fixed.txt"));
+        let outcome = run_local_fix_flow(
+            &db,
+            LocalFixFlow {
+                workspace_root: repo.to_str().unwrap(),
+                python_path: "python3",
+                source_run_id: &src_run_id,
+                source_workflow: &src_wf,
+                prompt: "please fix",
+                worktree: &worktree,
+                claim_id: &claim.id,
+                runner: &runner,
+                rerun_timeout: std::time::Duration::from_secs(30),
+                poll_interval: std::time::Duration::from_millis(10),
+            },
+        )
+        .expect("flow returns a terminal outcome");
+
+        assert!(outcome.rerun_succeeded, "the fix rerun is green");
+        let child_runs = db.get_run_history(&child.id, 10).unwrap();
+        assert!(
+            child_runs.is_empty(),
+            "no child/subworkflow may be spawned during a fix validation rerun"
+        );
+
+        drop(worktree);
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&db_dir);
+    }
+
+    #[test]
     fn local_fix_dispatch_refuses_a_production_source() {
         // M3 at the orchestrator preflight: a PRODUCTION source run is ineligible
         // (the rerun runs the source's REAL command against edited code).

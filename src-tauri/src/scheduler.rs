@@ -2004,19 +2004,42 @@ pub fn execute_workflow_with_context(
             let task_events_raw = output.task_events_raw;
             let stdout = stdout_with_task_events(stdout, &task_events_raw);
             persist_task_events(db, &run.id, &workflow.id, &task_events_raw);
-            let child_summary = dispatch_child_workflow_requests(
-                db,
-                chaos_labs_root,
-                python_path,
-                &run.id,
-                &workflow.id,
-                &task_events_raw,
-                app_handle.clone(),
-            );
+            // corr-F4 (D05 LOCAL fix): a VALIDATION rerun (the only caller that
+            // sets `suppress_completion_triggers`) must cause NO downstream
+            // cascade. `subworkflow_requested` events are emitted at RUNTIME
+            // (not a static spec field, so they can't be refused at preflight),
+            // so the child/subworkflow spawn is skipped HERE. Byte-identical for
+            // every normal run (the flag is false), which still dispatches.
+            let child_summary = if suppress_completion_triggers {
+                ChildDispatchSummary::default()
+            } else {
+                dispatch_child_workflow_requests(
+                    db,
+                    chaos_labs_root,
+                    python_path,
+                    &run.id,
+                    &workflow.id,
+                    &task_events_raw,
+                    app_handle.clone(),
+                )
+            };
 
             let result_url = extract_result_url(&stdout);
 
-            let bg_pid = extract_background_pid(&stdout, chaos_labs_root);
+            // corr-F1 (D05 LOCAL fix): never spawn the background-PID completion
+            // monitor for a validation rerun — its later finish fires a
+            // completion trigger that would cascade. Background mode is detected
+            // from RUNTIME stdout ("launched (PID N)"), not a static spec field,
+            // so (like corr-F4) it is suppressed here rather than refused at
+            // preflight. The rerun then resolves via its FOREGROUND exit; a
+            // background-launcher source's fix is validated only by the launch's
+            // exit, which — with the human-reviewed DRAFT PR — is the accepted v1
+            // residual. Byte-identical for every normal run (flag is false).
+            let bg_pid = if suppress_completion_triggers {
+                None
+            } else {
+                extract_background_pid(&stdout, chaos_labs_root)
+            };
 
             if let Some(pid) = bg_pid {
                 let db = Arc::clone(db);
