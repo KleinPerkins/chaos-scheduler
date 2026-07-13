@@ -3633,6 +3633,13 @@ pub fn start_scheduler_loop(
 ) {
     std::thread::spawn(move || {
         recover_orphaned_runs(&db, &chaos_labs_root);
+        // M6: reclaim any throwaway `chaos-fix/*` worktrees/branches stranded by
+        // a crash/kill mid-fix, so a fresh session starts clean and a
+        // re-dispatch of the same source run is not blocked by stale state.
+        crate::fix_worktree::sweep_orphaned_fix_worktrees(
+            &crate::service::SystemProcessRunner,
+            &chaos_labs_root,
+        );
         let worker_count = scheduler_worker_count();
         let worker_pool = SchedulerWorkerPool::new(
             worker_count,

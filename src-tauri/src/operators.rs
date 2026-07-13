@@ -194,7 +194,9 @@ fn is_scp_like_ssh(u: &str) -> bool {
 
 /// Reject branch / ref names that could smuggle git options or shell / control
 /// characters (defense in depth on top of the `--` positional separator).
-fn validate_git_ref(name: &str) -> Result<(), String> {
+/// Shared with the D05 fix-agent worktree module, which derives a
+/// `chaos-fix/<source_run_id>` branch and must apply the same guard.
+pub(crate) fn validate_git_ref(name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("git_pull: `branch` must not be empty".into());
     }
