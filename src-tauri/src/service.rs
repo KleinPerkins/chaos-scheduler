@@ -748,7 +748,13 @@ impl SchedulerService {
             .as_deref()
             .or(outcome.queued_run_id.as_deref());
         self.db
-            .insert_fix_agent_dispatch(source_run_id, &fix_workflow_id, fix_run_ref, initiator)
+            .insert_fix_agent_dispatch(
+                source_run_id,
+                &fix_workflow_id,
+                fix_run_ref,
+                initiator,
+                "cloud",
+            )
             .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?;
 
         Ok(outcome)
