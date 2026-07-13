@@ -92,6 +92,35 @@ pub(crate) fn should_scrub_child_env_key(key: &str) -> bool {
     key.starts_with("CHAOS_SCHEDULER_") && (key.ends_with("_SECRET") || key.ends_with("_TOKEN"))
 }
 
+/// Environment variables git exports into every hook and subprocess it spawns to
+/// redirect where it operates. `GIT_DIR` in particular OVERRIDES an explicit
+/// `-C <repo>`, so an inherited value silently redirects our git plumbing to the
+/// wrong repository. The desktop app is never itself a git hook, so in
+/// production these are unset and stripping them is a no-op — but our own git
+/// calls (the D05 fix `git worktree` plumbing and `git_pull`, both of which pass
+/// an explicit repo dir) MUST target the directory we hand them. Stripping the
+/// inherited git context keeps every OUR-invoked `git` honest, and lets the
+/// crate's real-git tests pass when `cargo test` runs inside this project's own
+/// pre-push hook (which does export these vars).
+pub(crate) const INHERITED_GIT_CONTEXT_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_PREFIX",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+];
+
+/// Whether a scrub of [`INHERITED_GIT_CONTEXT_VARS`] applies to `program`. Only
+/// our own DIRECT `git` invocations (which pass an explicit `-C`/cwd) are
+/// affected; a user command that happens to shell out to git (`sh -c 'git …'`)
+/// is spawned as `sh` and is deliberately left untouched.
+pub(crate) fn strips_inherited_git_context(program: &str) -> bool {
+    program == "git"
+}
+
 /// Real process runner backed by `std::process::Command`.
 pub struct SystemProcessRunner;
 impl ProcessRunner for SystemProcessRunner {
@@ -106,6 +135,11 @@ impl ProcessRunner for SystemProcessRunner {
         cmd.args(args);
         for (key, _) in std::env::vars() {
             if should_scrub_child_env_key(&key) {
+                cmd.env_remove(key);
+            }
+        }
+        if strips_inherited_git_context(program) {
+            for key in INHERITED_GIT_CONTEXT_VARS {
                 cmd.env_remove(key);
             }
         }
@@ -1615,6 +1649,27 @@ mod tests {
                 "{key} should be preserved"
             );
         }
+    }
+
+    #[test]
+    fn inherited_git_context_is_stripped_for_our_git_children_only() {
+        // Our own DIRECT git plumbing (fix worktree, git_pull) passes an explicit
+        // repo dir; an inherited GIT_DIR would override it, so it is stripped.
+        assert!(strips_inherited_git_context("git"));
+        // A user command that shells out to git is spawned as `sh`/its program,
+        // never as `git` directly — its env is left untouched.
+        assert!(!strips_inherited_git_context("sh"));
+        assert!(!strips_inherited_git_context("cursor-agent"));
+        // The scrub list must cover the vars that hijack an explicit `-C`/cwd.
+        for key in ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"] {
+            assert!(
+                INHERITED_GIT_CONTEXT_VARS.contains(&key),
+                "{key} must be stripped from our git children"
+            );
+        }
+        // GITHUB_TOKEN is a credential, not a redirect var — it is NOT in this
+        // list (the agent-credential scrub is a separate, later concern).
+        assert!(!INHERITED_GIT_CONTEXT_VARS.contains(&"GITHUB_TOKEN"));
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod branding;
 mod commands;
 mod db;
 mod email;
+mod fix_worktree;
 mod mcp;
 mod operators;
 mod scheduler;
