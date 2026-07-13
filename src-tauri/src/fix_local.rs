@@ -291,10 +291,15 @@ pub fn describe_rerun_command(script_path: &str, spec_json: Option<&str>) -> Str
 /// option. `--no-verify` (sec-F2) skips the pre-push hook on the scheduler's OWN
 /// credentialed push — a caller ALSO points `core.hooksPath` at an empty dir
 /// (belt-and-suspenders; that override also defeats non-`--no-verify` hooks).
+/// `--force-with-lease` (corr-F2) lets a re-dispatch safely overwrite a STALE
+/// `chaos-fix/<run_id>` left on the remote by a prior failed attempt (the branch
+/// is app-owned + deterministic); the caller first best-effort `fetch`es it so
+/// the lease compares against the real remote state, never blindly clobbering.
 pub fn git_push_argv(remote: &str, branch: &str) -> Vec<String> {
     vec![
         "push".to_string(),
         "--no-verify".to_string(),
+        "--force-with-lease".to_string(),
         "--set-upstream".to_string(),
         remote.to_string(),
         "--".to_string(),
@@ -514,6 +519,17 @@ mod tests {
         assert!(
             argv.contains(&"--no-verify".to_string()),
             "the scheduler's own push skips the pre-push hook"
+        );
+    }
+
+    #[test]
+    fn f2_git_push_argv_force_with_lease_for_a_stale_remote() {
+        // corr-F2: a stale app-owned remote branch from a prior failed attempt
+        // must be safely overwritable on re-dispatch.
+        let argv = git_push_argv("origin", "chaos-fix/run-123");
+        assert!(
+            argv.contains(&"--force-with-lease".to_string()),
+            "re-dispatch safely overwrites a stale remote fix branch"
         );
     }
 

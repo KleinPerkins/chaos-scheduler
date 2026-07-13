@@ -843,6 +843,17 @@ pub(crate) fn run_local_fix_flow(
     let diff_out = worktree_git(flow.runner, root, &["diff", "--stat", &base, "HEAD"])?;
     let diff_stat = String::from_utf8_lossy(&diff_out.stdout).to_string();
 
+    // corr-F2: best-effort fetch of the (app-owned, deterministic) fix branch so
+    // `--force-with-lease` in git_push_argv has a remote-tracking ref to compare
+    // against — a stale remote branch from a prior FAILED attempt would otherwise
+    // reject the push (non-fast-forward), and a bare `--force-with-lease` with NO
+    // remote-tracking ref fails "stale info". Ignoring the result is safe: if the
+    // branch is absent on the remote, `push --set-upstream` simply creates it.
+    let _ = worktree_git(
+        flow.runner,
+        root,
+        &["fetch", FIX_LOCAL_PR_REMOTE, "--", &branch],
+    );
     let push_argv = crate::fix_local::git_push_argv(FIX_LOCAL_PR_REMOTE, &branch);
     let push_refs: Vec<&str> = push_argv.iter().map(String::as_str).collect();
     worktree_git_checked_no_hooks(flow.runner, root, &empty_hooks, &push_refs)?;
@@ -3999,6 +4010,120 @@ mod tests {
         drop(worktree);
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&db_dir);
+    }
+
+    #[test]
+    fn local_fix_push_overwrites_a_stale_remote_branch_f2force() {
+        // corr-F2: a prior FAILED attempt left a DIVERGED remote chaos-fix/<run>.
+        // Because the branch is app-owned + deterministic, the re-dispatch push
+        // must still succeed (fetch + --force-with-lease), overwriting the stale
+        // remote with the app's single fix commit — a plain push would be
+        // rejected non-fast-forward.
+        if !git_available() {
+            return;
+        }
+        let repo = init_git_repo();
+        let remote = add_bare_origin(&repo);
+        let db_dir = tmpdir();
+        let db = Arc::new(Database::new(&db_dir));
+        let (src_wf_id, src_run_id) =
+            seed_failed_local_source(&db, "sandbox", "CHECK=1 && test -f fixed.txt");
+        let src_wf = db.get_workflow(&src_wf_id).unwrap();
+        let fix_wf_id = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        let claim = db
+            .insert_fix_agent_dispatch(&src_run_id, &fix_wf_id, None, "ui", "local")
+            .unwrap();
+        let worktree =
+            crate::fix_worktree::create_fix_worktree(repo.to_str().unwrap(), &src_run_id).unwrap();
+        let branch = worktree.branch().to_string();
+
+        // Seed a DIVERGENT remote branch of the same name (the stale prior
+        // attempt): a fresh commit in the main repo pushed to origin under the
+        // fix-branch ref.
+        let seed = |args: &[&str]| {
+            let mut cmd = std::process::Command::new("git");
+            for key in INHERITED_GIT_CONTEXT_VARS {
+                cmd.env_remove(key);
+            }
+            let out = cmd.current_dir(&repo).args(args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "seed git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        seed(&["checkout", "-q", "-b", "stale-seed"]);
+        std::fs::write(repo.join("divergent.txt"), b"stale").unwrap();
+        seed(&["add", "-A"]);
+        seed(&["commit", "-qm", "stale remote attempt"]);
+        seed(&[
+            "push",
+            "-q",
+            "origin",
+            &format!("stale-seed:refs/heads/{branch}"),
+        ]);
+        seed(&["checkout", "-q", "main"]);
+        seed(&["branch", "-D", "stale-seed"]);
+        let stale_sha = git_read(
+            &repo,
+            &[
+                "ls-remote",
+                remote.to_str().unwrap(),
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
+        assert!(!stale_sha.is_empty(), "stale remote branch seeded");
+
+        let runner = FixFlowRunner::new(true, Some("fixed.txt")).with_real_push();
+        let outcome = run_local_fix_flow(
+            &db,
+            LocalFixFlow {
+                workspace_root: repo.to_str().unwrap(),
+                python_path: "python3",
+                source_run_id: &src_run_id,
+                source_workflow: &src_wf,
+                prompt: "please fix",
+                worktree: &worktree,
+                claim_id: &claim.id,
+                runner: &runner,
+                rerun_timeout: std::time::Duration::from_secs(30),
+                poll_interval: std::time::Duration::from_millis(10),
+            },
+        )
+        .expect("the re-dispatch push succeeds over a stale remote branch");
+        assert_eq!(outcome.status, "pr_opened");
+
+        // The remote fix branch now points at OUR pushed commit, not the stale one.
+        let head = git_read(worktree.path(), &["rev-parse", "HEAD"]);
+        let remote_sha = git_read(
+            &repo,
+            &[
+                "ls-remote",
+                remote.to_str().unwrap(),
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
+        assert_eq!(
+            remote_sha, head,
+            "the remote fix branch advanced to the app's fix commit"
+        );
+        assert_ne!(
+            remote_sha, stale_sha,
+            "the stale remote commit was overwritten"
+        );
+
+        drop(worktree);
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&db_dir);
+        let _ = std::fs::remove_dir_all(&remote);
     }
 
     #[test]
