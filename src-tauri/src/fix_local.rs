@@ -54,26 +54,59 @@ pub struct AgentCredentialIsolation {
     pub env_set: Vec<(String, String)>,
 }
 
+/// Highest-precedence git config injected into the cursor-agent child to defeat
+/// EVERY stored-credential push channel — including the repo-LOCAL config that
+/// `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM` do NOT touch (a worktree shares the
+/// main repo's `.git/config`, which commonly carries a `credential.helper` that
+/// `gh` installed, or a `core.sshCommand` pointing at a key). Git reads env
+/// config LAST, so these override system+global+local:
+/// - `credential.helper=""` — an empty value RESETS the accumulated helper list,
+///   so no system/global/local helper (osxkeychain, store, …) survives.
+/// - `credential.interactive=false` — never prompt for a credential.
+/// - `core.sshCommand=…` — an ssh that uses neither the agent nor any on-disk
+///   identity (`IdentityAgent=none`, `IdentitiesOnly=yes`, `IdentityFile=/dev/null`,
+///   `BatchMode=yes`), so an `ssh://` push cannot authenticate.
+const AGENT_GIT_CONFIG_OVERRIDES: &[(&str, &str)] = &[
+    ("credential.helper", ""),
+    ("credential.interactive", "false"),
+    (
+        "core.sshCommand",
+        "ssh -o BatchMode=yes -o IdentityAgent=none -o IdentitiesOnly=yes -o IdentityFile=/dev/null",
+    ),
+];
+
 /// Build the credential-isolation env for the cursor-agent child (M1). Unsets
-/// the push-token vars and neutralizes gh + git auth discovery:
+/// the push-token / SSH vars and neutralizes gh + git auth discovery:
 /// - `GH_CONFIG_DIR` → an empty scratch dir (gh finds no stored auth),
 /// - `GIT_CONFIG_GLOBAL=/dev/null` + `GIT_CONFIG_NOSYSTEM=1` → the agent's git
-///   sees no global/system `credential.helper` (so it cannot reach a stored
-///   keychain credential to push behind our back),
+///   sees no global/system config,
+/// - `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` → the
+///   highest-precedence `AGENT_GIT_CONFIG_OVERRIDES`, which ALSO defeat the
+///   repo-LOCAL `credential.helper` / `core.sshCommand` a `--force` agent could
+///   otherwise push behind our back (global/system scrubbing alone missed this),
 /// - `GIT_TERMINAL_PROMPT=0` → a credential-less git operation fails fast rather
 ///   than hanging on an interactive prompt.
 ///
 /// The agent does NOT need any credential to EDIT code; validation + the PR are
 /// the scheduler's job, run with a separate, credentialed env for that one step.
 pub fn agent_credential_isolation(empty_gh_config_dir: &str) -> AgentCredentialIsolation {
+    let mut env_set = vec![
+        ("GH_CONFIG_DIR".to_string(), empty_gh_config_dir.to_string()),
+        ("GIT_CONFIG_GLOBAL".to_string(), "/dev/null".to_string()),
+        ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
+        ("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()),
+        (
+            "GIT_CONFIG_COUNT".to_string(),
+            AGENT_GIT_CONFIG_OVERRIDES.len().to_string(),
+        ),
+    ];
+    for (i, (key, value)) in AGENT_GIT_CONFIG_OVERRIDES.iter().enumerate() {
+        env_set.push((format!("GIT_CONFIG_KEY_{i}"), (*key).to_string()));
+        env_set.push((format!("GIT_CONFIG_VALUE_{i}"), (*value).to_string()));
+    }
     AgentCredentialIsolation {
         env_remove: AGENT_CREDENTIAL_SCRUB_VARS.to_vec(),
-        env_set: vec![
-            ("GH_CONFIG_DIR".to_string(), empty_gh_config_dir.to_string()),
-            ("GIT_CONFIG_GLOBAL".to_string(), "/dev/null".to_string()),
-            ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
-            ("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()),
-        ],
+        env_set,
     }
 }
 
@@ -312,6 +345,32 @@ mod tests {
         assert_eq!(
             set.get("GIT_CONFIG_NOSYSTEM").map(String::as_str),
             Some("1")
+        );
+        // The repo-LOCAL config is ALSO defeated (global/system scrubbing misses
+        // it): the highest-precedence env config resets the credential-helper
+        // list to empty and overrides core.sshCommand to a key-less ssh, so a
+        // `--force` agent has no stored-credential push channel of any kind.
+        let count: usize = set
+            .get("GIT_CONFIG_COUNT")
+            .and_then(|c| c.parse().ok())
+            .expect("GIT_CONFIG_COUNT is set");
+        let overrides: std::collections::HashMap<String, String> = (0..count)
+            .filter_map(|i| {
+                let k = set.get(&format!("GIT_CONFIG_KEY_{i}"))?;
+                let v = set.get(&format!("GIT_CONFIG_VALUE_{i}"))?;
+                Some((k.clone(), v.clone()))
+            })
+            .collect();
+        assert_eq!(
+            overrides.get("credential.helper").map(String::as_str),
+            Some(""),
+            "an empty credential.helper resets any local/global/system helper"
+        );
+        assert!(
+            overrides.get("core.sshCommand").is_some_and(
+                |s| s.contains("IdentityAgent=none") && s.contains("IdentityFile=/dev/null")
+            ),
+            "core.sshCommand is overridden to a key-less, agent-less ssh"
         );
         // The scrub list never carries a value — it is purely a removal set.
         assert!(!iso

@@ -6899,21 +6899,23 @@ impl Database {
     }
 
     /// M6 (D05 LOCAL fix crash recovery): delete every LOCAL fix dispatch claim
-    /// that never reached a terminal status (`pr_opened` / `rerun_failed`).
+    /// that did not end in an OPENED PR (`pr_opened`) — the only outcome that
+    /// keeps its claim (the idempotency replay points a re-request at the PR).
     ///
     /// The claim is inserted in the preflight BEFORE the agent runs and the
-    /// orchestrator thread rolls it back on failure — but a crash/kill mid-fix
-    /// kills that thread, stranding a non-terminal claim. Left in place it makes
-    /// its source run permanently un-re-dispatchable (the idempotency gate treats
-    /// any existing row as a live/settled dispatch). This runs at startup, when
-    /// no local fix can be in flight yet, so clearing non-terminal LOCAL claims
-    /// is always safe. CLOUD claims (`mode = 'cloud'`) are never touched — they
-    /// are a fire-and-forget audit record with no terminal lifecycle here.
+    /// orchestrator thread rolls it back on EVERY non-`pr_opened` end (agent
+    /// error, no edit, AND a `rerun_failed` that did not hold) — but a crash/kill
+    /// mid-fix kills that thread, stranding a claim. Left in place it makes its
+    /// source run permanently un-re-dispatchable (the idempotency gate treats any
+    /// existing row as a live/settled dispatch). This runs at startup, when no
+    /// local fix can be in flight yet, so clearing every non-`pr_opened` LOCAL
+    /// claim is always safe. CLOUD claims (`mode = 'cloud'`) are never touched —
+    /// they are a fire-and-forget audit record with no terminal lifecycle here.
     pub fn clear_orphaned_local_fix_dispatches(&self) -> rusqlite::Result<usize> {
         let conn = self.conn()?;
         conn.execute(
             "DELETE FROM fix_agent_dispatches \
-             WHERE mode = 'local' AND status NOT IN ('pr_opened', 'rerun_failed')",
+             WHERE mode = 'local' AND status != 'pr_opened'",
             [],
         )
     }
@@ -9422,23 +9424,33 @@ SUMMARY_JSON:{\"title\":\"current\"}
                 .id
         };
         let orphan = mk_run();
-        let settled = mk_run();
+        let failed = mk_run();
+        let opened = mk_run();
         let cloud = mk_run();
 
-        // A non-terminal LOCAL claim (crash orphan), a TERMINAL local claim, and
-        // a CLOUD claim.
+        // A non-terminal LOCAL claim (crash orphan), a `rerun_failed` LOCAL claim
+        // (the fix did not hold — must NOT block a re-dispatch), a `pr_opened`
+        // LOCAL claim (the ONLY outcome that keeps its claim), and a CLOUD claim.
         db.insert_fix_agent_dispatch(&orphan, &wf.id, None, "ui", "local")
             .unwrap();
-        let settled_claim = db
-            .insert_fix_agent_dispatch(&settled, &wf.id, None, "ui", "local")
+        let failed_claim = db
+            .insert_fix_agent_dispatch(&failed, &wf.id, None, "ui", "local")
             .unwrap();
-        db.update_fix_agent_dispatch(&settled_claim.id, "rerun_failed", None, None, None, None)
+        db.update_fix_agent_dispatch(&failed_claim.id, "rerun_failed", None, None, None, None)
+            .unwrap();
+        let opened_claim = db
+            .insert_fix_agent_dispatch(&opened, &wf.id, None, "ui", "local")
+            .unwrap();
+        db.update_fix_agent_dispatch(&opened_claim.id, "pr_opened", None, None, None, None)
             .unwrap();
         db.insert_fix_agent_dispatch(&cloud, &wf.id, None, "ui", "cloud")
             .unwrap();
 
         let cleared = db.clear_orphaned_local_fix_dispatches().unwrap();
-        assert_eq!(cleared, 1, "only the non-terminal LOCAL claim is cleared");
+        assert_eq!(
+            cleared, 2,
+            "the crash orphan AND the rerun_failed local claim are cleared"
+        );
 
         assert!(
             db.get_fix_agent_dispatch_for_source_run(&orphan)
@@ -9447,10 +9459,16 @@ SUMMARY_JSON:{\"title\":\"current\"}
             "orphaned local claim removed → source run re-dispatchable"
         );
         assert!(
-            db.get_fix_agent_dispatch_for_source_run(&settled)
+            db.get_fix_agent_dispatch_for_source_run(&failed)
+                .unwrap()
+                .is_none(),
+            "rerun_failed local claim removed → the fix can be re-attempted"
+        );
+        assert!(
+            db.get_fix_agent_dispatch_for_source_run(&opened)
                 .unwrap()
                 .is_some(),
-            "terminal local claim (audit) preserved"
+            "pr_opened local claim (idempotency replay → the PR) preserved"
         );
         assert!(
             db.get_fix_agent_dispatch_for_source_run(&cloud)

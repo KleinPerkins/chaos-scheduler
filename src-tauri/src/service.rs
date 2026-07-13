@@ -507,8 +507,24 @@ fn await_rerun_terminal(
     timeout: std::time::Duration,
     poll_interval: std::time::Duration,
 ) -> Result<Run, FixAgentError> {
-    let deadline = std::time::Instant::now() + timeout;
+    // Two-phase, PROGRESS-AWARE budget. The rerun can QUEUE behind capacity
+    // (`AtCapacity`/`MutexBusy`) before a scheduler worker admits it:
+    // - `queue_deadline` bounds the wait for ADMISSION. If it expires while the
+    //   rerun is still queued (never started), the caller cancels the queued row
+    //   and it is safe to drop the worktree (nothing is running in it).
+    // - Once admitted, a FRESH `timeout` (`run_deadline`) bounds the wait for the
+    //   run to reach terminal. This is the fix for the "timeout drops the tree
+    //   under a running rerun" race: there is no way to cancel an already-admitted
+    //   run, so we must NOT abandon it just because the queue budget elapsed —
+    //   dropping the worktree mid-run would yank it out from under the executing
+    //   command. Only a rerun that runs pathologically long PAST admission trips
+    //   `run_deadline` (the scheduler's own per-run timeout normally reaches
+    //   terminal first).
+    let now = std::time::Instant::now();
+    let queue_deadline = now + timeout;
     let mut known_run_id = dispatch.run_id.clone();
+    // An inline (non-queued) dispatch is already admitted at entry.
+    let mut run_deadline: Option<std::time::Instant> = known_run_id.as_ref().map(|_| now + timeout);
     loop {
         // Resolve the run id from THIS dispatch's queued entry once admitted.
         if known_run_id.is_none() {
@@ -518,7 +534,11 @@ fn await_rerun_terminal(
                     .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?
                 {
                     match run_id {
-                        Some(id) => known_run_id = Some(id),
+                        Some(id) => {
+                            known_run_id = Some(id);
+                            // Admitted: start the run-phase budget from NOW.
+                            run_deadline = Some(std::time::Instant::now() + timeout);
+                        }
                         // No run id yet: still eligible only while queued/admitted.
                         // Any other status (cancelled / cascade-skipped) means the
                         // rerun died before running — a terminal non-success.
@@ -541,10 +561,14 @@ fn await_rerun_terminal(
                 }
             }
         }
+        // While admitted, the run-phase budget governs; otherwise the queue budget.
+        let deadline = run_deadline.unwrap_or(queue_deadline);
         if std::time::Instant::now() >= deadline {
-            return Err(FixAgentError::Local(
-                "the fix validation rerun did not finish within the allotted time".to_string(),
-            ));
+            return Err(FixAgentError::Local(if run_deadline.is_some() {
+                "the fix validation rerun did not finish within the allotted time".to_string()
+            } else {
+                "the fix validation rerun was not admitted within the allotted time".to_string()
+            }));
         }
         std::thread::sleep(poll_interval);
     }
@@ -674,11 +698,15 @@ pub(crate) fn run_local_fix_flow(
     )
     .map_err(|e| FixAgentError::Local(format!("failed to dispatch the validation rerun: {e}")))?;
 
-    // 5. Await terminal with a bounded budget. On timeout (or any await error)
-    //    best-effort CANCEL the still-queued rerun before we return: the caller's
-    //    FixWorktree Drop hard-restores the worktree, and a later drain of the
-    //    orphaned rerun would otherwise run against a now-missing tree (M2 also
-    //    fails closed there, but cancelling avoids the pointless orphan run).
+    // 5. Await terminal with a PROGRESS-AWARE budget (queue-wait vs run-phase;
+    //    see await_rerun_terminal). On timeout (or any await error) best-effort
+    //    CANCEL the still-queued rerun before we return: this cleanly reclaims the
+    //    common case (the rerun never got admitted — starved behind capacity), so
+    //    the caller's FixWorktree Drop hard-restores the worktree with nothing
+    //    running in it, and a later drain cannot run against a now-missing tree.
+    //    An already-admitted run cannot be cancelled (cancel_queued_run only
+    //    touches 'queued' rows), but the run-phase budget means we only reach here
+    //    for a rerun that ran pathologically long past admission.
     let rerun = match await_rerun_terminal(db, &dispatch, flow.rerun_timeout, flow.poll_interval) {
         Ok(run) => run,
         Err(e) => {
@@ -691,9 +719,12 @@ pub(crate) fn run_local_fix_flow(
     let rerun_ok = crate::db::run_status::ended_ok(&rerun.status);
 
     if !rerun_ok {
-        // The rerun still fails after the edit — nothing to propose. This is a
-        // terminal OUTCOME (the fix did not hold), not an orchestration error.
-        let _ = db.update_fix_agent_dispatch(flow.claim_id, "rerun_failed", None, None, None, None);
+        // The rerun still fails after the edit — nothing to propose. Roll the
+        // single-flight claim BACK (the fix attempt failed, same as an agent
+        // error): leaving a terminal `rerun_failed` row would trip the
+        // idempotency gate and PERMANENTLY block a corrected re-dispatch for
+        // this source run. Only a GREEN, PR-opening attempt keeps its claim.
+        let _ = db.delete_fix_agent_dispatch(flow.claim_id);
         return Ok(LocalFixOutcome {
             source_run_id: flow.source_run_id.to_string(),
             fix_branch: branch,
@@ -3547,6 +3578,14 @@ mod tests {
                 .any(|c| c.program == "git" && c.args.first().map(String::as_str) == Some("push")),
             "no push on a red rerun"
         );
+        // Bugbot fold (finding 2): a `rerun_failed` rolls the claim BACK so the
+        // idempotency gate does not permanently block a corrected re-dispatch.
+        assert!(
+            db.get_fix_agent_dispatch_for_source_run(&src_run_id)
+                .unwrap()
+                .is_none(),
+            "the single-flight claim is released on a failed rerun"
+        );
 
         drop(worktree);
         let _ = std::fs::remove_dir_all(&repo);
@@ -3799,6 +3838,99 @@ mod tests {
             FixAgentError::Local(msg) => assert!(msg.contains("cancelled before it ran")),
             other => panic!("expected a cancelled-before-run Local error, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn await_rerun_terminal_keeps_waiting_for_a_late_admitted_running_rerun() {
+        // Bugbot fold (finding 3): the bounded budget applies to the QUEUE WAIT
+        // (time-to-admission). Once the rerun is ADMITTED it gets a FRESH budget
+        // to reach terminal, so a rerun that admits near the queue deadline and
+        // then runs a little longer is NEVER abandoned mid-flight — abandoning it
+        // would drop the worktree out from under the executing command (there is
+        // no way to cancel an admitted run). A single start-anchored deadline
+        // would time out in this scenario; the progress-aware budget resolves the
+        // completed run.
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let wf = db
+            .create_workflow(
+                "Src",
+                None,
+                "true",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "sandbox",
+                None,
+                None,
+                Some(r#"{"queue":"sandbox-default"}"#),
+            )
+            .unwrap();
+        let queued_id = db
+            .upsert_queued_run_with_context(
+                &wf.id,
+                "sandbox-default",
+                5,
+                Some(FIX_RERUN_TRIGGER_KIND),
+                None,
+                None,
+                None,
+                Some("src-run-1"),
+                true,
+            )
+            .unwrap();
+        let dispatch = DispatchOutcome {
+            workflow_id: wf.id.clone(),
+            status: "queued".to_string(),
+            run_id: None,
+            queued_run_id: Some(queued_id.clone()),
+            queue_name: String::new(),
+            trigger_kind: Some(FIX_RERUN_TRIGGER_KIND.to_string()),
+            trigger_payload: None,
+            reason: None,
+        };
+
+        let timeout = std::time::Duration::from_millis(300);
+        // Background: admit at ~150ms (well inside the 300ms queue budget), then
+        // finish the run at ~380ms — PAST the 300ms a single start-anchored
+        // deadline would allow, but inside the fresh run-phase budget
+        // (admission ~150ms + 300ms = ~450ms).
+        let bg_db = Arc::clone(&db);
+        let bg_wf = wf.id.clone();
+        let bg_queued = queued_id.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let run = bg_db
+                .create_run_with_context(
+                    &bg_wf,
+                    Some(FIX_RERUN_TRIGGER_KIND),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            // Admit: populate the queued row's run_id (status string is
+            // immaterial once a run id resolves).
+            bg_db
+                .mark_queued_run_terminal_by_id(&bg_queued, &run.id, "running")
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(230));
+            bg_db.finish_run(&run.id, 0, "", "", None).unwrap();
+        });
+
+        let run =
+            await_rerun_terminal(&db, &dispatch, timeout, std::time::Duration::from_millis(5))
+                .expect(
+                    "a late-admitted, still-running rerun is awaited to terminal, not abandoned",
+                );
+        assert!(
+            crate::db::run_status::ended_ok(&run.status),
+            "the completed rerun resolves green"
+        );
+        handle.join().unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 
