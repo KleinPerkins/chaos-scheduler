@@ -89,6 +89,14 @@ fn sanitize_component(id: &str) -> String {
 
 static FIX_LEASE_HELD: AtomicBool = AtomicBool::new(false);
 
+/// Serializes every test that contends for the PROCESS-GLOBAL exclusivity lease
+/// (this module's lease test + the orchestrator's Busy / rollback tests in
+/// `service.rs`). Without it, the parallel test runner could interleave two
+/// `acquire_worktree_lease` calls and make an exclusivity assertion flaky. Not
+/// part of the production surface.
+#[cfg(test)]
+pub(crate) static LEASE_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// RAII proof that this process holds the single fix-worktree slot. Dropping it
 /// releases the slot. It is deliberately `Send` (an `AtomicBool` flag, not a
 /// `MutexGuard`) so the orchestrator may hold it across its own thread's work.
@@ -586,6 +594,7 @@ mod tests {
 
     #[test]
     fn lease_is_exclusive_and_releases_on_drop() {
+        let _serial = LEASE_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let first = acquire_worktree_lease().expect("first acquire succeeds");
         assert!(
             acquire_worktree_lease().is_err(),

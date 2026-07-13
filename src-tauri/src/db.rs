@@ -6405,6 +6405,46 @@ impl Database {
         })
     }
 
+    /// Advance a LOCAL fix dispatch's lifecycle (D05). Each `Some` field is
+    /// written; `None` leaves the existing value intact (`COALESCE`) so a caller
+    /// can update just the status without clobbering an already-recorded branch /
+    /// PR url / worktree path. Always bumps `updated_at`.
+    pub fn update_fix_agent_dispatch(
+        &self,
+        id: &str,
+        status: &str,
+        branch: Option<&str>,
+        pr_url: Option<&str>,
+        worktree_path: Option<&str>,
+        detail: Option<&str>,
+    ) -> rusqlite::Result<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE fix_agent_dispatches
+             SET status = ?2,
+                 branch = COALESCE(?3, branch),
+                 pr_url = COALESCE(?4, pr_url),
+                 worktree_path = COALESCE(?5, worktree_path),
+                 detail = COALESCE(?6, detail),
+                 updated_at = ?7
+             WHERE id = ?1",
+            params![id, status, branch, pr_url, worktree_path, detail, now],
+        )
+    }
+
+    /// Roll back a LOCAL fix single-flight claim (D05). The claim row is inserted
+    /// in the preflight BEFORE the agent runs (it is the durable single-flight
+    /// guard); if any later step fails, the orchestrator deletes it so a
+    /// corrected re-dispatch of the same source run is not permanently blocked.
+    pub fn delete_fix_agent_dispatch(&self, id: &str) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM fix_agent_dispatches WHERE id = ?1",
+            params![id],
+        )
+    }
+
     pub fn validate_queue_cap_lattice(&self) -> rusqlite::Result<Vec<String>> {
         let conn = self.conn()?;
         let global_cap = self.global_parallelism_cap()?;

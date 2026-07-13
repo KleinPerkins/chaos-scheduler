@@ -317,8 +317,19 @@ pub enum FixAgentError {
     NotCursorAgent,
     /// The source run is not in a `failed` terminal state.
     SourceNotFailed(String),
+    /// (LOCAL mode, M3) The source run's workflow is ineligible for a local fix
+    /// rerun — production environment or a non-local-tree-reading type. Carries
+    /// the human-readable reason.
+    SourceNotEligible(String),
+    /// (LOCAL mode, M6) Another local fix already holds the process-global
+    /// working-tree exclusivity lease; only one fix runs at a time.
+    Busy,
     /// The global per-hour dispatch ceiling has been reached (B4).
     RateLimited { max_per_hour: u32 },
+    /// (LOCAL mode) A step of the local fix flow failed (worktree / agent /
+    /// commit / rerun / push / PR). The message is APP-AUTHORED — never raw
+    /// stderr or agent free-text.
+    Local(String),
     /// A wrapped lookup / persistence error.
     Service(ServiceError),
     /// A wrapped dispatch-admission error.
@@ -344,10 +355,16 @@ impl std::fmt::Display for FixAgentError {
                 f,
                 "a fix agent can only be dispatched for a failed run (this run is '{status}')"
             ),
+            FixAgentError::SourceNotEligible(reason) => write!(f, "{reason}"),
+            FixAgentError::Busy => write!(
+                f,
+                "another local fix is already in progress; only one runs at a time"
+            ),
             FixAgentError::RateLimited { max_per_hour } => write!(
                 f,
                 "fix-agent dispatch rate limit reached ({max_per_hour} per hour); try again later"
             ),
+            FixAgentError::Local(msg) => write!(f, "{msg}"),
             FixAgentError::Service(e) => write!(f, "{e}"),
             FixAgentError::Dispatch(e) => write!(f, "{e}"),
         }
@@ -355,6 +372,378 @@ impl std::fmt::Display for FixAgentError {
 }
 
 impl std::error::Error for FixAgentError {}
+
+// ---------------------------------------------------------------------------
+// D05 LOCAL rerun-gated fix agent — orchestrator (M1/M3/M4/M5/M6)
+//
+// The LOCAL flow differs fundamentally from the CLOUD [`dispatch_fix_agent`]:
+// instead of handing the fix off to Cursor Cloud, the scheduler drives
+// `cursor-agent` ITSELF, inside a dedicated throwaway worktree (M2, PR2c), then
+// RE-RUNS the source's REAL command against the agent's edits and — only if that
+// rerun exits 0 — app-authors a DRAFT PR for human review. The security-critical
+// gates are the pure functions in [`crate::fix_local`] (M1/M3/M4); this module
+// composes them with the PR2c worktree/lease primitives and the #287
+// suppress-completion-triggers rerun path (M5).
+// ---------------------------------------------------------------------------
+
+/// Remote the scheduler pushes the app-authored fix branch to.
+const FIX_LOCAL_PR_REMOTE: &str = "origin";
+/// Base branch the DRAFT PR targets.
+const FIX_LOCAL_PR_BASE: &str = "main";
+/// Bounded budget for a LOCAL fix source rerun to reach a terminal state. The
+/// rerun can QUEUE behind other work (AtCapacity / MutexBusy), not just run
+/// inline, so "await terminal" polls with this ceiling (M6).
+const FIX_LOCAL_RERUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
+/// Poll cadence while awaiting the rerun's terminal state.
+const FIX_LOCAL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+/// Cap on the agent-stdout snippet persisted to the audit row's `detail`. The
+/// agent analyzed attacker-influenceable stderr, so its output is opaque DATA:
+/// capped, never parsed for control flow, and never echoed into the PR body.
+const FIX_LOCAL_DETAIL_CAP_BYTES: usize = 4_000;
+
+// The orchestrator entry (`dispatch_fix_agent_local`) has no PRODUCTION caller
+// until the F10 command/UI lane wires it (a later lane), so its whole call graph
+// below is `dead_code` in a non-test build even though it is fully exercised by
+// this module's tests. This mirrors the PR2c primitives' `allow` and is removed
+// when the command lane lands. (A bin-context crate flags even the pub entry.)
+
+/// The terminal result of a LOCAL fix flow (returned to the orchestrator thread
+/// for audit; the operator sees the DRAFT PR, never this struct directly).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct LocalFixOutcome {
+    pub source_run_id: String,
+    pub fix_branch: String,
+    pub rerun_run_id: String,
+    /// Whether the validation rerun exited 0 after the agent's edits. `false`
+    /// means the fix did not hold and NO PR was opened.
+    pub rerun_succeeded: bool,
+    pub pr_url: Option<String>,
+    /// App-authored terminal status: `pr_opened` | `rerun_failed`.
+    pub status: String,
+}
+
+/// Resolved inputs for [`run_local_fix_flow`] — the orchestrator's I/O boundary.
+/// Bundled so the flow is one testable unit driven by an injected
+/// [`ProcessRunner`] (a real [`SystemProcessRunner`] in production; a scripted
+/// runner in tests).
+#[allow(dead_code)]
+pub(crate) struct LocalFixFlow<'a> {
+    pub workspace_root: &'a str,
+    pub python_path: &'a str,
+    pub source_run_id: &'a str,
+    pub source_workflow: &'a Workflow,
+    pub prompt: &'a str,
+    pub worktree: &'a crate::fix_worktree::FixWorktree,
+    pub claim_id: &'a str,
+    pub runner: &'a dyn ProcessRunner,
+    pub rerun_timeout: std::time::Duration,
+    pub poll_interval: std::time::Duration,
+}
+
+/// Size-cap the agent's stdout for the audit row. Treated as opaque DATA.
+#[allow(dead_code)]
+fn cap_agent_detail(stdout: &str) -> String {
+    truncate_on_char_boundary(stdout.trim(), FIX_LOCAL_DETAIL_CAP_BYTES).to_string()
+}
+
+/// Extract the PR URL from `gh pr create` stdout (it prints the URL on its own
+/// line). App-parsed structurally — the URL is the only thing we keep.
+#[allow(dead_code)]
+fn extract_pr_url(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("https://") || line.starts_with("http://"))
+        .map(str::to_string)
+}
+
+/// Run a git subcommand in the worktree via the injected runner (no env
+/// additions). Only the scheduler's OWN git plumbing goes through here.
+#[allow(dead_code)]
+fn worktree_git(
+    runner: &dyn ProcessRunner,
+    root: &str,
+    args: &[&str],
+) -> Result<Output, FixAgentError> {
+    let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    runner
+        .run("git", &owned, Some(root), &[])
+        .map_err(|e| FixAgentError::Local(format!("failed to run git: {e}")))
+}
+
+/// Run a git subcommand and turn a non-zero exit into an APP-AUTHORED error. The
+/// operator-facing message NEVER carries raw git stderr (origin is public).
+#[allow(dead_code)]
+fn worktree_git_checked(
+    runner: &dyn ProcessRunner,
+    root: &str,
+    args: &[&str],
+) -> Result<(), FixAgentError> {
+    let out = worktree_git(runner, root, args)?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(FixAgentError::Local(format!(
+        "git {} failed during the local fix",
+        args.first().copied().unwrap_or("")
+    )))
+}
+
+/// Poll the source rerun to a terminal state with a bounded budget (M6). The
+/// rerun runs INLINE (status `admitted`, `run_id` set) when there is capacity,
+/// or QUEUES (a worker drains it later); either way it is resolved by its
+/// dispatch identity (`FIX_RERUN_TRIGGER_KIND` + `rerun_of = source_run_id`), so
+/// both paths converge on the same run row.
+#[allow(dead_code)]
+fn await_rerun_terminal(
+    db: &Arc<Database>,
+    dispatch: &DispatchOutcome,
+    source_workflow_id: &str,
+    source_run_id: &str,
+    timeout: std::time::Duration,
+    poll_interval: std::time::Duration,
+) -> Result<Run, FixAgentError> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut known_run_id = dispatch.run_id.clone();
+    loop {
+        if known_run_id.is_none() {
+            if let Some(run) = db
+                .find_run_by_dispatch_context(
+                    source_workflow_id,
+                    Some(FIX_RERUN_TRIGGER_KIND),
+                    None,
+                    None,
+                    Some(source_run_id),
+                )
+                .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?
+            {
+                known_run_id = Some(run.id);
+            }
+        }
+        if let Some(run_id) = &known_run_id {
+            if let Ok(run) = db.get_run(run_id) {
+                if crate::db::run_status::is_terminal(&run.status) {
+                    return Ok(run);
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(FixAgentError::Local(
+                "the fix validation rerun did not finish within the allotted time".to_string(),
+            ));
+        }
+        std::thread::sleep(poll_interval);
+    }
+}
+
+/// Drive the LOCAL fix flow end-to-end inside the throwaway worktree. Ordered:
+///
+/// 1. **agent (M1)** — run `cursor-agent … --force` in the worktree with the
+///    push token / gh auth SCRUBBED, so even a prompt-injected `--force` agent
+///    cannot push or open/merge a PR itself. Its stdout is capped + stored as
+///    opaque audit `detail`, never parsed.
+/// 2. **require an edit** — an empty diff is not a fix; refuse early.
+/// 3. **commit-before-rerun** — the scheduler (NOT the agent) commits the edits
+///    with an app-authored message, so the diff is capturable and the rerun runs
+///    against a committed tree.
+/// 4. **rerun (M2/M5)** — dispatch the SOURCE workflow's REAL command with the
+///    reserved fix-rerun trigger (routes execution into THIS worktree) and
+///    completion triggers SUPPRESSED (no downstream cascade).
+/// 5. **await terminal (M6)** — poll the rerun with a bounded budget.
+/// 6. **draft PR (M4)** — only on a GREEN rerun, app-author a DRAFT PR whose
+///    body surfaces the full diff summary + the exact rerun command + the
+///    "exit 0 ≠ correct" caveat. This single push + PR-create is the ONLY step
+///    that receives git/gh credentials. The PR is NEVER auto-merged.
+///
+/// Cleanup/hard-restore of the worktree is the caller's `FixWorktree` `Drop`
+/// (the FINALLY); rolling back the single-flight claim on `Err` is the caller's
+/// job too, so this function stays a pure driver over its inputs.
+#[allow(dead_code)]
+pub(crate) fn run_local_fix_flow(
+    db: &Arc<Database>,
+    flow: LocalFixFlow<'_>,
+) -> Result<LocalFixOutcome, FixAgentError> {
+    let root = flow.worktree.path_str();
+    let branch = flow.worktree.branch().to_string();
+
+    // 1. AGENT (M1 credential isolation). The empty gh-config scratch dir lives
+    //    OUTSIDE the worktree so gh can never write config the fix commit would
+    //    then sweep up via `git add -A`.
+    let gh_scratch = std::env::temp_dir().join(format!("chaos-fix-gh-{}", uuid::Uuid::new_v4()));
+    let _ = std::fs::create_dir_all(&gh_scratch);
+    let iso = crate::fix_local::agent_credential_isolation(&gh_scratch.to_string_lossy());
+    let agent_args = vec![
+        "-p".to_string(),
+        flow.prompt.to_string(),
+        "--output-format".to_string(),
+        "json".to_string(),
+        "--force".to_string(),
+    ];
+    let agent_result = flow.runner.run_with_env(
+        "cursor-agent",
+        &agent_args,
+        Some(root),
+        &iso.env_set,
+        &iso.env_remove,
+    );
+    let _ = std::fs::remove_dir_all(&gh_scratch);
+    let agent_out = agent_result
+        .map_err(|e| FixAgentError::Local(format!("failed to start the fix agent: {e}")))?;
+    let detail = cap_agent_detail(&String::from_utf8_lossy(&agent_out.stdout));
+    let _ = db.update_fix_agent_dispatch(
+        flow.claim_id,
+        "agent_ran",
+        Some(&branch),
+        None,
+        Some(root),
+        Some(&detail),
+    );
+    if !agent_out.status.success() {
+        return Err(FixAgentError::Local(
+            "the fix agent exited non-zero; no fix proposed".to_string(),
+        ));
+    }
+
+    // 2. Require an actual edit.
+    let status_out = worktree_git(flow.runner, root, &["status", "--porcelain"])?;
+    if String::from_utf8_lossy(&status_out.stdout)
+        .trim()
+        .is_empty()
+    {
+        return Err(FixAgentError::Local(
+            "the fix agent made no changes".to_string(),
+        ));
+    }
+
+    // 3. COMMIT the edits BEFORE the rerun (app-authored message; inline
+    //    identity so a bare CI/test repo without user.* config still commits).
+    let commit_msg =
+        crate::fix_local::build_fix_commit_message(&flow.source_workflow.name, flow.source_run_id);
+    worktree_git_checked(flow.runner, root, &["add", "-A"])?;
+    worktree_git_checked(
+        flow.runner,
+        root,
+        &[
+            "-c",
+            "user.email=fix-agent@chaos-scheduler.local",
+            "-c",
+            "user.name=Chaos Scheduler Fix Agent",
+            "commit",
+            "-m",
+            &commit_msg,
+        ],
+    )?;
+
+    // 4. RERUN the source's REAL command against the edited tree (M2 routes it
+    //    into THIS worktree) with completion triggers SUPPRESSED (M5). Dispatched
+    //    via the free admission fn directly (no idempotency wrapper): the rerun
+    //    is a fresh execution and must not collapse into the old failed run.
+    let options = NonCronDispatchOptions {
+        notify_on_success: false,
+        notify_on_failure: false,
+        email_on_failure_enabled: false,
+        trigger_kind: FIX_RERUN_TRIGGER_KIND,
+        trigger_payload: None,
+        upstream_run_id: None,
+        input_json: None,
+        rerun_of_run_id: Some(flow.source_run_id),
+        suppress_completion_triggers: true,
+        dedupe: false,
+        app_handle: None,
+    };
+    let dispatch = dispatch_non_cron_workflow(
+        db,
+        flow.workspace_root,
+        flow.python_path,
+        &flow.source_workflow.id,
+        options,
+    )
+    .map_err(|e| FixAgentError::Local(format!("failed to dispatch the validation rerun: {e}")))?;
+
+    // 5. Await terminal with a bounded budget.
+    let rerun = await_rerun_terminal(
+        db,
+        &dispatch,
+        &flow.source_workflow.id,
+        flow.source_run_id,
+        flow.rerun_timeout,
+        flow.poll_interval,
+    )?;
+    let rerun_ok = crate::db::run_status::ended_ok(&rerun.status);
+
+    if !rerun_ok {
+        // The rerun still fails after the edit — nothing to propose. This is a
+        // terminal OUTCOME (the fix did not hold), not an orchestration error.
+        let _ = db.update_fix_agent_dispatch(flow.claim_id, "rerun_failed", None, None, None, None);
+        return Ok(LocalFixOutcome {
+            source_run_id: flow.source_run_id.to_string(),
+            fix_branch: branch,
+            rerun_run_id: rerun.id,
+            rerun_succeeded: false,
+            pr_url: None,
+            status: "rerun_failed".to_string(),
+        });
+    }
+
+    // 6. GREEN rerun → app-author the DRAFT PR (M4). Capture the committed diff
+    //    summary for the body, push the branch, then open a DRAFT PR. This push +
+    //    PR-create is the ONLY credentialed step (the agent had none).
+    let diff_out = worktree_git(flow.runner, root, &["diff", "--stat", "HEAD~1", "HEAD"])?;
+    let diff_stat = String::from_utf8_lossy(&diff_out.stdout).to_string();
+
+    let push_argv = crate::fix_local::git_push_argv(FIX_LOCAL_PR_REMOTE, &branch);
+    let push_refs: Vec<&str> = push_argv.iter().map(String::as_str).collect();
+    worktree_git_checked(flow.runner, root, &push_refs)?;
+
+    let title =
+        crate::fix_local::build_fix_pr_title(&flow.source_workflow.name, flow.source_run_id);
+    let body = crate::fix_local::build_fix_pr_body(&crate::fix_local::FixPrBody {
+        source_workflow_name: &flow.source_workflow.name,
+        source_run_id: flow.source_run_id,
+        fix_branch: &branch,
+        diff_stat: &diff_stat,
+        rerun_command: &flow.source_workflow.script_path,
+    });
+    let body_path = flow.worktree.path().join(".chaos-fix-pr-body.md");
+    std::fs::write(&body_path, &body)
+        .map_err(|e| FixAgentError::Local(format!("failed to write the PR body: {e}")))?;
+
+    let pr_argv = crate::fix_local::gh_pr_create_argv(
+        FIX_LOCAL_PR_BASE,
+        &branch,
+        &title,
+        &body_path.to_string_lossy(),
+    );
+    let pr_out = flow
+        .runner
+        .run("gh", &pr_argv, Some(root), &[])
+        .map_err(|e| FixAgentError::Local(format!("failed to run gh: {e}")))?;
+    let _ = std::fs::remove_file(&body_path);
+    if !pr_out.status.success() {
+        return Err(FixAgentError::Local(
+            "failed to open the draft PR".to_string(),
+        ));
+    }
+    let pr_url = extract_pr_url(&String::from_utf8_lossy(&pr_out.stdout));
+    let _ = db.update_fix_agent_dispatch(
+        flow.claim_id,
+        "pr_opened",
+        None,
+        pr_url.as_deref(),
+        None,
+        None,
+    );
+
+    Ok(LocalFixOutcome {
+        source_run_id: flow.source_run_id.to_string(),
+        fix_branch: branch,
+        rerun_run_id: rerun.id,
+        rerun_succeeded: true,
+        pr_url,
+        status: "pr_opened".to_string(),
+    })
+}
 
 /// Whether a run status is the `failed` terminal state a fix agent targets.
 fn run_status_is_failed(status: &str) -> bool {
@@ -842,6 +1231,186 @@ impl SchedulerService {
             .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?;
 
         Ok(outcome)
+    }
+
+    /// Dispatch the D05 **LOCAL** rerun-gated fix agent against a FAILED run.
+    /// OPT-IN and SAFE BY DEFAULT — like the cloud path there is no automated
+    /// caller (every dispatch is an explicit human action). This method runs the
+    /// SYNCHRONOUS preflight (identical gate ORDER to the cloud path, plus the
+    /// M3 source scope/env gate), takes the single-flight resources BEFORE the
+    /// agent runs, then hands the long-running flow to its OWN thread (M6) so it
+    /// never occupies a scheduler worker-pool slot.
+    ///
+    /// Preflight, in order (every existing gate preserved):
+    /// 1. **enabled** — refuse unless the integration is on.
+    /// 2. **designated workflow** — refuse unless a `cursor_agent` fix workflow
+    ///    is configured and resolves.
+    /// 3. **source failed** — refuse unless the source run is `failed`.
+    /// 4. **source eligible (M3)** — refuse a PRODUCTION source or a
+    ///    non-local-tree-reading source type (the rerun runs the source's REAL
+    ///    command against edited code, so it must be local + non-prod).
+    /// 5. **idempotency** — one fix per failed run; a second dispatch replays.
+    /// 6. **rate cap** — global per-hour ceiling across DISTINCT failed runs.
+    /// 7. **exclusivity lease (M6)** — one local fix in flight at a time.
+    /// 8. **single-flight claim** — insert the durable audit/claim row BEFORE the
+    ///    agent runs; the orchestrator thread ROLLS IT BACK on any failure.
+    ///
+    /// Returns as soon as the flow is handed to its thread (status `dispatched`).
+    #[allow(dead_code)] // Consumed by the F10 command/UI lane (later PR) + tests.
+    pub fn dispatch_fix_agent_local(
+        &self,
+        workspace_root: &str,
+        python_path: &str,
+        source_run_id: &str,
+        initiator: &str,
+    ) -> Result<DispatchOutcome, FixAgentError> {
+        let prefs = self
+            .db
+            .get_cursor_integration_prefs()
+            .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?;
+        if !prefs.enabled {
+            return Err(FixAgentError::Disabled);
+        }
+        let fix_workflow_id = prefs.fix_workflow_id.ok_or(FixAgentError::NoFixWorkflow)?;
+
+        // Source run must exist and be FAILED (read once; never written back).
+        let source_run = self.db.get_run(source_run_id).map_err(|_| {
+            FixAgentError::Service(ServiceError::NotFound(format!(
+                "run '{source_run_id}' not found"
+            )))
+        })?;
+        if !run_status_is_failed(&source_run.status) {
+            return Err(FixAgentError::SourceNotFailed(source_run.status.clone()));
+        }
+
+        // The designated fix workflow must resolve and be a cursor_agent type.
+        let fix_workflow = self
+            .get_workflow(&fix_workflow_id)
+            .map_err(FixAgentError::Service)?;
+        if !workflow_is_cursor_agent(&fix_workflow) {
+            return Err(FixAgentError::NotCursorAgent);
+        }
+
+        // M3: the SOURCE workflow (the one being rerun) must be non-production
+        // AND local-tree-reading. The rerun executes its REAL command against
+        // the agent-edited tree, so a production or http/cloud source is refused.
+        let source_workflow = self
+            .get_workflow(&source_run.workflow_id)
+            .map_err(FixAgentError::Service)?;
+        if let Err(refusal) = crate::fix_local::ensure_fix_rerun_source_allowed(
+            &source_workflow.environment,
+            source_workflow.spec_json.as_deref(),
+        ) {
+            return Err(FixAgentError::SourceNotEligible(refusal.to_string()));
+        }
+
+        // Idempotency: one fix per failed run — replay an existing dispatch.
+        if let Some(existing) = self
+            .db
+            .get_fix_agent_dispatch_for_source_run(source_run_id)
+            .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?
+        {
+            return Ok(DispatchOutcome {
+                workflow_id: fix_workflow_id,
+                status: "duplicate".to_string(),
+                run_id: existing.fix_run_id,
+                queued_run_id: None,
+                queue_name: String::new(),
+                trigger_kind: Some(FIX_AGENT_TRIGGER_KIND.to_string()),
+                trigger_payload: None,
+                reason: Some("fix agent already dispatched for this run".to_string()),
+            });
+        }
+
+        // Rate cap: global ceiling over the trailing hour across distinct runs.
+        let since = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let recent = self
+            .db
+            .count_fix_agent_dispatches_since(&since)
+            .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?;
+        if recent >= prefs.max_dispatches_per_hour {
+            return Err(FixAgentError::RateLimited {
+                max_per_hour: prefs.max_dispatches_per_hour,
+            });
+        }
+
+        // M6: take the process-global exclusivity slot BEFORE claiming, so a
+        // second concurrent local fix is rejected here (never races the insert).
+        let lease =
+            crate::fix_worktree::acquire_worktree_lease().map_err(|_| FixAgentError::Busy)?;
+
+        // Durable single-flight claim inserted BEFORE the agent runs. The
+        // orchestrator thread deletes it on any failure so a corrected
+        // re-dispatch is not permanently blocked.
+        let claim = self
+            .db
+            .insert_fix_agent_dispatch(source_run_id, &fix_workflow_id, None, initiator, "local")
+            .map_err(|e| FixAgentError::Service(ServiceError::Internal(e.to_string())))?;
+
+        // The prompt describes the SOURCE failure (fenced untrusted stderr).
+        let prompt = build_fix_agent_prompt(&source_workflow.name, &source_run);
+
+        // Hand the long-running flow to its OWN thread (M6): create the worktree,
+        // drive the flow, and on failure roll back the claim. The lease +
+        // FixWorktree Drop are the FINALLY (release + hard-restore).
+        let db = Arc::clone(&self.db);
+        let workspace_root = workspace_root.to_string();
+        let python_path = python_path.to_string();
+        let source_run_id_owned = source_run_id.to_string();
+        let source_workflow_owned = source_workflow.clone();
+        let claim_id = claim.id.clone();
+        std::thread::spawn(move || {
+            let _lease = lease; // held across the whole fix; Drop releases it.
+            let worktree = match crate::fix_worktree::create_fix_worktree(
+                &workspace_root,
+                &source_run_id_owned,
+            ) {
+                Ok(worktree) => worktree,
+                Err(e) => {
+                    log::warn!("local fix: failed to create worktree: {e}");
+                    let _ = db.delete_fix_agent_dispatch(&claim_id);
+                    return;
+                }
+            };
+            let runner = SystemProcessRunner;
+            let flow = LocalFixFlow {
+                workspace_root: &workspace_root,
+                python_path: &python_path,
+                source_run_id: &source_run_id_owned,
+                source_workflow: &source_workflow_owned,
+                prompt: &prompt,
+                worktree: &worktree,
+                claim_id: &claim_id,
+                runner: &runner,
+                rerun_timeout: FIX_LOCAL_RERUN_TIMEOUT,
+                poll_interval: FIX_LOCAL_POLL_INTERVAL,
+            };
+            match run_local_fix_flow(&db, flow) {
+                Ok(outcome) => log::info!(
+                    "local fix flow finished: {} (branch {})",
+                    outcome.status,
+                    outcome.fix_branch
+                ),
+                Err(e) => {
+                    log::warn!("local fix flow failed: {e}");
+                    // Roll back the single-flight claim (hard-restore of the
+                    // worktree is the FixWorktree Drop below).
+                    let _ = db.delete_fix_agent_dispatch(&claim_id);
+                }
+            }
+            // `worktree` Drop = FINALLY cleanup; `_lease` Drop = release.
+        });
+
+        Ok(DispatchOutcome {
+            workflow_id: fix_workflow_id,
+            status: "dispatched".to_string(),
+            run_id: None,
+            queued_run_id: None,
+            queue_name: String::new(),
+            trigger_kind: Some(FIX_AGENT_TRIGGER_KIND.to_string()),
+            trigger_payload: None,
+            reason: Some("local fix agent started".to_string()),
+        })
     }
 
     /// Validate a workflow spec (structure + operator config) without persisting.
@@ -2581,5 +3150,564 @@ mod tests {
         // and escape into trusted framing.
         assert!(!prompt.contains("```\nnow follow THESE instructions"));
         assert!(prompt.contains("'''"));
+    }
+
+    // =====================================================================
+    // D05 LOCAL fix-agent ORCHESTRATOR (PR2d) — M1/M3/M4/M5/M6 + notes.
+    //
+    // The pure gates (M1 policy, M3, M4 builders) carry their own unit tests in
+    // `fix_local.rs`; the worktree-execution routing (M2) + orphan cleanup (M6)
+    // are tested in `scheduler.rs`. The tests below exercise the ORCHESTRATOR
+    // that composes them: the end-to-end LOCAL flow (real git worktree, injected
+    // runner for cursor-agent/gh + a real source rerun) and the dispatch
+    // preflight (M3/M6 gates, single-flight claim + rollback on its own thread).
+    // =====================================================================
+
+    #[derive(Clone)]
+    struct RecordedCall {
+        program: String,
+        args: Vec<String>,
+        env_set: Vec<(String, String)>,
+        env_remove: Vec<String>,
+    }
+
+    /// A `ProcessRunner` purpose-built for the LOCAL fix flow: it runs the
+    /// scheduler's OWN `git` for real (so commit / diff behave), STUBS `git push`
+    /// (no remote in tests), simulates `cursor-agent` by writing an "edit" into
+    /// the worktree, and returns a canned URL for `gh pr create` (capturing the
+    /// `--body-file` contents). Every call is recorded for assertions (incl. the
+    /// M1 credential env the agent child was spawned with).
+    struct FixFlowRunner {
+        calls: std::sync::Mutex<Vec<RecordedCall>>,
+        pr_body: std::sync::Mutex<Option<String>>,
+        agent_exit_ok: bool,
+        agent_creates_file: Option<String>,
+    }
+
+    impl FixFlowRunner {
+        fn new(agent_exit_ok: bool, agent_creates_file: Option<&str>) -> Self {
+            FixFlowRunner {
+                calls: std::sync::Mutex::new(Vec::new()),
+                pr_body: std::sync::Mutex::new(None),
+                agent_exit_ok,
+                agent_creates_file: agent_creates_file.map(str::to_string),
+            }
+        }
+        fn calls(&self) -> Vec<RecordedCall> {
+            self.calls.lock().unwrap().clone()
+        }
+        fn find(&self, program: &str) -> Option<RecordedCall> {
+            self.calls().into_iter().find(|c| c.program == program)
+        }
+        fn handle(
+            &self,
+            program: &str,
+            args: &[String],
+            cwd: Option<&str>,
+            env_set: &[(String, String)],
+            env_remove: &[&str],
+        ) -> std::io::Result<Output> {
+            self.calls.lock().unwrap().push(RecordedCall {
+                program: program.to_string(),
+                args: args.to_vec(),
+                env_set: env_set.to_vec(),
+                env_remove: env_remove.iter().map(|s| s.to_string()).collect(),
+            });
+            match program {
+                "cursor-agent" => {
+                    if let (Some(dir), Some(file)) = (cwd, &self.agent_creates_file) {
+                        let _ = std::fs::write(std::path::Path::new(dir).join(file), b"fix");
+                    }
+                    Ok(if self.agent_exit_ok {
+                        fake_ok(r#"{"result":"agent done"}"#)
+                    } else {
+                        fake_fail()
+                    })
+                }
+                "git" => {
+                    if args.first().map(String::as_str) == Some("push") {
+                        Ok(fake_ok("")) // no remote under test
+                    } else {
+                        Ok(real_git(args, cwd))
+                    }
+                }
+                "gh" => {
+                    if let Some(i) = args.iter().position(|a| a == "--body-file") {
+                        if let Some(path) = args.get(i + 1) {
+                            if let Ok(body) = std::fs::read_to_string(path) {
+                                *self.pr_body.lock().unwrap() = Some(body);
+                            }
+                        }
+                    }
+                    Ok(fake_ok(
+                        "https://github.com/KleinPerkins/chaos-scheduler/pull/999\n",
+                    ))
+                }
+                _ => Ok(fake_ok("")),
+            }
+        }
+    }
+
+    impl ProcessRunner for FixFlowRunner {
+        fn run(
+            &self,
+            program: &str,
+            args: &[String],
+            cwd: Option<&str>,
+            env: &[(String, String)],
+        ) -> std::io::Result<Output> {
+            self.handle(program, args, cwd, env, &[])
+        }
+        fn run_with_env(
+            &self,
+            program: &str,
+            args: &[String],
+            cwd: Option<&str>,
+            env_set: &[(String, String)],
+            env_remove: &[&str],
+        ) -> std::io::Result<Output> {
+            self.handle(program, args, cwd, env_set, env_remove)
+        }
+    }
+
+    /// Fabricate a successful `Output` with the given stdout (via `true`, so no
+    /// unstable `ExitStatus` construction is needed).
+    fn fake_ok(stdout: &str) -> Output {
+        let mut out = std::process::Command::new("true").output().unwrap();
+        out.stdout = stdout.as_bytes().to_vec();
+        out
+    }
+
+    fn fake_fail() -> Output {
+        std::process::Command::new("false").output().unwrap()
+    }
+
+    /// Run the scheduler's own `git` for real, scrubbing inherited git context so
+    /// the test is hermetic under this project's own pre-push hook.
+    fn real_git(args: &[String], cwd: Option<&str>) -> Output {
+        let mut cmd = std::process::Command::new("git");
+        for key in INHERITED_GIT_CONTEXT_VARS {
+            cmd.env_remove(key);
+        }
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        cmd.args(args);
+        cmd.output().unwrap()
+    }
+
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// A real one-commit git repo on `main` to serve as the primary checkout the
+    /// throwaway fix worktree is added from.
+    fn init_git_repo() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("chaos-fixflow-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let mut cmd = std::process::Command::new("git");
+            for key in INHERITED_GIT_CONTEXT_VARS {
+                cmd.env_remove(key);
+            }
+            cmd.current_dir(&dir).args(args);
+            assert!(
+                cmd.output().unwrap().status.success(),
+                "git {args:?} failed in test repo setup"
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t.t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("README.md"), b"seed").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "seed"]);
+        dir
+    }
+
+    /// Seed a non-cron `command` source workflow (local-tree-reading) in
+    /// `environment` whose command is `command`, plus a FAILED run for it.
+    fn seed_failed_local_source(
+        db: &Arc<Database>,
+        environment: &str,
+        command: &str,
+    ) -> (String, String) {
+        let wf = db
+            .create_workflow(
+                "Local Source",
+                None,
+                command,
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                environment,
+                None,
+                None,
+                Some(r#"{"queue":"sandbox-default"}"#),
+            )
+            .unwrap();
+        let run = db
+            .create_run_with_context(&wf.id, Some("cron"), None, None, None, None)
+            .unwrap();
+        db.finish_run(&run.id, 1, "out", "boom", None).unwrap();
+        (wf.id, run.id)
+    }
+
+    #[test]
+    fn local_fix_flow_opens_a_draft_pr_after_a_green_rerun() {
+        // Happy path end-to-end: agent edits (M1-scrubbed), commit-before-rerun,
+        // the source's REAL command reruns GREEN in the worktree (M2), and the
+        // app-authored DRAFT PR (M4) surfaces the diff + exact rerun command.
+        if !git_available() {
+            return;
+        }
+        let repo = init_git_repo();
+        let db_dir = tmpdir();
+        let db = Arc::new(Database::new(&db_dir));
+        // Legacy source commands run via `sh -c` only when they carry an env
+        // assignment (`=`); the `CHECK=1 &&` prefix makes the real `test` run in
+        // the worktree shell (see scheduler::build_workflow_command).
+        let (src_wf_id, src_run_id) =
+            seed_failed_local_source(&db, "sandbox", "CHECK=1 && test -f fixed.txt");
+        let src_wf = db.get_workflow(&src_wf_id).unwrap();
+        let fix_wf_id = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        let claim = db
+            .insert_fix_agent_dispatch(&src_run_id, &fix_wf_id, None, "ui", "local")
+            .unwrap();
+        let worktree =
+            crate::fix_worktree::create_fix_worktree(repo.to_str().unwrap(), &src_run_id).unwrap();
+        let wt_path = worktree.path().to_path_buf();
+
+        let runner = FixFlowRunner::new(true, Some("fixed.txt"));
+        let outcome = run_local_fix_flow(
+            &db,
+            LocalFixFlow {
+                workspace_root: repo.to_str().unwrap(),
+                python_path: "python3",
+                source_run_id: &src_run_id,
+                source_workflow: &src_wf,
+                prompt: "please fix",
+                worktree: &worktree,
+                claim_id: &claim.id,
+                runner: &runner,
+                rerun_timeout: std::time::Duration::from_secs(30),
+                poll_interval: std::time::Duration::from_millis(10),
+            },
+        )
+        .expect("flow should open a PR");
+
+        assert_eq!(outcome.status, "pr_opened");
+        assert!(outcome.rerun_succeeded);
+        assert_eq!(
+            outcome.pr_url.as_deref(),
+            Some("https://github.com/KleinPerkins/chaos-scheduler/pull/999")
+        );
+
+        // M1: the cursor-agent child was spawned with the push tokens SCRUBBED
+        // and NO token set — it is strictly less privileged than the scheduler.
+        let agent = runner.find("cursor-agent").expect("agent ran");
+        assert!(agent.env_remove.contains(&"GITHUB_TOKEN".to_string()));
+        assert!(agent.env_remove.contains(&"GH_TOKEN".to_string()));
+        assert!(!agent
+            .env_set
+            .iter()
+            .any(|(k, _)| k == "GITHUB_TOKEN" || k == "GH_TOKEN"));
+
+        // M4: the PR is a DRAFT, never merged, and the body surfaces the diff +
+        // exact rerun command + the exit-0≠correct caveat.
+        let gh = runner.find("gh").expect("gh ran");
+        assert!(gh.args.contains(&"--draft".to_string()));
+        assert!(!gh.args.iter().any(|a| a == "merge"));
+        let body = runner
+            .pr_body
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("body captured");
+        assert!(body.contains(crate::fix_local::FIX_RERUN_CAVEAT));
+        assert!(
+            body.contains("test -f fixed.txt"),
+            "exact rerun cmd surfaced"
+        );
+        assert!(body.contains("fixed.txt"), "diff --stat surfaced");
+
+        // commit-before-rerun: the commit precedes the push in call order.
+        let calls = runner.calls();
+        let commit_idx = calls
+            .iter()
+            .position(|c| c.program == "git" && c.args.iter().any(|a| a == "commit"))
+            .expect("a commit happened");
+        let push_idx = calls
+            .iter()
+            .position(|c| c.program == "git" && c.args.first().map(String::as_str) == Some("push"))
+            .expect("a push happened");
+        assert!(commit_idx < push_idx, "edits committed before the push");
+
+        // M6 FINALLY: dropping the worktree tears it down (hard-restore).
+        drop(worktree);
+        assert!(!wt_path.exists(), "worktree cleaned up on drop");
+
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&db_dir);
+    }
+
+    #[test]
+    fn local_fix_flow_opens_no_pr_when_the_rerun_still_fails() {
+        // The gate's whole point: if the source's REAL command STILL fails after
+        // the agent's edits, NO PR is opened (no push, no gh) — the outcome is a
+        // terminal `rerun_failed`, not a proposal.
+        if !git_available() {
+            return;
+        }
+        let repo = init_git_repo();
+        let db_dir = tmpdir();
+        let db = Arc::new(Database::new(&db_dir));
+        // The rerun validates a DIFFERENT file than the agent creates → red.
+        // (`CHECK=1 &&` forces the `sh -c` path; see build_workflow_command.)
+        let (src_wf_id, src_run_id) =
+            seed_failed_local_source(&db, "sandbox", "CHECK=1 && test -f never_created.txt");
+        let src_wf = db.get_workflow(&src_wf_id).unwrap();
+        let fix_wf_id = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        let claim = db
+            .insert_fix_agent_dispatch(&src_run_id, &fix_wf_id, None, "ui", "local")
+            .unwrap();
+        let worktree =
+            crate::fix_worktree::create_fix_worktree(repo.to_str().unwrap(), &src_run_id).unwrap();
+
+        let runner = FixFlowRunner::new(true, Some("fixed.txt"));
+        let outcome = run_local_fix_flow(
+            &db,
+            LocalFixFlow {
+                workspace_root: repo.to_str().unwrap(),
+                python_path: "python3",
+                source_run_id: &src_run_id,
+                source_workflow: &src_wf,
+                prompt: "please fix",
+                worktree: &worktree,
+                claim_id: &claim.id,
+                runner: &runner,
+                rerun_timeout: std::time::Duration::from_secs(30),
+                poll_interval: std::time::Duration::from_millis(10),
+            },
+        )
+        .expect("flow returns a terminal outcome");
+
+        assert_eq!(outcome.status, "rerun_failed");
+        assert!(!outcome.rerun_succeeded);
+        assert!(outcome.pr_url.is_none());
+        assert!(runner.find("gh").is_none(), "no PR opened on a red rerun");
+        assert!(
+            !runner
+                .calls()
+                .iter()
+                .any(|c| c.program == "git" && c.args.first().map(String::as_str) == Some("push")),
+            "no push on a red rerun"
+        );
+
+        drop(worktree);
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&db_dir);
+    }
+
+    #[test]
+    fn local_fix_flow_suppresses_source_completion_triggers() {
+        // M5: a GREEN fix rerun must NOT cascade the source's on-completion
+        // downstream workflows (their real side effects). A downstream wired to
+        // fire on the source's success must have ZERO runs after the fix rerun.
+        if !git_available() {
+            return;
+        }
+        let repo = init_git_repo();
+        let db_dir = tmpdir();
+        let db = Arc::new(Database::new(&db_dir));
+        let (src_wf_id, src_run_id) =
+            seed_failed_local_source(&db, "sandbox", "CHECK=1 && test -f fixed.txt");
+        let downstream = db
+            .create_workflow(
+                "Downstream",
+                None,
+                "true",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "sandbox",
+                None,
+                Some(&format!(
+                    r#"[{{"kind":"on_completion","upstream_workflow_id":"{src_wf_id}","status_filter":["success"]}}]"#
+                )),
+                Some(r#"{"queue":"sandbox-default"}"#),
+            )
+            .unwrap();
+        let src_wf = db.get_workflow(&src_wf_id).unwrap();
+        let fix_wf_id = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        let claim = db
+            .insert_fix_agent_dispatch(&src_run_id, &fix_wf_id, None, "ui", "local")
+            .unwrap();
+        let worktree =
+            crate::fix_worktree::create_fix_worktree(repo.to_str().unwrap(), &src_run_id).unwrap();
+
+        let runner = FixFlowRunner::new(true, Some("fixed.txt"));
+        let outcome = run_local_fix_flow(
+            &db,
+            LocalFixFlow {
+                workspace_root: repo.to_str().unwrap(),
+                python_path: "python3",
+                source_run_id: &src_run_id,
+                source_workflow: &src_wf,
+                prompt: "please fix",
+                worktree: &worktree,
+                claim_id: &claim.id,
+                runner: &runner,
+                rerun_timeout: std::time::Duration::from_secs(30),
+                poll_interval: std::time::Duration::from_millis(10),
+            },
+        )
+        .expect("flow ok");
+        assert!(outcome.rerun_succeeded);
+
+        let downstream_runs = db.get_run_history(&downstream.id, 10).unwrap();
+        assert!(
+            downstream_runs.is_empty(),
+            "on-completion downstream must be SUPPRESSED for the fix rerun"
+        );
+
+        drop(worktree);
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&db_dir);
+    }
+
+    #[test]
+    fn local_fix_dispatch_refuses_a_production_source() {
+        // M3 at the orchestrator preflight: a PRODUCTION source run is ineligible
+        // (the rerun runs the source's REAL command against edited code).
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec![], false);
+        let fix = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        enable_fix_agent(&db, &fix, 5);
+        let source_id = seed_failed_run(&db, "boom"); // seeded as a PRODUCTION source
+
+        let err = svc
+            .dispatch_fix_agent_local(dir.to_str().unwrap(), "python3", &source_id, "ui")
+            .unwrap_err();
+        assert!(matches!(err, FixAgentError::SourceNotEligible(_)));
+        // Nothing was claimed (rejected before the single-flight insert).
+        assert!(db
+            .get_fix_agent_dispatch_for_source_run(&source_id)
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn local_fix_dispatch_is_busy_when_a_fix_is_already_in_flight() {
+        // M6: the process-global exclusivity lease bounds the flow to one fix at
+        // a time; a second dispatch while the lease is held is refused as Busy.
+        let _serial = crate::fix_worktree::LEASE_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec![], false);
+        let fix = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        enable_fix_agent(&db, &fix, 5);
+        let (_wf, src_run) = seed_failed_local_source(&db, "sandbox", "true");
+
+        let held = crate::fix_worktree::acquire_worktree_lease().expect("test holds the lease");
+        let err = svc
+            .dispatch_fix_agent_local(dir.to_str().unwrap(), "python3", &src_run, "ui")
+            .unwrap_err();
+        assert!(matches!(err, FixAgentError::Busy));
+        drop(held);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn local_fix_dispatch_claims_before_the_agent_and_rolls_back_on_failure() {
+        // Notes: the single-flight claim is inserted in the preflight BEFORE the
+        // agent runs, on the orchestrator's OWN thread, and is ROLLED BACK if the
+        // flow fails — so a corrected re-dispatch is not permanently blocked.
+        // Here `workspace_root` is NOT a git repo, so worktree creation fails
+        // FIRST (the agent never runs), which also proves claim-before-agent.
+        let _serial = crate::fix_worktree::LEASE_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec![], false);
+        let fix = seed_cursor_fix_workflow(&db, "Fixer", "sandbox");
+        enable_fix_agent(&db, &fix, 5);
+        let (_wf, src_run) = seed_failed_local_source(&db, "sandbox", "true");
+        let not_a_repo = tmpdir();
+
+        let outcome = svc
+            .dispatch_fix_agent_local(not_a_repo.to_str().unwrap(), "python3", &src_run, "ui")
+            .expect("dispatch hands off to its thread");
+        assert_eq!(outcome.status, "dispatched");
+
+        // The claim existed (single-flight) then the thread rolled it back.
+        let mut rolled_back = false;
+        for _ in 0..200 {
+            if db
+                .get_fix_agent_dispatch_for_source_run(&src_run)
+                .unwrap()
+                .is_none()
+            {
+                rolled_back = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(
+            rolled_back,
+            "the single-flight claim must be rolled back when the flow fails"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(not_a_repo);
+    }
+
+    #[test]
+    fn await_rerun_terminal_times_out_when_no_run_finishes() {
+        // M6 bounded poll: if the rerun never reaches a terminal state within the
+        // budget, the flow gives up (never blocks forever).
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let dispatch = DispatchOutcome {
+            workflow_id: "wf".to_string(),
+            status: "queued".to_string(),
+            run_id: None,
+            queued_run_id: Some("q-1".to_string()),
+            queue_name: String::new(),
+            trigger_kind: Some(FIX_RERUN_TRIGGER_KIND.to_string()),
+            trigger_payload: None,
+            reason: None,
+        };
+        let err = await_rerun_terminal(
+            &db,
+            &dispatch,
+            "wf-absent",
+            "src-absent",
+            std::time::Duration::from_millis(0),
+            std::time::Duration::from_millis(1),
+        )
+        .unwrap_err();
+        assert!(matches!(err, FixAgentError::Local(_)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cap_agent_detail_size_caps_opaque_agent_output() {
+        // Notes: the agent's stdout (which analyzed tainted stderr) is treated as
+        // opaque DATA and size-capped before it lands in the audit row.
+        let big = "x".repeat(10_000);
+        let capped = cap_agent_detail(&big);
+        assert!(capped.len() <= FIX_LOCAL_DETAIL_CAP_BYTES);
     }
 }
