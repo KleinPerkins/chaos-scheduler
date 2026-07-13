@@ -75,6 +75,27 @@ pub trait ProcessRunner: Send + Sync {
         cwd: Option<&str>,
         env: &[(String, String)],
     ) -> std::io::Result<Output>;
+
+    /// Like [`ProcessRunner::run`], but additionally UNSETS the named inherited
+    /// env keys before spawn. This is the mechanism behind M1 credential
+    /// isolation for the D05 LOCAL fix agent: the `cursor-agent` child is spawned
+    /// with `GITHUB_TOKEN`/`GH_TOKEN`/gh-config REMOVED, so a `--force`
+    /// autonomous agent cannot itself `git push` / `gh pr merge` / echo the
+    /// token — those credentials are provided ONLY to the scheduler's OWN single
+    /// push + PR-create step. The default delegates to [`ProcessRunner::run`]
+    /// (ignoring removals) so existing fakes keep compiling unchanged; the real
+    /// runner and the isolation tests override it.
+    fn run_with_env(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: Option<&str>,
+        env_set: &[(String, String)],
+        env_remove: &[&str],
+    ) -> std::io::Result<Output> {
+        let _ = env_remove;
+        self.run(program, args, cwd, env_set)
+    }
 }
 
 /// Deny-list of the scheduler's OWN secrets to strip from spawned child
@@ -131,6 +152,17 @@ impl ProcessRunner for SystemProcessRunner {
         cwd: Option<&str>,
         env: &[(String, String)],
     ) -> std::io::Result<Output> {
+        self.run_with_env(program, args, cwd, env, &[])
+    }
+
+    fn run_with_env(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: Option<&str>,
+        env_set: &[(String, String)],
+        env_remove: &[&str],
+    ) -> std::io::Result<Output> {
         let mut cmd = std::process::Command::new(program);
         cmd.args(args);
         for (key, _) in std::env::vars() {
@@ -143,10 +175,16 @@ impl ProcessRunner for SystemProcessRunner {
                 cmd.env_remove(key);
             }
         }
+        // M1: caller-requested credential removals (cursor-agent child isolation).
+        // Applied AFTER the standing scrubs and BEFORE the additions so a caller
+        // can also override a removed key to a scoped value if it must.
+        for key in env_remove {
+            cmd.env_remove(key);
+        }
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
-        for (k, v) in env {
+        for (k, v) in env_set {
             cmd.env(k, v);
         }
         cmd.output()
@@ -1679,6 +1717,38 @@ mod tests {
         // GITHUB_TOKEN is a credential, not a redirect var — it is NOT in this
         // list (the agent-credential scrub is a separate, later concern).
         assert!(!INHERITED_GIT_CONTEXT_VARS.contains(&"GITHUB_TOKEN"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_with_env_unsets_an_inherited_credential_var_for_the_child() {
+        // M1 mechanism: the real runner must actually REMOVE a named inherited
+        // env var from the spawned child (so the cursor-agent child never sees
+        // the push token). A unique sentinel name keeps this race-safe under the
+        // parallel test runner.
+        const SENTINEL: &str = "CHAOS_M1_SENTINEL_TOKEN";
+        std::env::set_var(SENTINEL, "super-secret-value");
+
+        let runner = SystemProcessRunner;
+        let args = vec!["-c".to_string(), format!("printenv {SENTINEL} || true")];
+
+        // Control: without a removal the child DOES inherit the value.
+        let inherited = runner.run("sh", &args, None, &[]).unwrap();
+        assert!(
+            String::from_utf8_lossy(&inherited.stdout).contains("super-secret-value"),
+            "sanity: the sentinel must be inherited when not scrubbed"
+        );
+
+        // With the removal the child sees NOTHING for that key.
+        let scrubbed = runner
+            .run_with_env("sh", &args, None, &[], &[SENTINEL])
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&scrubbed.stdout).contains("super-secret-value"),
+            "the credential var must be unset for the child"
+        );
+
+        std::env::remove_var(SENTINEL);
     }
 
     #[test]
