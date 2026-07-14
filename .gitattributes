@@ -1,0 +1,4 @@
+# A removed project-local MCP config may contain user-owned credentials.
+# Keep its contents out of text diffs before replacing it with app-managed
+# configuration outside Git.
+.cursor/mcp.json binary
