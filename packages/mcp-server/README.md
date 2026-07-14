@@ -3,8 +3,9 @@
 The **Chaos MCP server** — a [Model Context Protocol](https://modelcontextprotocol.io)
 server that exposes the Chaos Scheduler to MCP clients (Cursor, Cursor Cloud
 Agents, and others) as **tools**, **resources**, and **prompts**. It is built on
-[`@chaos-scheduler/sdk`](../sdk-ts) and mirrors exactly what the scheduler's REST
-API (`/api/v1`) exposes — no duplicated business logic.
+[`@chaos-scheduler/sdk`](../sdk-ts): tools use the scheduler's REST API
+(`/api/v1`), while versioned discovery resources derive safe `stored_config`
+views without duplicating runtime business logic.
 
 Direction: **Cursor → Scheduler** (the reverse direction, Scheduler → Cursor via
 Cloud Agents, lives in the Rust backend's `cursor_agent` operator).
@@ -101,16 +102,30 @@ Read: `list_environments`, `list_workflows`, `get_workflow`,
 `health_check`.
 
 Write: `create_environment`, `register_workflow`, `update_workflow`,
-`set_workflow_spec`, `delete_workflow`, `run_workflow_now`, `enqueue_workflow`,
-`dispatch_workflow`, `rerun_workflow`, `create_email_profile`,
+`set_workflow_spec`, `patch_workflow_spec`, `delete_workflow`,
+`run_workflow_now`, `enqueue_workflow`, `dispatch_workflow`, `rerun_workflow`,
+`create_email_profile`,
 `update_email_profile`, `delete_email_profile`, `set_workflow_email_profile`.
 
 Email-profile `smtp_password` values are masked (`••••••••`) on read; echo the
 mask back on update to keep the stored secret.
 
-Each write tool passes through the protected-environment guardrail; all tools
-count against the optional tool-call budget. Dispatch tools forward `idempotency_key`;
-replays return the original `run_id` or `queued_run_id`.
+Workflow/environment-scoped write tools pass through the
+protected-environment guardrail; workflow email-profile assignment is included.
+Global email-profile CRUD has no environment target and relies on API scope/auth.
+All tools count against the optional tool-call budget. Dispatch tools forward
+`idempotency_key`; replays return the original `run_id` or `queued_run_id`.
+
+`patch_workflow_spec` applies RFC 7396 JSON Merge Patch to the full stored spec
+internally. Omitted fields and `__redacted__` secret sentinels preserve their
+stored values; the tool validates the merged authoring shape, writes through the
+SDK, and returns only the redacted definition. Use `set_workflow_spec` only for
+an intentional full replacement. The patch flow is read-merge-write, so
+concurrent spec writers must be serialized until a backend compare-and-swap
+contract exists. A sentinel inside a replaced array requires a unique `id` or an
+unchanged webhook URL; ambiguous edits fail closed, and identity changes require
+the real secret. `dispatch_workflow` also accepts SDK-supported `event_id` and
+`timestamp` fields for deterministic signed replays.
 
 `run_workflow_now` is **deprecated** — manual runs are admission-controlled, so it
 is an alias of `enqueue_workflow` (same queued path, same result). It keeps working
@@ -118,9 +133,16 @@ unchanged, but prefer `enqueue_workflow`.
 
 ### Resources
 
-`chaos://version`, `chaos://environments`, `chaos://workflows`,
-`chaos://workflows/{id}`, `chaos://workflows/{id}/runs`, `chaos://runs/{id}`,
-`chaos://runs/{id}/logs`, `chaos://queues`, `chaos://queued-runs`,
+Discovery: `chaos://authoring`, `chaos://catalog`,
+`chaos://guides/{workflows|webhooks|integrations}`, and
+`chaos://schemas/{workflow-spec|triggers|queue|integrations}`.
+
+Workflow state: `chaos://workflows/index`, `chaos://workflows/{id}/definition`,
+`chaos://workflows`, `chaos://workflows/{id}`, and
+`chaos://workflows/{id}/runs`.
+
+Other state: `chaos://version`, `chaos://environments`, `chaos://runs/{id}`,
+`chaos://runs/{id}/logs`, `chaos://queues`, `chaos://queued-runs`, and
 `chaos://email-profiles`.
 Freshness is pull-based (Cursor does not document resource subscriptions).
 
@@ -129,11 +151,19 @@ They always redact known nested secret fields regardless of API-key scope,
 bound parsing of `spec_json` / `trigger_config` / `queue_config`, and replace
 malformed nested JSON with `__redacted_invalid_json__` rather than exposing the
 raw value. Use workflow write tools, not a resource payload, for mutations.
+Derived discovery/index/definition payloads are versioned `v1` and explicitly
+labeled `stored_config`. Their permissive Zod schemas preserve additive fields
+at the MCP validation boundary, but Rust/backend validation and persistence
+normalization remain authoritative; the current backend may drop unsupported
+fields. A parsed definition is not effective configuration or proof of runtime
+enforcement. Inbound webhook secret configuration/status is not available
+through MCP.
 
 ### Prompts
 
 `triage_failed_run(run_id)`, `summarize_workflow_health(environment)`,
-`register_workflow_for_repo(repo_path[, environment])`.
+`register_workflow_for_repo(repo_path[, environment])`, and
+`safely_update_workflow(workflow_id)`.
 
 ## Guardrails
 

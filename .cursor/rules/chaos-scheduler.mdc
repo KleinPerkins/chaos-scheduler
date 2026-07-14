@@ -20,11 +20,13 @@ hand-writing HTTP calls.
 
 - **Read:** `list_environments`, `list_workflows`, `get_workflow`,
   `list_workflow_runs`, `get_run`, `get_run_logs`, `get_run_tasks`,
-  `get_run_metrics`, `list_queues`, `list_queued_runs`, `get_version`,
-  `health_check`.
+  `get_run_metrics`, `list_queues`, `list_queued_runs`, `list_email_profiles`,
+  `get_version`, `health_check`.
 - **Write:** `create_environment`, `register_workflow`, `update_workflow`,
-  `set_workflow_spec`, `delete_workflow`, `run_workflow_now`, `enqueue_workflow`,
-  `dispatch_workflow`, `rerun_workflow`.
+  `set_workflow_spec`, `patch_workflow_spec`, `delete_workflow`,
+  `run_workflow_now`, `enqueue_workflow`, `dispatch_workflow`,
+  `rerun_workflow`, `create_email_profile`, `update_email_profile`,
+  `delete_email_profile`, `set_workflow_email_profile`.
 
 ## Conventions
 
@@ -35,34 +37,58 @@ hand-writing HTTP calls.
   `enqueue_workflow`.
 - **Always pass an `idempotency_key`** (a fresh UUID per logical action) to
   `enqueue_workflow` / `dispatch_workflow` / `rerun_workflow` (and the deprecated
-  `run_workflow_now`). A reused key returns `{ "status": "duplicate", "run_id",
-  "queued_run_id" }` — treat that as success, not a new run.
+  `run_workflow_now`). A reused key returns a duplicate response containing
+  `status`, `run_id`, and `queued_run_id`; treat that as success, not a new run.
 - **Inbound `dispatch_workflow` signing:** when the workflow has an inbound
   secret, pass `signature_secret` (canonical
   `METHOD\nPATH\nTIMESTAMP\nSHA256(body)` HMAC — the SDK sets
   `X-Chaos-Timestamp`, `X-Chaos-Event-Id`, `X-Chaos-Signature`). Optional
-  `event_id` pins the event header for replays.
+  `event_id` and `timestamp` pin replay fields. The configured inbound secret's
+  value/status is unavailable through MCP.
 - **Reading run detail.** `get_run` returns the run summary; use `get_run_logs`
   for stdout/stderr/exit, `get_run_tasks` for per-step tasks + retry attempts,
   and `get_run_metrics` for emitted metrics. Inspect queue pressure with
   `list_queues` (capacity/active/queued counts) and `list_queued_runs`.
 - **Registration is authoritative:** workflows created via `register_workflow`
   are marked `managed_externally=true` (source-of-truth is external). Only change
-  them through the API/MCP, not the UI.
+  them through the API/MCP, not the UI. Registration is non-idempotent: read
+  `chaos://workflows/index` first and update an existing workflow when possible.
+- **Discover before authoring:** start with `chaos://authoring`, then load only
+  the relevant `chaos://guides/*` and `chaos://schemas/*` resources. These are
+  permissive `v1 stored_config` mirrors; backend validation and persistence
+  normalization are authoritative.
+- **Patch specs safely:** read `chaos://workflows/{id}/definition`, then prefer
+  `patch_workflow_spec` for partial changes. Preserve `__redacted__` sentinels
+  and use `set_workflow_spec` only for an intentional full replacement. Array
+  sentinels need a unique id or unchanged webhook URL; identity changes need the
+  real secret. Serialize concurrent writers because the patch tool is
+  read-merge-write.
 - **Environments are partitions.** Put a workflow in `production` (the default) unless the user asks for a sandbox/UAT workflow or a new environment.
-- **Protected environments** (default `production`) reject MCP writes unless the server was started with `--allow-protected-writes`. The MCP default write target is `sandbox` — use that for integration tests and agent-driven registration.
+- **Protected environments** (default `production`) reject workflow/environment
+  writes unless the server was started with `--allow-protected-writes`. Global
+  email-profile CRUD is environment-agnostic and relies on API scope/auth. The
+  MCP default workflow target is `sandbox` — use that for integration tests and
+  agent-driven registration.
 
 ## Reading state via @-references
 
 Read-only state is available as resources for @-referencing:
-`chaos://environments`, `chaos://workflows`, `chaos://workflows/{id}`,
+`chaos://authoring`, `chaos://catalog`, `chaos://guides/*`,
+`chaos://schemas/*`, `chaos://workflows/index`,
+`chaos://workflows/{id}/definition`, `chaos://environments`,
+`chaos://workflows`, `chaos://workflows/{id}`,
 `chaos://workflows/{id}/runs`, `chaos://runs/{id}`, `chaos://runs/{id}/logs`,
 `chaos://queues`, `chaos://queued-runs`, `chaos://version`.
+
+Definition resources always redact known secrets and report parse status.
+Parsed stored configuration is not effective configuration or proof of runtime
+enforcement.
 
 ## Prompts
 
 Reusable templates: `triage_failed_run(run_id)`,
-`summarize_workflow_health(environment)`, `register_workflow_for_repo(repo_path)`.
+`summarize_workflow_health(environment)`, `register_workflow_for_repo(repo_path)`,
+`safely_update_workflow(workflow_id)`.
 
 ## Failure triage loop
 
