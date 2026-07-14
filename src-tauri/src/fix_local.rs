@@ -113,6 +113,67 @@ pub fn agent_credential_isolation(empty_gh_config_dir: &str) -> AgentCredentialI
 }
 
 // ---------------------------------------------------------------------------
+// Credential boundary on the scheduler's OWN credentialed git ops (fetch/push).
+// ---------------------------------------------------------------------------
+
+/// Repo-config overrides pinned onto the scheduler's OWN CREDENTIALED network
+/// git ops — the best-effort fix-branch `fetch` and the `push` (the one step
+/// that runs with the FULL inherited env: `GITHUB_TOKEN` + `SSH_AUTH_SOCK`).
+/// This is the scheduler-side counterpart to the agent-side M1
+/// [`AGENT_GIT_CONFIG_OVERRIDES`].
+///
+/// A worktree shares the main repo's `.git/config`, and git reads that
+/// repo-LOCAL config LAST (below only the command line). So a `--force` agent
+/// that persisted a malicious `credential.helper=!evil` or `core.sshCommand=evil`
+/// into the shared local config would have it execute WITH the scheduler's real
+/// push credential when the scheduler later fetches/pushes → exfil. M1 already
+/// defeats this for the AGENT child via highest-precedence `GIT_CONFIG_*`
+/// overrides, but the scheduler's own credentialed steps only pinned
+/// `core.hooksPath` (sec-F2) and did NOT reuse the credential overrides — this
+/// closes that asymmetry with highest-precedence `-c` flags:
+/// - `credential.helper=` — an EMPTY value RESETS the accumulated helper list,
+///   so no planted/stored HTTPS helper (osxkeychain, store, `!evil`, …) runs.
+///   Safe because the `chaos-scheduler` origin is an `ssh://` remote: SSH, not an
+///   HTTPS credential helper, authenticates the scheduler's fetch/push.
+/// - `credential.interactive=false` — never drop to an interactive prompt.
+/// - `core.sshCommand=ssh` — plain `ssh`, which OVERRIDES any planted repo-local
+///   `core.sshCommand` yet STILL uses `SSH_AUTH_SOCK` + `~/.ssh/config`, so the
+///   scheduler's legitimate ssh auth keeps working. This deliberately is NOT the
+///   agent child's KEY-LESS form (`-F /dev/null`, `IdentityFile=/dev/null`,
+///   `IdentityAgent=none`), which is designed to FAIL auth (sec-F3): the AGENT
+///   must not authenticate, but the SCHEDULER must.
+///
+/// OUT OF SCOPE — accepted residual F4: a `--force` agent can still write the
+/// user's `~/.ssh/config` or `~/.git-credentials` on DISK. That is a distinct
+/// disk-write vector, NOT the repo-local-`.git/config` vector this closes;
+/// neutralizing the disk vectors is deliberately not attempted here. This fix
+/// restores M1's boundary against the repo-local-config vector only, mirroring
+/// sec-F2's treatment of `core.hooksPath`.
+const CREDENTIALED_GIT_CONFIG_OVERRIDES: &[(&str, &str)] = &[
+    ("credential.helper", ""),
+    ("credential.interactive", "false"),
+    ("core.sshCommand", "ssh"),
+];
+
+/// Build the highest-precedence `-c` override PREFIX for the scheduler's OWN
+/// CREDENTIALED network git ops (fetch + push): the sec-F2 `core.hooksPath`
+/// (an empty scratch dir — a runtime path) FOLLOWED by
+/// [`CREDENTIALED_GIT_CONFIG_OVERRIDES`]. This is the SINGLE source of truth
+/// shared by BOTH the best-effort fetch and the push, returned as the flattened
+/// `["-c", "k=v", "-c", "k=v", …]` prefix the git plumbing prepends to its args.
+pub fn credentialed_git_config_args(empty_hooks_dir: &str) -> Vec<String> {
+    let mut args = vec![
+        "-c".to_string(),
+        format!("core.hooksPath={empty_hooks_dir}"),
+    ];
+    for (key, value) in CREDENTIALED_GIT_CONFIG_OVERRIDES {
+        args.push("-c".to_string());
+        args.push(format!("{key}={value}"));
+    }
+    args
+}
+
+// ---------------------------------------------------------------------------
 // M3 — source rerun scope / environment gate.
 // ---------------------------------------------------------------------------
 
@@ -589,6 +650,49 @@ mod tests {
         assert!(
             argv.contains(&"--no-verify".to_string()),
             "the scheduler's own push skips the pre-push hook"
+        );
+    }
+
+    #[test]
+    fn credentialed_git_ops_pin_the_credential_boundary_but_stay_functional() {
+        // The credential-boundary counterpart to sec-F2: the scheduler's OWN
+        // credentialed fetch/push must pin, IN ADDITION to the sec-F2
+        // core.hooksPath, the M1 repo-local-config credential neutralizers — so a
+        // `--force` agent's planted `credential.helper` / `core.sshCommand` in the
+        // worktree's shared `.git/config` cannot hijack the scheduler's real push
+        // credential (GITHUB_TOKEN + SSH_AUTH_SOCK) when it fetches/pushes.
+        let args = credentialed_git_config_args("/tmp/chaos-fix-nohooks");
+        // sec-F2 hooks override is still pinned.
+        assert!(
+            args.contains(&"core.hooksPath=/tmp/chaos-fix-nohooks".to_string()),
+            "the sec-F2 empty-hooks override is still present"
+        );
+        // An empty credential.helper RESETS any planted/stored HTTPS helper (safe:
+        // the ssh:// origin needs no HTTPS helper to authenticate).
+        assert!(
+            args.contains(&"credential.helper=".to_string()),
+            "credential.helper is reset to empty (defeats a planted HTTPS helper)"
+        );
+        assert!(
+            args.contains(&"credential.interactive=false".to_string()),
+            "the credentialed op never drops to an interactive prompt"
+        );
+        // core.sshCommand is pinned to a plain, NON-key-less ssh: it overrides a
+        // planted repo-local core.sshCommand yet STILL authenticates via
+        // SSH_AUTH_SOCK + ~/.ssh/config (the scheduler MUST authenticate).
+        assert!(
+            args.contains(&"core.sshCommand=ssh".to_string()),
+            "core.sshCommand is pinned to a plain, still-functional ssh"
+        );
+        // CRITICAL: it must NOT be the AGENT child's KEY-LESS form (sec-F3), which
+        // is designed to FAIL auth — the scheduler's own push has to succeed.
+        assert!(
+            !args.iter().any(|a| a.contains("IdentityFile=/dev/null")),
+            "the scheduler's ssh must not be the key-less (auth-failing) agent form"
+        );
+        assert!(
+            !args.iter().any(|a| a.contains("-F /dev/null")),
+            "the scheduler must still read ~/.ssh/config for its real key"
         );
     }
 

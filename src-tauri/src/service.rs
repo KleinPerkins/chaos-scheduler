@@ -559,6 +559,48 @@ fn worktree_git_checked_no_hooks(
     worktree_git_checked(runner, root, &full)
 }
 
+/// Run a CREDENTIALED network git op in the worktree with the credential-boundary
+/// overrides pinned (sec-F2 + M1). BEYOND the empty `core.hooksPath`, this pins
+/// the highest-precedence `credential.helper=`/`credential.interactive=false`/
+/// `core.sshCommand=ssh` overrides so a `--force` agent's repo-LOCAL `.git/config`
+/// plant (a malicious `credential.helper`/`core.sshCommand` — a worktree shares
+/// the main repo's config) cannot hijack the scheduler's real push credential
+/// during THIS op, WHILE the scheduler's own ssh auth still works (plain `ssh`,
+/// NOT the agent child's key-less form). This is used ONLY on the scheduler's OWN
+/// credentialed network ops — the fetch + push — never the purely-local commit
+/// (which stays on the hooks-only path). See
+/// [`crate::fix_local::credentialed_git_config_args`].
+#[allow(dead_code)]
+fn worktree_git_credentialed(
+    runner: &dyn ProcessRunner,
+    root: &str,
+    empty_hooks_dir: &str,
+    args: &[&str],
+) -> Result<Output, FixAgentError> {
+    let prefix = crate::fix_local::credentialed_git_config_args(empty_hooks_dir);
+    let mut full: Vec<&str> = prefix.iter().map(String::as_str).collect();
+    full.extend_from_slice(args);
+    worktree_git(runner, root, &full)
+}
+
+/// Like [`worktree_git_credentialed`] but CHECKED — a non-zero exit becomes an
+/// app-authored error (no raw git stderr). Used for the scheduler's OWN
+/// credentialed push (the one step that runs with the full inherited env), so a
+/// planted repo-local credential helper / ssh command cannot fire with the push
+/// token; sec-F2 previously pinned only `core.hooksPath` here.
+#[allow(dead_code)]
+fn worktree_git_checked_credentialed(
+    runner: &dyn ProcessRunner,
+    root: &str,
+    empty_hooks_dir: &str,
+    args: &[&str],
+) -> Result<(), FixAgentError> {
+    let prefix = crate::fix_local::credentialed_git_config_args(empty_hooks_dir);
+    let mut full: Vec<&str> = prefix.iter().map(String::as_str).collect();
+    full.extend_from_slice(args);
+    worktree_git_checked(runner, root, &full)
+}
+
 /// Poll the source rerun to a terminal state with a bounded budget (M6). The
 /// rerun runs INLINE (status `admitted`, `dispatch.run_id` set) when there is
 /// capacity, or QUEUES (`dispatch.queued_run_id` set; a worker drains it later).
@@ -874,14 +916,25 @@ pub(crate) fn run_local_fix_flow(
     // reject the push (non-fast-forward), and a bare `--force-with-lease` with NO
     // remote-tracking ref fails "stale info". Ignoring the result is safe: if the
     // branch is absent on the remote, `push --set-upstream` simply creates it.
-    let _ = worktree_git(
+    //
+    // Both the fetch AND the push below are CREDENTIALED network ops, so they run
+    // through the credentialed helper — pinning, on top of sec-F2's empty
+    // `core.hooksPath`, the M1 repo-local-config credential neutralizers
+    // (`credential.helper=`, `credential.interactive=false`, functional
+    // `core.sshCommand=ssh`). A worktree shares the main repo's `.git/config`, so
+    // this stops a `--force` agent's planted `credential.helper`/`core.sshCommand`
+    // from firing WITH the scheduler's real push credential, while the scheduler's
+    // own ssh auth still works. (F4 — the on-DISK ~/.ssh/config & ~/.git-credentials
+    // vectors — is a distinct, accepted residual and NOT closed here.)
+    let _ = worktree_git_credentialed(
         flow.runner,
         root,
+        &empty_hooks,
         &["fetch", FIX_LOCAL_PR_REMOTE, "--", &branch],
     );
     let push_argv = crate::fix_local::git_push_argv(FIX_LOCAL_PR_REMOTE, &branch);
     let push_refs: Vec<&str> = push_argv.iter().map(String::as_str).collect();
-    worktree_git_checked_no_hooks(flow.runner, root, &empty_hooks, &push_refs)?;
+    worktree_git_checked_credentialed(flow.runner, root, &empty_hooks, &push_refs)?;
 
     let title =
         crate::fix_local::build_fix_pr_title(&flow.source_workflow.name, flow.source_run_id);
