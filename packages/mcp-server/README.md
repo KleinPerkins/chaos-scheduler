@@ -44,12 +44,19 @@ CLI flags: `--stdio`, `--http`, `--host <h>`, `--port <p>`,
 
 ## Run it
 
+Self-managed operators must install an explicit release and inject credentials
+from an external secret channel:
+
+```bash
+npm install --global @chaos-scheduler/mcp-server@<version>
+```
+
 Local (stdio):
 
 ```bash
+# CHAOS_SCHEDULER_API_KEY must already be present in the process environment.
 CHAOS_SCHEDULER_URL=http://127.0.0.1:9618 \
-CHAOS_SCHEDULER_API_KEY=<id.secret> \
-npx -y @chaos-scheduler/mcp-server
+chaos-mcp-server
 ```
 
 Remote/team (Streamable HTTP):
@@ -57,7 +64,7 @@ Remote/team (Streamable HTTP):
 ```bash
 CHAOS_SCHEDULER_URL=http://127.0.0.1:9618 \
 CHAOS_SCHEDULER_MCP_ALLOW_REMOTE_HTTP=1 \
-npx -y @chaos-scheduler/mcp-server --http --allow-remote-http --host 0.0.0.0 --port 9700
+chaos-mcp-server --http --allow-remote-http --host 0.0.0.0 --port 9700
 # → POST http://<host>:9700/mcp   (GET /health for a liveness probe)
 ```
 
@@ -67,25 +74,19 @@ In HTTP mode the per-request API key is required in the incoming
 
 ## Add to Cursor
 
-The repo ships a working local config at [`.cursor/mcp.json`](../../.cursor/mcp.json)
-(stdio, pointing at the built server) and a remote HTTP template at
-[`.cursor/mcp.remote.example.json`](../../.cursor/mcp.remote.example.json).
-Minimal stdio entry:
+For local Cursor use, prefer the desktop app's **Integrations** screen. It
+installs the exact MCP package version pinned to that desktop build in an
+app-owned directory, creates an app-owned scoped key, and non-destructively
+updates the user-level `~/.cursor/mcp.json`. Node.js is the only external
+runtime dependency.
 
-```json
-{
-  "mcpServers": {
-    "chaos-scheduler": {
-      "command": "npx",
-      "args": ["-y", "@chaos-scheduler/mcp-server"],
-      "env": {
-        "CHAOS_SCHEDULER_URL": "http://127.0.0.1:9618",
-        "CHAOS_SCHEDULER_API_KEY": "<id.secret>"
-      }
-    }
-  }
-}
-```
+The repository deliberately does not track a project-local `.cursor/mcp.json`;
+that path is ignored so a workspace override cannot put an API key into Git or
+shadow the app-managed registration. For self-managed remote/team setups, start
+from the secret-free
+[`.cursor/mcp.remote.example.json`](../../.cursor/mcp.remote.example.json), place
+the resulting entry only in your user-level Cursor configuration, pin the
+installed package version, and inject credentials from outside Git.
 
 A Project Rule ([`.cursor/rules/chaos-scheduler.mdc`](../../.cursor/rules/chaos-scheduler.mdc))
 teaches the agent when and how to call these tools, and local hooks
@@ -181,7 +182,8 @@ retry.
   not allowed, write tools resolve the workflow environment via `get_workflow`
   and **refuse** if lookup fails (no silent allow). `update_workflow` also checks
   `patch.environment` against the protected list. Mirror the backend list with
-  `CHAOS_SCHEDULER_PROTECTED_ENVIRONMENTS` (example in `.cursor/mcp.json`).
+  `CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS` in the user-level managed or
+  self-managed configuration.
 - **Tool budget** — `CHAOS_SCHEDULER_MCP_MAX_TOOL_CALLS` caps tool calls per MCP
   process. Stdio = one budget per Cursor session; Streamable HTTP shares one
   in-process budget across requests on that server instance.

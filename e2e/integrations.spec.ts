@@ -3,7 +3,7 @@ import { expectNoAxeViolations } from "./support/axe";
 import { gotoDashboard, openSidebar } from "./support/nav";
 
 test.describe("Integrations", () => {
-  test("create key surfaces token and MCP install snippet", async ({
+  test("create key surfaces token without a credential-bearing MCP config", async ({
     page,
   }) => {
     await gotoDashboard(page);
@@ -13,10 +13,15 @@ test.describe("Integrations", () => {
     await page.getByRole("button", { name: "Create key" }).click();
 
     await expect(page.locator("code.intg-token")).toHaveText("cs_test_token");
-    await expect(page.getByText(/@chaos-scheduler\/mcp-server/)).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Enable managed integration" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Open MCP setup guide" }),
+    ).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Add to Cursor" }),
-    ).toBeVisible();
+    ).not.toBeVisible();
     await expectNoAxeViolations(page, "integrations create key");
   });
 });

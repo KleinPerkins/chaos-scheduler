@@ -182,8 +182,17 @@ status, so a slow run is distinguishable from a failed one.
 
 ## 7. Drive it from Cursor (MCP)
 
-Run the MCP server and add it to Cursor (see the
-[mcp-server README](./mcp-server/README.md) and the repo's `.cursor/mcp.json`).
+For local Cursor use, open the desktop app's **Integrations** screen and enable
+the managed integration. The app installs the build-pinned MCP package in its
+own directory, creates an app-owned scoped key, and non-destructively updates
+the user-level `~/.cursor/mcp.json`. The repository intentionally ignores
+project-local `.cursor/mcp.json` files so credentials stay outside Git.
+
+For self-managed or remote/team setups, see the
+[mcp-server README](./mcp-server/README.md) and the secret-free
+[remote example](../.cursor/mcp.remote.example.json). Inject credentials through
+an external secret channel and never commit them.
+
 Start at `chaos://authoring`. The `chaos://catalog`,
 `chaos://guides/{workflows|webhooks|integrations}`, and
 `chaos://schemas/{workflow-spec|triggers|queue|integrations}` resources provide

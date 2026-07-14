@@ -34,3 +34,7 @@ e2e/visual/__screenshots__/*-darwin.png
 e2e/visual/__screenshots__/*-win32.png
 scheduler.db
 *.db
+
+# The desktop app owns the local Cursor integration and writes its API key to
+# the user-level ~/.cursor/mcp.json. Never track a project-local override.
+/.cursor/mcp.json

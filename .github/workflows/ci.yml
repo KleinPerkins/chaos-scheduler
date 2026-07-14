@@ -80,6 +80,22 @@ jobs:
           path: dist
           retention-days: 1
 
+  # Recurrence guard for project-local MCP credentials. The desktop app owns
+  # local provisioning and writes the managed key outside Git; tracked
+  # .cursor/mcp*.json files must therefore remain key-free.
+  mcp-config-security:
+    name: MCP config security (tracked files)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+      - name: Regression tests
+        run: npm run test:mcp-config-security
+      - name: Scan tracked MCP configs
+        run: npm run check:mcp-config-security
+
   e2e:
     name: E2E (Playwright + mockIPC + axe)
     needs: changes
@@ -313,6 +329,7 @@ jobs:
       [
         changes,
         frontend,
+        mcp-config-security,
         e2e,
         rust,
         packages,
@@ -327,6 +344,10 @@ jobs:
     steps:
       - name: Verify all required jobs passed
         run: |
+          if [[ "${{ needs['mcp-config-security'].result }}" != "success" ]]; then
+            echo "::error::The tracked MCP config security guard did not succeed."
+            exit 1
+          fi
           if ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}; then
             echo "::error::One or more required CI jobs failed or were cancelled."
             exit 1

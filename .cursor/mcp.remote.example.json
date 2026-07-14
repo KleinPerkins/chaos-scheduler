@@ -1,16 +1,18 @@
 {
   "_comment": [
     "Example REMOTE / TEAM configuration for the Chaos MCP server over Streamable HTTP.",
-    "Cursor only auto-loads `.cursor/mcp.json`, so copy the entry below into that file",
-    "(replacing the local stdio entry) to use a shared, hosted Chaos MCP server.",
+    "For local Cursor use, prefer the desktop app's Integrations screen: it installs",
+    "the pinned server and manages the user-level ~/.cursor/mcp.json outside Git.",
+    "For a shared hosted server, copy this entry only into your user-level Cursor",
+    "configuration. Never commit a project-local .cursor/mcp.json containing a key.",
     "",
-    "Run the server in HTTP mode on the host:",
+    "Inject CHAOS_SCHEDULER_API_KEY into the host process from a secret manager,",
+    "then run the pinned server in HTTP mode:",
     "  CHAOS_SCHEDULER_URL=http://127.0.0.1:9618 \\",
-    "  CHAOS_SCHEDULER_API_KEY=<service-key> \\",
-    "  npx -y @chaos-scheduler/mcp-server --http --host 0.0.0.0 --port 9700",
+    "  <pinned-chaos-mcp-cli> --http --allow-remote-http --host 0.0.0.0 --port 9700",
     "",
-    "Each Cursor client then passes its OWN scoped scheduler key via the Authorization",
-    "header; the server forwards it to the REST API (falling back to its configured key)."
+    "Each Cursor client must pass its OWN scoped scheduler key via the Authorization",
+    "header; HTTP mode does not fall back to the host's configured stdio key."
   ],
   "mcpServers": {
     "chaos-scheduler": {

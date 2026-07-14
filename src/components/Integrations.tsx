@@ -34,38 +34,6 @@ const ALL_SCOPES: ApiKeyScope[] = ["read", "write", "admin"];
 // fetched its initial status.
 const MCP_STATUS_EVENT = "mcp-status-changed";
 
-function mcpConfigSnippet(token: string): string {
-  return JSON.stringify(
-    {
-      mcpServers: {
-        "chaos-scheduler": {
-          command: "npx",
-          args: ["-y", "@chaos-scheduler/mcp-server"],
-          env: {
-            CHAOS_SCHEDULER_API_KEY: token || "<your-api-key>",
-            CHAOS_SCHEDULER_URL: "http://127.0.0.1:9618",
-          },
-        },
-      },
-    },
-    null,
-    2,
-  );
-}
-
-function addToCursorLink(token: string): string {
-  const config = {
-    command: "npx",
-    args: ["-y", "@chaos-scheduler/mcp-server"],
-    env: {
-      CHAOS_SCHEDULER_API_KEY: token || "<your-api-key>",
-      CHAOS_SCHEDULER_URL: "http://127.0.0.1:9618",
-    },
-  };
-  const encoded = btoa(JSON.stringify(config));
-  return `cursor://anysphere.cursor-deeplink/mcp/install?name=chaos-scheduler&config=${encoded}`;
-}
-
 const MCP_STATUS_LABEL: Record<McpInstallStatus, string> = {
   not_installed: "Not installed",
   installed: "Installed",
@@ -328,7 +296,6 @@ export default function Integrations() {
     }
   };
 
-  const tokenForSnippet = newKey?.token ?? "";
   const writeScopeSelected =
     scopes.includes("write") || scopes.includes("admin");
 
@@ -616,41 +583,25 @@ export default function Integrations() {
       </section>
 
       <section className="intg-section">
-        <h2 className="intg-section-title">Advanced: manual MCP setup</h2>
+        <h2 className="intg-section-title">Advanced: remote MCP setup</h2>
         <p className="intg-copy">
-          Prefer to manage the connection yourself, or connecting from another
-          machine? Create an API key above, then add the MCP server to Cursor
-          manually.
+          Remote/team and non-Cursor clients can use the self-managed setup
+          guide. Keep credentials in a user-level configuration or secret
+          manager—never in a project-local file or Git.
         </p>
         <div className="intg-mcp-actions">
           <Button
             type="button"
             variant="primary"
             onClick={() =>
-              openExternalSafe(addToCursorLink(tokenForSnippet)).catch(() =>
-                notify("Could not open Cursor.", "error"),
-              )
+              openExternalSafe(
+                `https://github.com/${REPO_SLUG}/tree/main/packages/mcp-server#add-to-cursor`,
+              ).catch(() => notify("Could not open the setup guide.", "error"))
             }
           >
-            Add to Cursor
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={() => copy("mcp", mcpConfigSnippet(tokenForSnippet))}
-          >
-            {copied === "mcp" ? "Copied" : "Copy .cursor/mcp.json"}
+            Open MCP setup guide
           </Button>
         </div>
-        <pre className="intg-snippet" aria-label="Cursor MCP configuration">
-          {mcpConfigSnippet(tokenForSnippet)}
-        </pre>
-        {!newKey && (
-          <p className="intg-hint">
-            Create a key above to embed it in the snippet; otherwise replace
-            <code>&lt;your-api-key&gt;</code> manually.
-          </p>
-        )}
       </section>
 
       <section className="intg-section">
