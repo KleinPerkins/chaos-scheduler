@@ -1169,7 +1169,7 @@ pub enum IdempotencyReservation {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 16;
+pub const CURRENT_SCHEMA_VERSION: i64 = 17;
 
 pub struct Database {
     path: String,
@@ -1591,6 +1591,13 @@ impl Database {
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_fix_agent_dispatches_source_run ON fix_agent_dispatches(source_run_id);
             CREATE INDEX IF NOT EXISTS idx_fix_agent_dispatches_dispatched_at ON fix_agent_dispatches(dispatched_at);
+            CREATE TABLE IF NOT EXISTS fix_agent_spend (
+                id TEXT PRIMARY KEY,
+                source_run_id TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                spent_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_fix_agent_spend_spent_at ON fix_agent_spend(spent_at);
             CREATE INDEX IF NOT EXISTS idx_runs_workflow_started ON runs(workflow_id, started_at DESC);
             CREATE INDEX IF NOT EXISTS idx_queued_runs_queue_status ON queued_runs(queue_name, status, priority DESC, queued_at ASC);
             CREATE INDEX IF NOT EXISTS idx_queued_runs_workflow_status ON queued_runs(workflow_id, status);
@@ -1669,7 +1676,33 @@ impl Database {
             (14, Self::migrate_v14_fix_agent_dispatches),
             (15, Self::migrate_v15_fix_agent_local_mode),
             (16, Self::migrate_v16_queued_run_suppress_completion),
+            (17, Self::migrate_v17_fix_agent_spend),
         ]
+    }
+
+    /// v17: add the append-only `fix_agent_spend` ledger (corr-F3). The rate cap
+    /// (`max_dispatches_per_hour`) previously counted rows in
+    /// `fix_agent_dispatches`, but a FAILED local fix DELETES its single-flight
+    /// claim there (so a corrected re-dispatch is not blocked) — which meant
+    /// failed attempts did NOT count toward the cap, so an agent that kept
+    /// failing could be retried without bound. Spend is now recorded in a
+    /// SEPARATE append-only table that is never deleted, so every attempt
+    /// (settled or failed) counts. No FK/CASCADE: spend is decoupled from run
+    /// retention too, so pruning a source run cannot reopen the under-count.
+    ///
+    /// Additive and idempotent (`IF NOT EXISTS`); fresh DBs get the table from
+    /// the base schema in `init`.
+    fn migrate_v17_fix_agent_spend(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS fix_agent_spend (
+                id TEXT PRIMARY KEY,
+                source_run_id TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                spent_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_fix_agent_spend_spent_at ON fix_agent_spend(spent_at);",
+        )?;
+        Ok(())
     }
 
     /// v16: persist `suppress_completion_triggers` on `queued_runs` so a
@@ -6352,14 +6385,31 @@ impl Database {
         }
     }
 
-    /// Count fix-agent dispatches with `dispatched_at >= since` (an RFC3339
-    /// instant). Backs the global `max_dispatches_per_hour` ceiling, which
-    /// spans DISTINCT failed runs (per-source-run idempotency alone does not
-    /// bound spend — each failed run has a distinct id).
-    pub fn count_fix_agent_dispatches_since(&self, since: &str) -> rusqlite::Result<u32> {
+    /// Record one APPEND-ONLY fix-agent spend entry (corr-F3). Unlike the
+    /// single-flight CLAIM in `fix_agent_dispatches` (which is DELETED on a
+    /// failed attempt so a corrected re-dispatch is not permanently blocked), a
+    /// spend row is NEVER deleted by the app — so failed attempts still count
+    /// toward `max_dispatches_per_hour` and the rate cap cannot be bypassed by
+    /// simply letting the fix fail and retrying.
+    pub fn record_fix_agent_spend(&self, source_run_id: &str, mode: &str) -> rusqlite::Result<()> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO fix_agent_spend (id, source_run_id, mode, spent_at) VALUES (?1, ?2, ?3, ?4)",
+            params![id, source_run_id, mode, now],
+        )?;
+        Ok(())
+    }
+
+    /// Count append-only fix-agent spend entries with `spent_at >= since` (an
+    /// RFC3339 instant). Backs the global `max_dispatches_per_hour` ceiling —
+    /// counts EVERY attempt (settled OR failed), independent of the mutable
+    /// single-flight claim (corr-F3).
+    pub fn count_fix_agent_spend_since(&self, since: &str) -> rusqlite::Result<u32> {
         let conn = self.conn()?;
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM fix_agent_dispatches WHERE dispatched_at >= ?1",
+            "SELECT COUNT(*) FROM fix_agent_spend WHERE spent_at >= ?1",
             params![since],
             |row| row.get(0),
         )?;
@@ -6403,6 +6453,46 @@ impl Database {
             detail: None,
             updated_at: Some(now),
         })
+    }
+
+    /// Advance a LOCAL fix dispatch's lifecycle (D05). Each `Some` field is
+    /// written; `None` leaves the existing value intact (`COALESCE`) so a caller
+    /// can update just the status without clobbering an already-recorded branch /
+    /// PR url / worktree path. Always bumps `updated_at`.
+    pub fn update_fix_agent_dispatch(
+        &self,
+        id: &str,
+        status: &str,
+        branch: Option<&str>,
+        pr_url: Option<&str>,
+        worktree_path: Option<&str>,
+        detail: Option<&str>,
+    ) -> rusqlite::Result<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE fix_agent_dispatches
+             SET status = ?2,
+                 branch = COALESCE(?3, branch),
+                 pr_url = COALESCE(?4, pr_url),
+                 worktree_path = COALESCE(?5, worktree_path),
+                 detail = COALESCE(?6, detail),
+                 updated_at = ?7
+             WHERE id = ?1",
+            params![id, status, branch, pr_url, worktree_path, detail, now],
+        )
+    }
+
+    /// Roll back a LOCAL fix single-flight claim (D05). The claim row is inserted
+    /// in the preflight BEFORE the agent runs (it is the durable single-flight
+    /// guard); if any later step fails, the orchestrator deletes it so a
+    /// corrected re-dispatch of the same source run is not permanently blocked.
+    pub fn delete_fix_agent_dispatch(&self, id: &str) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM fix_agent_dispatches WHERE id = ?1",
+            params![id],
+        )
     }
 
     pub fn validate_queue_cap_lattice(&self) -> rusqlite::Result<Vec<String>> {
@@ -6818,6 +6908,65 @@ impl Database {
         conn.execute(
             "UPDATE queued_runs SET status = 'cancelled', finished_at = ?2 WHERE id = ?1 AND status = 'queued'",
             params![id, now],
+        )
+    }
+
+    /// Read one queued run's `(run_id, status)` by id. The LOCAL fix orchestrator
+    /// uses this to resolve its OWN rerun by the exact queued entry (whose
+    /// `run_id` is populated at admission) rather than a broad dispatch-context
+    /// match that could inherit a prior attempt's rerun row. Returns `None` if
+    /// the queued row is absent.
+    pub fn get_queued_run_progress(
+        &self,
+        id: &str,
+    ) -> rusqlite::Result<Option<(Option<String>, String)>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT run_id, status FROM queued_runs WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+    }
+
+    /// M6 (D05 LOCAL fix crash recovery): cancel every still-queued source RERUN
+    /// (`trigger_kind` = the reserved fix-rerun kind). Its dedicated worktree is
+    /// reclaimed by the startup sweep, so draining it later would fail closed
+    /// anyway; cancelling here keeps the queue clean and unblocks a re-dispatch.
+    /// Returns the number of rows cancelled. Takes the reserved kind as an
+    /// argument so the caller binds one constant (never a re-typed literal).
+    pub fn cancel_orphaned_fix_rerun_queued_runs(
+        &self,
+        fix_rerun_trigger_kind: &str,
+    ) -> rusqlite::Result<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE queued_runs SET status = 'cancelled', finished_at = ?2 \
+             WHERE status = 'queued' AND trigger_kind = ?1",
+            params![fix_rerun_trigger_kind, now],
+        )
+    }
+
+    /// M6 (D05 LOCAL fix crash recovery): delete every LOCAL fix dispatch claim
+    /// that did not end in an OPENED PR (`pr_opened`) — the only outcome that
+    /// keeps its claim (the idempotency replay points a re-request at the PR).
+    ///
+    /// The claim is inserted in the preflight BEFORE the agent runs and the
+    /// orchestrator thread rolls it back on EVERY non-`pr_opened` end (agent
+    /// error, no edit, AND a `rerun_failed` that did not hold) — but a crash/kill
+    /// mid-fix kills that thread, stranding a claim. Left in place it makes its
+    /// source run permanently un-re-dispatchable (the idempotency gate treats any
+    /// existing row as a live/settled dispatch). This runs at startup, when no
+    /// local fix can be in flight yet, so clearing every non-`pr_opened` LOCAL
+    /// claim is always safe. CLOUD claims (`mode = 'cloud'`) are never touched —
+    /// they are a fire-and-forget audit record with no terminal lifecycle here.
+    pub fn clear_orphaned_local_fix_dispatches(&self) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM fix_agent_dispatches \
+             WHERE mode = 'local' AND status != 'pr_opened'",
+            [],
         )
     }
 
@@ -7526,7 +7675,7 @@ mod tests {
         // Tripwire: refresh this fixture (seed schema + asserted columns) the
         // next time a migration lands so the newest N-1 -> N paths stay covered.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 16,
+            CURRENT_SCHEMA_VERSION, 17,
             "add a v(N-1)->v(N) fixture when a new migration ships"
         );
 
@@ -9220,6 +9369,163 @@ SUMMARY_JSON:{\"title\":\"current\"}
         assert_eq!(db.cancel_queued_run(&queued_id_2).unwrap(), 1);
         let rows = db.list_queued_runs(10).unwrap();
         assert!(rows.iter().any(|row| row.status == "cancelled"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cancel_orphaned_fix_rerun_queued_runs_targets_only_the_reserved_kind() {
+        // M6: on startup (after a crash reclaimed the fix worktrees), stale
+        // QUEUED source reruns must be cancelled, while every other queued run
+        // (a normal enqueue, a plain rerun, …) is left untouched.
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let workflow = db
+            .create_workflow(
+                "Fix Source",
+                None,
+                "true",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                None,
+                Some(r#"{"queue":"production-default","priority":5}"#),
+            )
+            .unwrap();
+
+        // A stale fix source rerun (reserved kind) + an ordinary queued run.
+        let fix_rerun_id = db
+            .upsert_queued_run_with_context(
+                &workflow.id,
+                "production-default",
+                5,
+                Some(crate::service::FIX_RERUN_TRIGGER_KIND),
+                None,
+                None,
+                None,
+                Some("src-run-1"),
+                true,
+            )
+            .unwrap();
+        let ordinary_id = db
+            .upsert_queued_run_with_context(
+                &workflow.id,
+                "production-default",
+                4,
+                Some("ui_enqueue"),
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+
+        let cancelled = db
+            .cancel_orphaned_fix_rerun_queued_runs(crate::service::FIX_RERUN_TRIGGER_KIND)
+            .unwrap();
+        assert_eq!(
+            cancelled, 1,
+            "only the reserved fix-rerun kind is cancelled"
+        );
+
+        let rows = db.list_queued_runs(10).unwrap();
+        let fix_row = rows.iter().find(|r| r.id == fix_rerun_id).unwrap();
+        let ordinary_row = rows.iter().find(|r| r.id == ordinary_id).unwrap();
+        assert_eq!(fix_row.status, "cancelled", "stale fix rerun is cancelled");
+        assert_eq!(
+            ordinary_row.status, "queued",
+            "an ordinary queued run must NOT be cancelled"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clear_orphaned_local_fix_dispatches_removes_only_nonterminal_local_claims() {
+        // Bugbot fold (finding 2): a crash mid-fix strands a non-terminal LOCAL
+        // claim; startup recovery deletes it so the source run is re-dispatchable,
+        // while terminal LOCAL claims (audit) and CLOUD claims are left intact.
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let wf = db
+            .create_workflow(
+                "Fixer",
+                None,
+                "unused",
+                "0 0 * * *",
+                false,
+                false,
+                "UTC",
+                "sandbox",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let mk_run = || {
+            db.create_run_with_context(&wf.id, Some("cron"), None, None, None, None)
+                .unwrap()
+                .id
+        };
+        let orphan = mk_run();
+        let failed = mk_run();
+        let opened = mk_run();
+        let cloud = mk_run();
+
+        // A non-terminal LOCAL claim (crash orphan), a `rerun_failed` LOCAL claim
+        // (the fix did not hold — must NOT block a re-dispatch), a `pr_opened`
+        // LOCAL claim (the ONLY outcome that keeps its claim), and a CLOUD claim.
+        db.insert_fix_agent_dispatch(&orphan, &wf.id, None, "ui", "local")
+            .unwrap();
+        let failed_claim = db
+            .insert_fix_agent_dispatch(&failed, &wf.id, None, "ui", "local")
+            .unwrap();
+        db.update_fix_agent_dispatch(&failed_claim.id, "rerun_failed", None, None, None, None)
+            .unwrap();
+        let opened_claim = db
+            .insert_fix_agent_dispatch(&opened, &wf.id, None, "ui", "local")
+            .unwrap();
+        db.update_fix_agent_dispatch(&opened_claim.id, "pr_opened", None, None, None, None)
+            .unwrap();
+        db.insert_fix_agent_dispatch(&cloud, &wf.id, None, "ui", "cloud")
+            .unwrap();
+
+        let cleared = db.clear_orphaned_local_fix_dispatches().unwrap();
+        assert_eq!(
+            cleared, 2,
+            "the crash orphan AND the rerun_failed local claim are cleared"
+        );
+
+        assert!(
+            db.get_fix_agent_dispatch_for_source_run(&orphan)
+                .unwrap()
+                .is_none(),
+            "orphaned local claim removed → source run re-dispatchable"
+        );
+        assert!(
+            db.get_fix_agent_dispatch_for_source_run(&failed)
+                .unwrap()
+                .is_none(),
+            "rerun_failed local claim removed → the fix can be re-attempted"
+        );
+        assert!(
+            db.get_fix_agent_dispatch_for_source_run(&opened)
+                .unwrap()
+                .is_some(),
+            "pr_opened local claim (idempotency replay → the PR) preserved"
+        );
+        assert!(
+            db.get_fix_agent_dispatch_for_source_run(&cloud)
+                .unwrap()
+                .is_some(),
+            "cloud claim is never touched"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -11041,6 +11347,53 @@ SUMMARY_JSON:{\"title\":\"current\"}
             )
             .unwrap();
         assert_eq!(suppressed, 1, "fix-rerun queued rows persist suppression");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migrate_v17_adds_fix_agent_spend_table() {
+        // v17 adds the append-only `fix_agent_spend` ledger (corr-F3): the rate
+        // cap counts spend (never deleted) rather than the single-flight claim
+        // (deleted on a failed attempt), so failed attempts still count.
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        let db = Database {
+            path: db_path.to_string_lossy().to_string(),
+        };
+
+        // A v16 DB has no spend table yet; stamp user_version=16 so ONLY v17 runs.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch("PRAGMA user_version = 16;").unwrap();
+            let has_table: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fix_agent_spend'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(has_table, 0, "pre-v17 DB has no fix_agent_spend table");
+        }
+
+        let conn = db.conn().unwrap();
+        db.run_migrations(&conn, 16).unwrap();
+
+        let has_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fix_agent_spend'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_table, 1, "v17 must add the fix_agent_spend table");
+
+        // Spend rows persist independently of the claim table (append-only).
+        db.record_fix_agent_spend("run-x", "local").unwrap();
+        db.record_fix_agent_spend("run-y", "cloud").unwrap();
+        let since = "2000-01-01T00:00:00Z";
+        assert_eq!(db.count_fix_agent_spend_since(since).unwrap(), 2);
 
         let _ = std::fs::remove_dir_all(dir);
     }
