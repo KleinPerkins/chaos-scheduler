@@ -65,6 +65,10 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      - name: MCP diff presentation contract
+        run: |
+          npm run test:mcp-diff-attribute
+          npm run check:mcp-diff-attribute
       - name: Lint (eslint)
         run: npm run lint
       - name: Typecheck (tsc)
