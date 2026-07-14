@@ -562,13 +562,19 @@ impl CursorAgentOperator {
         if let Some(model) = config.get("model").and_then(|v| v.as_str()) {
             payload["model"] = serde_json::json!({ "id": model });
         }
-        if config
+        // D05 PR2e (Option C): send `autoCreatePR` EXPLICITLY (both true and
+        // false) rather than omitting it. For the fix path the overlay forces
+        // `auto_create_pr=false`, so this states the app's intent to Cursor
+        // outright — the agent must open NO PR (the SCHEDULER opens the born-draft
+        // PR). Belt-and-suspenders on top of the scheduler-side hardening: if a
+        // future API flips the default of an OMITTED field to true, an explicit
+        // `false` still holds (and the primary-path orphan reconcile covers the
+        // residual if Cursor ignores it entirely).
+        let auto_create_pr = config
             .get("auto_create_pr")
             .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            payload["autoCreatePR"] = Value::Bool(true);
-        }
+            .unwrap_or(false);
+        payload["autoCreatePR"] = Value::Bool(auto_create_pr);
 
         let launch = match ctx
             .http
@@ -710,6 +716,12 @@ impl CursorAgentOperator {
             .and_then(|branches| branches.iter().find_map(|b| b.get("branch")))
             .and_then(|v| v.as_str())
             .map(str::to_string);
+        // D05 PR2e (Option C, Finding 1): surface the target repo as a validated
+        // `owner/repo` slug so the SCHEDULER can pass `gh pr create -R <repo>` —
+        // the scheduler's own workspace is NOT a checkout of the fix workflow's
+        // repository, so `gh` cannot infer it. Derived from the app config
+        // (`repository`), not agent output.
+        let repo_slug = crate::fix_cloud::normalize_repo_slug(&repository);
         let summary_text = last_body
             .get("result")
             .and_then(|v| v.as_str())
@@ -727,6 +739,7 @@ impl CursorAgentOperator {
                 "poll_interval_ms": poll_interval_ms,
                 "pr_url": pr_url,
                 "pushed_branch": pushed_branch,
+                "repo": repo_slug,
                 "result": last_body,
             }),
         }
@@ -1539,11 +1552,20 @@ mod tests {
             serde_json::Value::Null,
             "the agent opened NO PR (auto_create_pr=false)"
         );
-        // auto_create_pr=false must NOT set autoCreatePR on the launch payload.
+        // Finding 1: the target repo is surfaced as a validated owner/repo slug so
+        // the scheduler can open the PR with `gh pr create -R <repo>`.
+        assert_eq!(
+            outcome.details["repo"],
+            serde_json::json!("acme/app"),
+            "the normalized owner/repo slug is surfaced for the scheduler's -R"
+        );
+        // OPTIONAL hardening: `auto_create_pr=false` is sent EXPLICITLY as
+        // `autoCreatePR: false` (not omitted), stating the app's intent to Cursor.
         let posted = http.posted.lock().unwrap();
-        assert!(
-            posted[0].1.get("autoCreatePR").is_none(),
-            "auto_create_pr=false leaves autoCreatePR off the launch payload"
+        assert_eq!(
+            posted[0].1.get("autoCreatePR"),
+            Some(&serde_json::Value::Bool(false)),
+            "auto_create_pr=false is sent explicitly as autoCreatePR:false"
         );
     }
 

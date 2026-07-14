@@ -1665,17 +1665,25 @@ fn fix_agent_config_overlay<'a>(
 /// opens NO PR. This seam then:
 ///
 /// - **PRIMARY** — on a pushed, VALIDATED branch with NO `pr_url`, the SCHEDULER
-///   opens the born-`--draft` PR itself (`gh pr create --draft --base main --head
-///   <branch>`, [`crate::fix_cloud::open_cloud_fix_draft_pr`]). Born-draft ⇒
-///   auto-merge-INELIGIBLE ⇒ race-free.
-/// - **FALLBACK** (defense-in-depth) — if a future Cursor change ignores the flag
-///   and the agent UNEXPECTEDLY returns a `pr_url`, the born-draft primary cannot
-///   apply, so DETECT the PR's draft state and CONVERT a non-draft back to a draft
-///   ([`crate::fix_cloud::harden_cloud_fix_pr_draft`]).
-/// - **FAIL CLOSED** — a pushed branch whose name fails validation is REFUSED (no
-///   PR opened); an unverifiable/failed convert or a failed open raises an
-///   operator-visible `log::warn!` alert. Every outcome is recorded under
-///   `outcome.details.draft_hardening` (surfaced in run detail / audit).
+///   opens the born-`--draft` PR itself (`gh pr create -R <owner/repo> --draft
+///   --base main --head <branch>`, [`crate::fix_cloud::open_cloud_fix_draft_pr`]).
+///   The explicit `-R` (the run's surfaced `repo` slug) is required — the
+///   scheduler's own workspace is NOT a checkout of the target repo. Born-draft ⇒
+///   auto-merge-INELIGIBLE ⇒ race-free. On a successful open the created PR's URL
+///   is BACKFILLED to the top-level `outcome.details.pr_url` (the agent left it
+///   null) so run history shows the PR.
+/// - **PRIMARY RECONCILE** (defense-in-depth) — if that `gh pr create` FAILS
+///   because a PR already exists (a future Cursor opened one despite
+///   `auto_create_pr=false` AND omitted its url), PROBE the branch
+///   ([`crate::fix_cloud::reconcile_orphaned_cloud_fix_pr`]) and CONVERT any found
+///   PR to a draft, so no auto-merge-eligible machine PR is left live.
+/// - **FALLBACK** — if the agent UNEXPECTEDLY returns a `pr_url` outright, the
+///   born-draft primary cannot apply, so DETECT the PR's draft state and CONVERT a
+///   non-draft back to a draft ([`crate::fix_cloud::harden_cloud_fix_pr_draft`]).
+/// - **FAIL CLOSED** — a pushed branch whose name fails validation, a missing
+///   target repo, or an unverifiable/failed convert/probe/open all REFUSE to
+///   assume safety and raise an operator-visible `log::warn!` alert. Every outcome
+///   is recorded under `outcome.details.draft_hardening` (surfaced in run detail).
 ///
 /// The born-draft vs convert-to-draft split is expressed by the pure
 /// [`crate::fix_cloud::decide_cloud_fix_pr_action`]. Gated on `trigger_kind ==
@@ -1709,39 +1717,115 @@ fn apply_cloud_fix_draft_hardening(
         .get("pushed_branch")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    // The target `owner/repo` slug the run surfaced (Finding 1) — required to open
+    // the PR against the RIGHT repo (`gh pr create -R …`), since the scheduler's
+    // workspace is not a checkout of it.
+    let repo = outcome
+        .details
+        .get("repo")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
-    let detail =
+    // `(draft_hardening detail, top-level pr_url to backfill)`. The backfill
+    // (Finding 3) is `Some` only when a DRAFT PR is confirmed (opened or
+    // reconciled), so an alert path never fabricates a `pr_url`.
+    let (detail, backfill_pr_url): (serde_json::Value, Option<String>) =
         match fix_cloud::decide_cloud_fix_pr_action(pr_url.as_deref(), pushed_branch.as_deref()) {
             // Nothing pushed and no PR (a failed / poll-exhausted run) — no-op.
             fix_cloud::CloudFixPrAction::Noop => return,
             // PRIMARY (race-free): the agent pushed a `cursor/…` branch and opened no
             // PR — the scheduler opens the born-DRAFT PR against it.
-            fix_cloud::CloudFixPrAction::OpenDraftPr { branch } => {
-                let title = fix_cloud::build_cloud_fix_pr_title(workflow_name, run_id);
-                let body = fix_cloud::build_cloud_fix_pr_body(workflow_name, run_id, &branch);
-                match fix_cloud::open_cloud_fix_draft_pr(
-                    runner,
-                    cwd,
-                    fix_cloud::FIX_CLOUD_PR_BASE,
-                    &branch,
-                    &title,
-                    &body,
-                ) {
-                    fix_cloud::CloudDraftPrOpen::Opened { pr_url } => {
-                        fix_cloud::opened_draft_detail(&branch, pr_url.as_deref())
-                    }
-                    fix_cloud::CloudDraftPrOpen::Failed => {
-                        log::warn!(
-                            "{}",
-                            fix_cloud::build_cloud_open_alert(
-                                &branch,
-                                fix_cloud::CLOUD_DRAFT_OPEN_FAILED_REASON,
-                            )
-                        );
-                        fix_cloud::alert_detail(fix_cloud::CLOUD_DRAFT_OPEN_FAILED_REASON)
+            fix_cloud::CloudFixPrAction::OpenDraftPr { branch } => match repo.as_deref() {
+                // FAIL CLOSED: no valid target repo surfaced — cannot open the PR
+                // against the right repo, so refuse rather than risk the wrong one.
+                None => {
+                    log::warn!(
+                        "{}",
+                        fix_cloud::build_cloud_open_alert(
+                            &branch,
+                            fix_cloud::CLOUD_MISSING_REPO_REASON
+                        )
+                    );
+                    (
+                        fix_cloud::alert_detail(fix_cloud::CLOUD_MISSING_REPO_REASON),
+                        None,
+                    )
+                }
+                Some(repo) => {
+                    let title = fix_cloud::build_cloud_fix_pr_title(workflow_name, run_id);
+                    let body = fix_cloud::build_cloud_fix_pr_body(workflow_name, run_id, &branch);
+                    match fix_cloud::open_cloud_fix_draft_pr(
+                        runner,
+                        cwd,
+                        repo,
+                        fix_cloud::FIX_CLOUD_PR_BASE,
+                        &branch,
+                        &title,
+                        &body,
+                    ) {
+                        fix_cloud::CloudDraftPrOpen::Opened { pr_url } => (
+                            fix_cloud::opened_draft_detail(&branch, pr_url.as_deref()),
+                            pr_url,
+                        ),
+                        // RECONCILE (Finding 2): the create failed — a PR may already
+                        // exist for the branch (Cursor opened one despite the flag,
+                        // without surfacing its url). Probe + convert any orphan to a
+                        // draft so nothing auto-merge-eligible is left live.
+                        fix_cloud::CloudDraftPrOpen::Failed => {
+                            match fix_cloud::reconcile_orphaned_cloud_fix_pr(
+                                runner, cwd, repo, &branch,
+                            ) {
+                                fix_cloud::OrphanReconcile::Found { pr_url, hardening } => {
+                                    match &hardening {
+                                        fix_cloud::CloudDraftHardening::Alerted { reason } => {
+                                            log::warn!(
+                                                "{}",
+                                                fix_cloud::build_nondraft_alert(&pr_url, reason)
+                                            )
+                                        }
+                                        _ => log::warn!(
+                                            "{}",
+                                            fix_cloud::build_orphan_recovered_alert(&pr_url)
+                                        ),
+                                    }
+                                    let detail = fix_cloud::recovered_detail(&pr_url, &hardening);
+                                    (detail, Some(pr_url))
+                                }
+                                fix_cloud::OrphanReconcile::NoExistingPr => {
+                                    log::warn!(
+                                        "{}",
+                                        fix_cloud::build_cloud_open_alert(
+                                            &branch,
+                                            fix_cloud::CLOUD_DRAFT_OPEN_FAILED_REASON,
+                                        )
+                                    );
+                                    (
+                                        fix_cloud::alert_detail(
+                                            fix_cloud::CLOUD_DRAFT_OPEN_FAILED_REASON,
+                                        ),
+                                        None,
+                                    )
+                                }
+                                fix_cloud::OrphanReconcile::ProbeFailed => {
+                                    log::warn!(
+                                        "{}",
+                                        fix_cloud::build_cloud_open_alert(
+                                            &branch,
+                                            fix_cloud::CLOUD_ORPHAN_PROBE_FAILED_REASON,
+                                        )
+                                    );
+                                    (
+                                        fix_cloud::alert_detail(
+                                            fix_cloud::CLOUD_ORPHAN_PROBE_FAILED_REASON,
+                                        ),
+                                        None,
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
-            }
+            },
             // FALLBACK (defense-in-depth): the agent unexpectedly opened a PR itself
             // (a future Cursor change ignored auto_create_pr=false) — ensure it is a
             // draft via the detect→convert path.
@@ -1750,7 +1834,9 @@ fn apply_cloud_fix_draft_hardening(
                 if let fix_cloud::CloudDraftHardening::Alerted { reason } = &result {
                     log::warn!("{}", fix_cloud::build_nondraft_alert(&pr_url, reason));
                 }
-                fix_cloud::hardening_detail(&result)
+                // pr_url is already top-level (it came from details) — pass it
+                // through so the backfill is idempotent.
+                (fix_cloud::hardening_detail(&result), Some(pr_url))
             }
             // FAIL CLOSED: a pushed branch whose name failed validation — refuse to
             // open a PR against it (never trust an injection-y `--head` value).
@@ -1762,12 +1848,21 @@ fn apply_cloud_fix_draft_hardening(
                         fix_cloud::CLOUD_INVALID_BRANCH_REASON
                     )
                 );
-                fix_cloud::alert_detail(fix_cloud::CLOUD_INVALID_BRANCH_REASON)
+                (
+                    fix_cloud::alert_detail(fix_cloud::CLOUD_INVALID_BRANCH_REASON),
+                    None,
+                )
             }
         };
 
     if let Some(obj) = outcome.details.as_object_mut() {
         obj.insert("draft_hardening".to_string(), detail);
+        // Finding 3: surface the confirmed DRAFT PR at the top level so run
+        // history / consumers show the PR instead of "no PR" (the cloud agent
+        // leaves `pr_url` null by design under Option C).
+        if let Some(u) = backfill_pr_url {
+            obj.insert("pr_url".to_string(), serde_json::Value::String(u));
+        }
     }
 }
 
@@ -5339,22 +5434,43 @@ mod tests {
         // operator (the same M2 gate as the config overlay). Verify the routing:
         // (1) a non-fix trigger is a NO-OP (never runs gh, never annotates);
         // (2) PRIMARY — a fix dispatch with a pushed `cursor/…` branch + no
-        //     pr_url has the SCHEDULER open a born-draft PR (`gh pr create
-        //     --draft --base main --head <branch>`) and records `opened_draft`;
+        //     pr_url has the SCHEDULER open a born-draft PR against the TARGET repo
+        //     (`gh pr create -R <repo> --draft …`), records `opened_draft`, and
+        //     BACKFILLS the top-level pr_url (Finding 1 + Finding 3);
         // (3) FALLBACK — a fix dispatch that UNEXPECTEDLY carries a pr_url (a
         //     future Cursor change ignored auto_create_pr=false) probes + converts
         //     the existing PR and records `converted_to_draft`;
-        // (4) a fix dispatch that pushed nothing + opened no PR is a no-op.
+        // (4) a fix dispatch that pushed nothing + opened no PR is a no-op;
+        // (5) RECONCILE (Finding 2) — PRIMARY create FAILS because a PR already
+        //     exists for the branch; the seam probes (`gh pr list`) + converts the
+        //     orphaned non-draft PR and records `recovered_existing_converted_to_draft`.
         use crate::service::ProcessRunner;
         use std::os::unix::process::ExitStatusExt;
         use std::process::{ExitStatus, Output};
         use std::sync::Mutex;
 
         struct RecordingRunner {
+            create_code: i32,
+            create_stdout: String,
+            list_stdout: String,
             view_stdout: String,
             calls: Mutex<Vec<Vec<String>>>,
         }
         impl RecordingRunner {
+            fn new(
+                create_code: i32,
+                create_stdout: &str,
+                list_stdout: &str,
+                view_stdout: &str,
+            ) -> Self {
+                RecordingRunner {
+                    create_code,
+                    create_stdout: create_stdout.into(),
+                    list_stdout: list_stdout.into(),
+                    view_stdout: view_stdout.into(),
+                    calls: Mutex::new(vec![]),
+                }
+            }
             fn argvs(&self) -> Vec<Vec<String>> {
                 self.calls.lock().unwrap().clone()
             }
@@ -5370,15 +5486,20 @@ mod tests {
                 let mut argv = vec![program.to_string()];
                 argv.extend_from_slice(args);
                 self.calls.lock().unwrap().push(argv);
-                // `gh pr view … --jq .isDraft` echoes the scripted draft state;
-                // `gh pr create` / `gh pr ready` succeed with empty stdout.
-                let stdout = if args.iter().any(|a| a == "view") {
-                    self.view_stdout.clone()
+                // `create` echoes its (optional) URL + scripted exit code; `list`
+                // echoes the scripted probe JSON; `view … --jq .isDraft` the draft
+                // state; `ready` succeeds with empty stdout.
+                let (code, stdout) = if args.iter().any(|a| a == "create") {
+                    (self.create_code, self.create_stdout.clone())
+                } else if args.iter().any(|a| a == "list") {
+                    (0, self.list_stdout.clone())
+                } else if args.iter().any(|a| a == "view") {
+                    (0, self.view_stdout.clone())
                 } else {
-                    String::new()
+                    (0, String::new())
                 };
                 Ok(Output {
-                    status: ExitStatus::from_raw(0),
+                    status: ExitStatus::from_raw((code & 0xff) << 8),
                     stdout: stdout.into_bytes(),
                     stderr: Vec::new(),
                 })
@@ -5386,10 +5507,7 @@ mod tests {
         }
 
         // (1) A NON-fix trigger (even with a pr_url) must NOT run gh nor annotate.
-        let runner = RecordingRunner {
-            view_stdout: "false".into(),
-            calls: Mutex::new(vec![]),
-        };
+        let runner = RecordingRunner::new(0, "", "", "false");
         let mut outcome = crate::operators::OperatorOutcome {
             success: true,
             summary: "s".into(),
@@ -5410,16 +5528,16 @@ mod tests {
         );
         assert!(outcome.details.get("draft_hardening").is_none());
 
-        // (2) PRIMARY: pushed cursor/ branch, no pr_url => the scheduler opens the
-        // born-draft PR itself and records opened_draft.
-        let runner = RecordingRunner {
-            view_stdout: "false".into(),
-            calls: Mutex::new(vec![]),
-        };
+        // (2) PRIMARY: pushed cursor/ branch, no pr_url, a surfaced repo => the
+        // scheduler opens the born-draft PR itself against `-R <repo>`, records
+        // opened_draft, and backfills the top-level pr_url from create's stdout.
+        let runner = RecordingRunner::new(0, "https://github.com/acme/app/pull/42\n", "", "false");
         let mut outcome = crate::operators::OperatorOutcome {
             success: true,
             summary: "s".into(),
-            details: serde_json::json!({ "pushed_branch": "cursor/fix-xyz", "pr_url": null }),
+            details: serde_json::json!({
+                "pushed_branch": "cursor/fix-xyz", "pr_url": null, "repo": "acme/app"
+            }),
         };
         apply_cloud_fix_draft_hardening(
             &runner,
@@ -5433,11 +5551,11 @@ mod tests {
         let argvs = runner.argvs();
         assert_eq!(argvs.len(), 1, "the scheduler runs exactly one gh command");
         assert_eq!(
-            &argvs[0][..7],
-            &["gh", "pr", "create", "--draft", "--base", "main", "--head"],
-            "the scheduler opens a born --draft PR against main"
+            &argvs[0][..9],
+            &["gh", "pr", "create", "-R", "acme/app", "--draft", "--base", "main", "--head"],
+            "the scheduler opens a born --draft PR against the TARGET repo (-R)"
         );
-        assert_eq!(argvs[0][7], "cursor/fix-xyz", "…--head <pushed branch>");
+        assert_eq!(argvs[0][9], "cursor/fix-xyz", "…--head <pushed branch>");
         assert!(
             !argvs[0].iter().any(|a| a == "--auto" || a == "merge"),
             "the scheduler never arms auto-merge / merges"
@@ -5450,12 +5568,14 @@ mod tests {
             outcome.details["draft_hardening"]["branch"],
             serde_json::json!("cursor/fix-xyz")
         );
+        assert_eq!(
+            outcome.details["pr_url"],
+            serde_json::json!("https://github.com/acme/app/pull/42"),
+            "Finding 3: the opened PR's URL is backfilled to the top-level pr_url"
+        );
 
         // (3) FALLBACK: an unexpected pr_url => probe + convert the EXISTING PR.
-        let runner = RecordingRunner {
-            view_stdout: "false".into(),
-            calls: Mutex::new(vec![]),
-        };
+        let runner = RecordingRunner::new(0, "", "", "false");
         let mut outcome = crate::operators::OperatorOutcome {
             success: true,
             summary: "s".into(),
@@ -5485,10 +5605,7 @@ mod tests {
         );
 
         // (4) Nothing pushed + no PR (poll-exhausted) => no-op.
-        let runner = RecordingRunner {
-            view_stdout: "false".into(),
-            calls: Mutex::new(vec![]),
-        };
+        let runner = RecordingRunner::new(0, "", "", "false");
         let mut outcome = crate::operators::OperatorOutcome {
             success: false,
             summary: "s".into(),
@@ -5508,6 +5625,55 @@ mod tests {
             "no branch + no pr_url => nothing to do"
         );
         assert!(outcome.details.get("draft_hardening").is_none());
+
+        // (5) RECONCILE (Finding 2): PRIMARY create FAILS (a PR already exists for
+        // the branch — Cursor opened one despite auto_create_pr=false, no prUrl).
+        // The seam probes `gh pr list`, finds the NON-draft PR, converts it, and
+        // records a `recovered_existing_converted_to_draft` + backfills pr_url.
+        let runner = RecordingRunner::new(
+            1, // create fails ("a pull request already exists")
+            "",
+            r#"[{"number":7,"isDraft":false,"url":"https://github.com/acme/app/pull/7"}]"#,
+            "false", // the found PR is a non-draft => convert
+        );
+        let mut outcome = crate::operators::OperatorOutcome {
+            success: true,
+            summary: "s".into(),
+            details: serde_json::json!({
+                "pushed_branch": "cursor/fix-xyz", "pr_url": null, "repo": "acme/app"
+            }),
+        };
+        apply_cloud_fix_draft_hardening(
+            &runner,
+            Some("/tmp"),
+            "cursor_agent",
+            Some(crate::service::FIX_AGENT_TRIGGER_KIND),
+            "Fix WF",
+            "run-5",
+            &mut outcome,
+        );
+        let argvs = runner.argvs();
+        assert!(
+            argvs.iter().any(|a| a.iter().any(|x| x == "create")),
+            "the primary create was attempted (and failed)"
+        );
+        assert!(
+            argvs.iter().any(|a| a.iter().any(|x| x == "list")),
+            "on failure the seam probes for an existing PR (gh pr list)"
+        );
+        assert!(
+            argvs.iter().any(|a| a.iter().any(|x| x == "ready")),
+            "the found non-draft orphan is converted to a draft (gh pr ready --undo)"
+        );
+        assert_eq!(
+            outcome.details["draft_hardening"]["cloud_pr_draft"],
+            serde_json::json!("recovered_existing_converted_to_draft")
+        );
+        assert_eq!(
+            outcome.details["pr_url"],
+            serde_json::json!("https://github.com/acme/app/pull/7"),
+            "the reconciled PR's URL is backfilled to the top-level pr_url"
+        );
     }
 
     #[test]

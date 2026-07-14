@@ -26,12 +26,23 @@
 //! overlay now forces `auto_create_pr=false` (see
 //! [`crate::scheduler`]'s `fix_agent_config_overlay`), so the cloud agent ONLY
 //! pushes its `cursor/…` branch and opens NO PR. The scheduler then opens the PR
-//! itself with `gh pr create --draft --base main --head <branch>` and an
-//! app-authored title/body ([`build_cloud_fix_pr_title`] / [`build_cloud_fix_pr_body`],
-//! modeled on `fix_local`'s M4 builders). Born-`--draft` ⇒ auto-merge-INELIGIBLE
-//! ⇒ RACE-FREE: there is no moment at which a non-draft cloud fix PR exists. This
-//! REVERSES #284's "the cloud agent opens the PR" mechanism and UNIFIES the CLOUD
-//! path with the LOCAL path (which already opens its own draft PR).
+//! itself with `gh pr create -R <owner/repo> --draft --base main --head <branch>`
+//! and an app-authored title/body ([`build_cloud_fix_pr_title`] /
+//! [`build_cloud_fix_pr_body`], modeled on `fix_local`'s M4 builders).
+//! Born-`--draft` ⇒ auto-merge-INELIGIBLE ⇒ RACE-FREE: there is no moment at
+//! which a non-draft cloud fix PR exists. This REVERSES #284's "the cloud agent
+//! opens the PR" mechanism and UNIFIES the CLOUD path with the LOCAL path (which
+//! already opens its own draft PR).
+//!
+//! **Repository targeting (`-R`).** Unlike the LOCAL path — which runs `gh` INSIDE
+//! the target repo's worktree, so `gh` infers the repo from the checkout — the
+//! CLOUD path has NO local checkout of the fix workflow's repository (the agent
+//! worked in the cloud; the scheduler's own workspace is a DIFFERENT repo). So the
+//! cloud `gh pr create`/`gh pr list` MUST pass an explicit `-R <owner/repo>`
+//! ([`normalize_repo_slug`], derived from the workflow's configured `repository`
+//! and validated by [`is_valid_repo_slug`]) or it fails / targets the WRONG repo.
+//! This is why [`gh_pr_create_draft_argv`] DIVERGES from `fix_local`'s builder by
+//! adding `-R`.
 //!
 //! **Branch-name safety (primary path).** `<branch>` originates from the cloud
 //! agent's `git.branches[]`, so it is VALIDATED ([`is_valid_cloud_fix_branch`])
@@ -47,6 +58,18 @@
 //! failed conversion, FAIL CLOSED with an operator-visible alert. The pure
 //! [`decide_cloud_fix_pr_action`] expresses BOTH branches (born-draft PRIMARY vs
 //! convert-to-draft FALLBACK).
+//!
+//! **Orphaned-PR reconcile (primary-path defense).** A future Cursor change could
+//! ALSO ignore `auto_create_pr=false`, open a NON-draft PR, AND omit its url from
+//! `git.branches[]` — so `pr_url` is absent, the primary path runs, and its
+//! `gh pr create` FAILS ("a pull request already exists"). Rather than stop at
+//! that failure (leaving the auto-merge-eligible non-draft PR live), the seam then
+//! PROBES the head branch for an existing open PR ([`reconcile_orphaned_cloud_fix_pr`]
+//! → `gh pr list -R <repo> --head <branch>`) and, if one is found, runs
+//! [`harden_cloud_fix_pr_draft`] to ensure it is a draft; an unverifiable probe
+//! FAILS CLOSED with an alert. This guarantees NO cloud fix path can leave an
+//! auto-merge-eligible machine PR, even when both `pr_url` surfacing and the
+//! `auto_create_pr=false` request are ignored upstream.
 
 use crate::service::ProcessRunner;
 use serde_json::{json, Value};
@@ -133,6 +156,50 @@ pub fn is_valid_cloud_fix_branch(branch: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
 }
 
+/// Whether a derived `owner/repo` slug is safe to pass to `gh -R`. Like
+/// [`is_valid_cloud_fix_branch`], the source (`repository`) is app config but is
+/// treated as UNTRUSTED at the `gh` boundary: EXACTLY two non-empty segments,
+/// each `[A-Za-z0-9._-]` with no leading `-` (so it can never be read as a flag),
+/// and no `..`. HOST-less (`owner/repo`, github.com implied) — the app only ever
+/// targets GitHub repos.
+pub fn is_valid_repo_slug(slug: &str) -> bool {
+    let parts: Vec<&str> = slug.split('/').collect();
+    parts.len() == 2
+        && !slug.contains("..")
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.len() <= 100
+                && !p.starts_with('-')
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        })
+}
+
+/// Derive a validated `owner/repo` slug from the fix workflow's `repository`
+/// config for `gh -R`. Accepts the two shapes the `cursor_agent` operator
+/// accepts: a full `https://github.com/owner/repo[.git]` URL (host dropped, first
+/// two path segments kept) or an `owner/repo` shorthand. Returns `None` when the
+/// result is not a safe two-segment slug ([`is_valid_repo_slug`]) — the caller
+/// then FAILS CLOSED rather than hand `gh` an unusable/injection-y `-R` value.
+pub fn normalize_repo_slug(repository: &str) -> Option<String> {
+    let r = repository.trim();
+    let slug = if let Some(rest) = r
+        .strip_prefix("https://")
+        .or_else(|| r.strip_prefix("http://"))
+    {
+        // rest = "host/owner/repo[/…]" — drop the host, keep owner + repo.
+        let mut segs = rest.split('/').filter(|s| !s.is_empty());
+        let _host = segs.next()?;
+        let owner = segs.next()?;
+        let repo = segs.next()?;
+        let repo = repo.strip_suffix(".git").unwrap_or(repo);
+        format!("{owner}/{repo}")
+    } else {
+        r.strip_suffix(".git").unwrap_or(r).to_string()
+    };
+    is_valid_repo_slug(&slug).then_some(slug)
+}
+
 // ---------------------------------------------------------------------------
 // Option C — app-authored DRAFT PR (title / body / argv), scheduler-opened.
 // ---------------------------------------------------------------------------
@@ -181,19 +248,27 @@ pub fn build_cloud_fix_pr_body(
     )
 }
 
-/// `gh pr create` argv for the scheduler-opened born-DRAFT cloud fix PR. Delegates
-/// to [`crate::fix_local::gh_pr_create_argv`] so the CLOUD and LOCAL paths emit a
-/// BYTE-IDENTICAL `gh pr create --draft --base <base> --head <branch> --title …
-/// --body-file …` invocation (the unification Option C is built on). ALWAYS
-/// `--draft`; there is deliberately no merge/approve verb anywhere in the fix
-/// flow — human review is the sole backstop (M4).
+/// `gh pr create` argv for the scheduler-opened born-DRAFT cloud fix PR. Builds
+/// on [`crate::fix_local::gh_pr_create_argv`] (so the shared `--draft --base …
+/// --head … --title … --body-file …` shape stays defined once) but DIVERGES by
+/// splicing an explicit `-R <owner/repo>` right after `create`: the CLOUD path
+/// has no local checkout of the target repo, so `gh` cannot infer it (the LOCAL
+/// path runs inside the worktree and needs no `-R`). `repo` MUST be a validated
+/// [`is_valid_repo_slug`] value. ALWAYS `--draft`; there is deliberately no
+/// merge/approve verb anywhere in the fix flow — human review is the sole
+/// backstop (M4).
 pub fn gh_pr_create_draft_argv(
+    repo: &str,
     base: &str,
     head: &str,
     title: &str,
     body_file: &str,
 ) -> Vec<String> {
-    crate::fix_local::gh_pr_create_argv(base, head, title, body_file)
+    let mut argv = crate::fix_local::gh_pr_create_argv(base, head, title, body_file);
+    // Splice `-R <repo>` after `["pr", "create", …]` (index 2). gh treats flag
+    // order freely; keeping it first makes the target repo unmistakable.
+    argv.splice(2..2, ["-R".to_string(), repo.to_string()]);
+    argv
 }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +353,61 @@ pub fn parse_is_draft(stdout: &str) -> Option<bool> {
     }
 }
 
+/// `gh pr list` argv that finds an OPEN PR whose HEAD is `<branch>` in `<repo>`,
+/// returning JSON (`number,isDraft,url`). Used only on the PRIMARY path AFTER a
+/// `gh pr create` failure, to detect a PR a future Cursor may have opened for the
+/// branch despite `auto_create_pr=false` (see [`reconcile_orphaned_cloud_fix_pr`]).
+/// `repo` ([`is_valid_repo_slug`]) and `branch` ([`is_valid_cloud_fix_branch`])
+/// are pre-validated; both ride as OPTION VALUES (never positionals), so neither
+/// can be read as a flag.
+pub fn gh_pr_list_head_argv(repo: &str, branch: &str) -> Vec<String> {
+    vec![
+        "pr".to_string(),
+        "list".to_string(),
+        "-R".to_string(),
+        repo.to_string(),
+        "--head".to_string(),
+        branch.to_string(),
+        "--state".to_string(),
+        "open".to_string(),
+        "--json".to_string(),
+        "number,isDraft,url".to_string(),
+    ]
+}
+
+/// The outcome of parsing `gh pr list … --json number,isDraft,url` output.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExistingPrProbe {
+    /// An open PR for the branch exists; carries its URL (+ observed draft state
+    /// when present — advisory only; the convert path re-probes it).
+    Found { url: String, is_draft: Option<bool> },
+    /// The probe parsed cleanly and there is NO open PR for the branch.
+    None,
+    /// The output could not be parsed (not a JSON array, or an entry with no
+    /// URL) — the caller FAILS CLOSED rather than assume "no PR".
+    Unparseable,
+}
+
+/// Parse the JSON array `gh pr list … --json number,isDraft,url` prints. Takes
+/// the FIRST entry (`--head` scopes to one branch). A clean empty array is
+/// [`ExistingPrProbe::None`]; a non-array / an entry missing `url` is
+/// [`ExistingPrProbe::Unparseable`] (fail closed).
+pub fn parse_existing_pr(stdout: &str) -> ExistingPrProbe {
+    match serde_json::from_str::<Vec<Value>>(stdout.trim()) {
+        Ok(arr) => match arr.first() {
+            Some(pr) => match pr.get("url").and_then(|v| v.as_str()) {
+                Some(url) => ExistingPrProbe::Found {
+                    url: url.to_string(),
+                    is_draft: pr.get("isDraft").and_then(|v| v.as_bool()),
+                },
+                None => ExistingPrProbe::Unparseable,
+            },
+            None => ExistingPrProbe::None,
+        },
+        Err(_) => ExistingPrProbe::Unparseable,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Operator-visible alert (app-authored; never agent free-text).
 // ---------------------------------------------------------------------------
@@ -309,6 +439,28 @@ pub const CLOUD_DRAFT_OPEN_FAILED_REASON: &str =
 /// and the scheduler REFUSED to open a PR against it (fail closed).
 pub const CLOUD_INVALID_BRANCH_REASON: &str =
     "the cloud agent's pushed branch name failed validation (expected a safe `cursor/…` name)";
+/// Reason recorded when the cloud fix run surfaced no usable target repository,
+/// so the scheduler could not open the born-draft PR (fail closed).
+pub const CLOUD_MISSING_REPO_REASON: &str =
+    "the cloud fix run did not surface a valid target repository (owner/repo), so the scheduler could not open the draft PR";
+/// Reason recorded when the `gh pr create` failed AND the scheduler could not
+/// verify whether a PR already exists for the branch (the `gh pr list` probe
+/// failed or returned junk) — an orphaned NON-draft PR may be live. Fail closed.
+pub const CLOUD_ORPHAN_PROBE_FAILED_REASON: &str =
+    "the scheduler could not open the draft PR and could not verify whether a PR already exists for the branch (gh pr list failed or returned no usable JSON)";
+
+/// App-authored, operator-visible alert for when the PRIMARY `gh pr create`
+/// failed because a PR ALREADY existed for the branch (a future Cursor opened one
+/// despite `auto_create_pr=false` and omitted its url) and the scheduler
+/// CONVERTED that PR back to a draft. Surfaces the anomaly (the fallback fired)
+/// so an operator can confirm; derived only from the app-captured PR URL.
+pub fn build_orphan_recovered_alert(pr_url: &str) -> String {
+    format!(
+        "D05 cloud fix: a PR unexpectedly already existed for the machine fix branch (Cursor opened \
+         one despite auto_create_pr=false); the scheduler ensured it is a DRAFT so it cannot \
+         auto-merge without human review. Review it: {pr_url}"
+    )
+}
 
 /// App-authored, operator-visible alert for the PRIMARY (born-draft) path when
 /// the scheduler did NOT open the draft PR — either the `gh pr create` failed or
@@ -337,6 +489,24 @@ pub fn opened_draft_detail(branch: &str, pr_url: Option<&str>) -> Value {
 /// scheduler's own `gh pr create` failed). Mirrors the fallback `Alerted` shape.
 pub fn alert_detail(reason: &str) -> Value {
     json!({ "cloud_pr_draft": "alert", "reason": reason })
+}
+
+/// Structured `draft_hardening` detail for the PRIMARY path when `gh pr create`
+/// failed but an EXISTING PR was found for the branch and reconciled
+/// ([`reconcile_orphaned_cloud_fix_pr`]) — distinct `recovered_*` states so an
+/// operator can tell this apart from a clean born-draft open. Carries the PR URL
+/// (and the alert reason when the reconcile itself could not guarantee a draft).
+pub fn recovered_detail(pr_url: &str, hardening: &CloudDraftHardening) -> Value {
+    let state = match hardening {
+        CloudDraftHardening::AlreadyDraft => "recovered_existing_already_draft",
+        CloudDraftHardening::Converted => "recovered_existing_converted_to_draft",
+        CloudDraftHardening::Alerted { .. } => "recovered_existing_alert",
+    };
+    let mut v = json!({ "cloud_pr_draft": state, "pr_url": pr_url });
+    if let CloudDraftHardening::Alerted { reason } = hardening {
+        v["reason"] = json!(reason);
+    }
+    v
 }
 
 // ---------------------------------------------------------------------------
@@ -452,14 +622,16 @@ fn extract_pr_url(stdout: &str) -> Option<String> {
 ///    or spawn error fails closed.
 /// 3. Best-effort remove the temp body file on every path.
 ///
-/// `<branch>` MUST already be validated ([`is_valid_cloud_fix_branch`]) by the
-/// caller (the seam only reaches here via [`CloudFixPrAction::OpenDraftPr`]). The
-/// argv is passed as a Vec (NO shell), so the validated branch cannot smuggle
-/// flags/args. `gh` runs with the scheduler's own inherited credentials (no env
-/// additions), mirroring the scheduler's other credentialed `gh`/`git` steps.
+/// `<repo>` ([`is_valid_repo_slug`]) and `<branch>` ([`is_valid_cloud_fix_branch`])
+/// MUST already be validated by the caller (the seam only reaches here via
+/// [`CloudFixPrAction::OpenDraftPr`] with a resolved repo). The argv is passed as
+/// a Vec (NO shell), so neither validated value can smuggle flags/args. `gh` runs
+/// with the scheduler's own inherited credentials (no env additions), mirroring
+/// the scheduler's other credentialed `gh`/`git` steps.
 pub fn open_cloud_fix_draft_pr(
     runner: &dyn ProcessRunner,
     cwd: Option<&str>,
+    repo: &str,
     base: &str,
     branch: &str,
     title: &str,
@@ -472,7 +644,7 @@ pub fn open_cloud_fix_draft_pr(
     if std::fs::write(&body_path, body).is_err() {
         return CloudDraftPrOpen::Failed;
     }
-    let argv = gh_pr_create_draft_argv(base, branch, title, &body_path.to_string_lossy());
+    let argv = gh_pr_create_draft_argv(repo, base, branch, title, &body_path.to_string_lossy());
     let result = match runner.run("gh", &argv, cwd, &[]) {
         Ok(out) if out.status.success() => CloudDraftPrOpen::Opened {
             pr_url: extract_pr_url(&String::from_utf8_lossy(&out.stdout)),
@@ -481,6 +653,59 @@ pub fn open_cloud_fix_draft_pr(
     };
     let _ = std::fs::remove_file(&body_path);
     result
+}
+
+/// The outcome of reconciling a PRIMARY-path `gh pr create` FAILURE: probe the
+/// branch for an already-existing PR and, if found, ensure it is a draft.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OrphanReconcile {
+    /// The probe succeeded and there is NO open PR for the branch — the create
+    /// failed for some OTHER reason (the seam then alerts open-failed).
+    NoExistingPr,
+    /// An open PR existed for the branch and was reconciled to a draft. Carries
+    /// its URL + the [`harden_cloud_fix_pr_draft`] result (Converted / already a
+    /// draft / Alerted if the convert could not be guaranteed).
+    Found {
+        pr_url: String,
+        hardening: CloudDraftHardening,
+    },
+    /// The probe itself failed (non-zero `gh` or unparseable JSON) — whether an
+    /// orphaned NON-draft PR is live could NOT be verified. FAIL CLOSED.
+    ProbeFailed,
+}
+
+/// PRIMARY-path defense: after a failed `gh pr create`, detect + neutralize a PR
+/// a future Cursor may have opened for the branch (despite `auto_create_pr=false`
+/// AND without surfacing its url). Runner-injected so the whole path is
+/// unit-testable with a fake:
+///
+/// 1. PROBE `gh pr list -R <repo> --head <branch> --state open --json …`; a
+///    non-success exit or unparseable JSON is [`OrphanReconcile::ProbeFailed`]
+///    (fail closed).
+/// 2. If a PR is FOUND, run [`harden_cloud_fix_pr_draft`] on it (a no-op if it is
+///    already a draft; convert if not; alert if it cannot be guaranteed).
+/// 3. A clean "no PR" is [`OrphanReconcile::NoExistingPr`].
+pub fn reconcile_orphaned_cloud_fix_pr(
+    runner: &dyn ProcessRunner,
+    cwd: Option<&str>,
+    repo: &str,
+    branch: &str,
+) -> OrphanReconcile {
+    let probe = match runner.run("gh", &gh_pr_list_head_argv(repo, branch), cwd, &[]) {
+        Ok(out) if out.status.success() => parse_existing_pr(&String::from_utf8_lossy(&out.stdout)),
+        _ => return OrphanReconcile::ProbeFailed,
+    };
+    match probe {
+        ExistingPrProbe::Found { url, .. } => {
+            let hardening = harden_cloud_fix_pr_draft(runner, cwd, &url);
+            OrphanReconcile::Found {
+                pr_url: url,
+                hardening,
+            }
+        }
+        ExistingPrProbe::None => OrphanReconcile::NoExistingPr,
+        ExistingPrProbe::Unparseable => OrphanReconcile::ProbeFailed,
+    }
 }
 
 #[cfg(test)]
@@ -532,10 +757,13 @@ mod tests {
     }
 
     #[test]
-    fn gh_pr_create_draft_argv_is_exactly_draft_base_head_title_bodyfile() {
-        // FAILING-FIRST (Option C PRIMARY): the built argv must be exactly
-        // `gh pr create --draft --base main --head <branch> --title … --body-file …`.
+    fn gh_pr_create_draft_argv_targets_the_repo_with_dash_r() {
+        // FAILING-FIRST (Finding 1): the CLOUD create MUST carry an explicit
+        // `-R <owner/repo>` (there is no local checkout to infer it from), and be
+        // exactly `gh pr create -R <repo> --draft --base main --head <branch>
+        // --title … --body-file …`.
         let argv = gh_pr_create_draft_argv(
+            "acme/app",
             FIX_CLOUD_PR_BASE,
             "cursor/fix-abc123",
             "fix(WF): automated cloud fix for failed run run-7",
@@ -546,6 +774,8 @@ mod tests {
             vec![
                 "pr".to_string(),
                 "create".to_string(),
+                "-R".to_string(),
+                "acme/app".to_string(),
                 "--draft".to_string(),
                 "--base".to_string(),
                 "main".to_string(),
@@ -556,8 +786,11 @@ mod tests {
                 "--body-file".to_string(),
                 "/tmp/body.md".to_string(),
             ],
-            "born-draft PR argv must be `gh pr create --draft --base main --head <branch> …`"
+            "born-draft PR argv must be `gh pr create -R <repo> --draft --base main --head <branch> …`"
         );
+        // The repo rides as the VALUE of `-R` (never a positional / inferred).
+        let r = argv.iter().position(|a| a == "-R").expect("has -R");
+        assert_eq!(argv[r + 1], "acme/app");
         // Never a merge / auto-merge verb anywhere.
         assert!(!argv.iter().any(|a| a == "merge" || a == "--auto"));
         assert!(argv.contains(&"--draft".to_string()));
@@ -628,6 +861,89 @@ mod tests {
         assert!(!is_valid_cloud_fix_branch("cursor/../../etc/passwd"));
         assert!(!is_valid_cloud_fix_branch("-cursor/x"));
         assert!(!is_valid_cloud_fix_branch("cursor/x\ny"));
+    }
+
+    #[test]
+    fn normalize_repo_slug_handles_urls_and_shorthand_and_rejects_junk() {
+        // Finding 1: derive a safe `owner/repo` from either config shape.
+        assert_eq!(
+            normalize_repo_slug("https://github.com/acme/app"),
+            Some("acme/app".to_string())
+        );
+        assert_eq!(
+            normalize_repo_slug("https://github.com/acme/app.git"),
+            Some("acme/app".to_string())
+        );
+        // Extra path segments (e.g. a pasted PR URL) collapse to owner/repo.
+        assert_eq!(
+            normalize_repo_slug("https://github.com/acme/app/pull/1"),
+            Some("acme/app".to_string())
+        );
+        assert_eq!(
+            normalize_repo_slug("acme/app"),
+            Some("acme/app".to_string())
+        );
+        assert_eq!(
+            normalize_repo_slug("  acme/app  "),
+            Some("acme/app".to_string())
+        );
+        // A credential-bearing URL is still SAFE: the host (where any `user@`
+        // lives) is dropped entirely, leaving just the owner/repo the `-R` targets.
+        assert_eq!(
+            normalize_repo_slug("https://x@github.com/acme/app"),
+            Some("acme/app".to_string())
+        );
+        // Rejected: not two segments, injection-y, or a URL missing the repo.
+        assert_eq!(normalize_repo_slug("acme"), None);
+        assert_eq!(normalize_repo_slug("acme/app/extra"), None);
+        assert_eq!(normalize_repo_slug("-acme/app"), None);
+        assert_eq!(normalize_repo_slug("acme/../secret"), None);
+        assert_eq!(normalize_repo_slug("acme/app --foo"), None);
+        assert_eq!(normalize_repo_slug("https://github.com/acme"), None);
+        assert!(is_valid_repo_slug("acme/app"));
+        assert!(!is_valid_repo_slug("acme"));
+        assert!(!is_valid_repo_slug("a/b/c"));
+    }
+
+    #[test]
+    fn gh_pr_list_head_argv_scopes_to_repo_and_branch_as_option_values() {
+        let argv = gh_pr_list_head_argv("acme/app", "cursor/fix-1");
+        // repo + branch are OPTION VALUES (after -R / --head), never positionals.
+        let r = argv.iter().position(|a| a == "-R").expect("has -R");
+        assert_eq!(argv[r + 1], "acme/app");
+        let h = argv.iter().position(|a| a == "--head").expect("has --head");
+        assert_eq!(argv[h + 1], "cursor/fix-1");
+        assert!(argv.iter().any(|a| a == "list"));
+        assert!(argv.iter().any(|a| a == "open"), "only OPEN PRs");
+        // Reads structured JSON (never merges / arms auto-merge).
+        assert!(argv.iter().any(|a| a == "number,isDraft,url"));
+        assert!(!argv.iter().any(|a| a == "merge" || a == "--auto"));
+    }
+
+    #[test]
+    fn parse_existing_pr_finds_reads_or_fails_closed() {
+        // A real `gh pr list` hit.
+        assert_eq!(
+            parse_existing_pr(
+                r#"[{"number":7,"isDraft":false,"url":"https://github.com/o/r/pull/7"}]"#
+            ),
+            ExistingPrProbe::Found {
+                url: "https://github.com/o/r/pull/7".to_string(),
+                is_draft: Some(false)
+            }
+        );
+        // Clean empty array => no PR.
+        assert_eq!(parse_existing_pr("[]"), ExistingPrProbe::None);
+        // Junk / non-array / missing url => fail closed (Unparseable).
+        assert_eq!(parse_existing_pr(""), ExistingPrProbe::Unparseable);
+        assert_eq!(
+            parse_existing_pr("could not resolve"),
+            ExistingPrProbe::Unparseable
+        );
+        assert_eq!(
+            parse_existing_pr(r#"[{"number":7}]"#),
+            ExistingPrProbe::Unparseable
+        );
     }
 
     #[test]
@@ -896,6 +1212,7 @@ mod runner_tests {
         let result = open_cloud_fix_draft_pr(
             &runner,
             Some("/tmp"),
+            "acme/app",
             FIX_CLOUD_PR_BASE,
             "cursor/fix-xyz",
             "fix(WF): automated cloud fix for failed run run-7",
@@ -910,18 +1227,20 @@ mod runner_tests {
         let calls = runner.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "exactly one gh invocation");
         assert_eq!(
-            &calls[0][..8],
+            &calls[0][..10],
             &[
                 "gh",
                 "pr",
                 "create",
+                "-R",
+                "acme/app",
                 "--draft",
                 "--base",
                 "main",
                 "--head",
                 "cursor/fix-xyz"
             ],
-            "born --draft PR against main, head = the pushed branch"
+            "born --draft PR against the target repo (-R), head = the pushed branch"
         );
         assert!(
             calls[0].iter().any(|a| a == "--body-file"),
@@ -941,11 +1260,127 @@ mod runner_tests {
         let result = open_cloud_fix_draft_pr(
             &runner,
             Some("/tmp"),
+            "acme/app",
             FIX_CLOUD_PR_BASE,
             "cursor/fix-xyz",
             "t",
             "b",
         );
         assert_eq!(result, CloudDraftPrOpen::Failed);
+    }
+
+    // ---- Finding 2 — orphaned-PR reconcile after a failed create -------
+
+    /// Scripted `gh` runner for the reconcile path: routes `pr list` (the probe),
+    /// `pr view` (draft state), and `pr ready` (the convert), recording argv.
+    struct ReconcileRunner {
+        list_code: i32,
+        list_stdout: String,
+        view_code: i32,
+        view_stdout: String,
+        ready_code: i32,
+        calls: Mutex<Vec<Vec<String>>>,
+    }
+    impl ReconcileRunner {
+        fn ran(&self, verb: &str) -> bool {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|argv| argv.iter().any(|a| a == verb))
+        }
+    }
+    impl ProcessRunner for ReconcileRunner {
+        fn run(
+            &self,
+            program: &str,
+            args: &[String],
+            _cwd: Option<&str>,
+            _env: &[(String, String)],
+        ) -> std::io::Result<Output> {
+            let mut argv = vec![program.to_string()];
+            argv.extend_from_slice(args);
+            self.calls.lock().unwrap().push(argv);
+            if args.iter().any(|a| a == "list") {
+                Ok(out(self.list_code, &self.list_stdout))
+            } else if args.iter().any(|a| a == "view") {
+                Ok(out(self.view_code, &self.view_stdout))
+            } else if args.iter().any(|a| a == "ready") {
+                Ok(out(self.ready_code, ""))
+            } else {
+                Ok(out(0, ""))
+            }
+        }
+    }
+
+    #[test]
+    fn reconcile_converts_an_orphaned_nondraft_pr_found_after_a_failed_create() {
+        // FAILING-FIRST (Finding 2): `gh pr create` failed because a PR already
+        // existed for the branch (a future Cursor opened one despite
+        // auto_create_pr=false, without surfacing prUrl). The reconcile MUST probe
+        // (`gh pr list`), FIND the NON-draft PR, and CONVERT it to a draft — so no
+        // auto-merge-eligible machine PR is left live.
+        let runner = ReconcileRunner {
+            list_code: 0,
+            list_stdout: r#"[{"number":7,"isDraft":false,"url":"https://github.com/o/r/pull/7"}]"#
+                .to_string(),
+            view_code: 0,
+            view_stdout: "false".to_string(),
+            ready_code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let result =
+            reconcile_orphaned_cloud_fix_pr(&runner, Some("/tmp"), "acme/app", "cursor/fix-1");
+        assert_eq!(
+            result,
+            OrphanReconcile::Found {
+                pr_url: "https://github.com/o/r/pull/7".to_string(),
+                hardening: CloudDraftHardening::Converted,
+            }
+        );
+        assert!(runner.ran("list"), "the reconcile probes with gh pr list");
+        assert!(
+            runner.ran("ready"),
+            "a found non-draft orphan is converted to a draft (gh pr ready --undo)"
+        );
+    }
+
+    #[test]
+    fn reconcile_reports_no_existing_pr_on_a_clean_empty_list() {
+        // The create failed for some OTHER reason (no PR exists) — the seam then
+        // alerts open-failed; NO convert is attempted.
+        let runner = ReconcileRunner {
+            list_code: 0,
+            list_stdout: "[]".to_string(),
+            view_code: 0,
+            view_stdout: "".to_string(),
+            ready_code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let result =
+            reconcile_orphaned_cloud_fix_pr(&runner, Some("/tmp"), "acme/app", "cursor/fix-1");
+        assert_eq!(result, OrphanReconcile::NoExistingPr);
+        assert!(!runner.ran("ready"), "no PR found => nothing to convert");
+    }
+
+    #[test]
+    fn reconcile_fails_closed_when_the_probe_errors() {
+        // The probe itself failed (non-zero gh) — whether a non-draft orphan is
+        // live could NOT be verified. FAIL CLOSED (never a blind convert).
+        let runner = ReconcileRunner {
+            list_code: 1,
+            list_stdout: "".to_string(),
+            view_code: 0,
+            view_stdout: "".to_string(),
+            ready_code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let result =
+            reconcile_orphaned_cloud_fix_pr(&runner, Some("/tmp"), "acme/app", "cursor/fix-1");
+        assert_eq!(result, OrphanReconcile::ProbeFailed);
+        assert!(
+            !runner.ran("ready"),
+            "an unverifiable probe must not trigger a blind convert"
+        );
     }
 }
