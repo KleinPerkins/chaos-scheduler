@@ -1645,6 +1645,62 @@ fn fix_agent_config_overlay<'a>(
     std::borrow::Cow::Owned(Value::Object(obj))
 }
 
+/// D05 PR2e — cloud non-draft hardening seam. For a `ui_fix_agent`
+/// `cursor_agent` dispatch that OPENED a PR (propose-only), enforce the LOCKED
+/// D05 invariant that the fix PR is a DRAFT — never auto-merged. The CLOUD path
+/// only RELIES on Cursor Cloud's *documented* default of drafting a programmatic
+/// PR (an accepted external dependency, not app-forced), while this repo's
+/// `app-auto-merge.yml` arms squash auto-merge + posts an approval at PR
+/// CREATION for ANY `draft == false` same-repo PR. So DETECT a non-draft result
+/// and CONVERT it back to a draft; on an unverifiable state or a failed
+/// conversion, FAIL CLOSED with an operator-visible `log::warn!` alert (the
+/// established operator warning channel) and record the outcome under
+/// `outcome.details.draft_hardening` (surfaced in run detail / audit).
+///
+/// Gated on `trigger_kind == ui_fix_agent` (NOT merely `operator_type ==
+/// cursor_agent`), exactly like [`fix_agent_config_overlay`], so a plain
+/// rerun/backfill/child dispatch of the same operator — or any non-fix
+/// `cursor_agent` workflow — is NEVER touched. Runner-injected so the gate +
+/// fold + alert path is unit-testable with a fake.
+fn apply_cloud_fix_draft_hardening(
+    runner: &dyn crate::service::ProcessRunner,
+    cwd: Option<&str>,
+    operator_type: &str,
+    trigger_kind: Option<&str>,
+    outcome: &mut crate::operators::OperatorOutcome,
+) {
+    if operator_type != "cursor_agent"
+        || trigger_kind != Some(crate::service::FIX_AGENT_TRIGGER_KIND)
+    {
+        return;
+    }
+    // Only a dispatch that actually opened a PR needs hardening (a failed /
+    // poll-exhausted run may carry no `pr_url`).
+    let Some(pr_url) = outcome
+        .details
+        .get("pr_url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+    else {
+        return;
+    };
+
+    let result = crate::fix_cloud::harden_cloud_fix_pr_draft(runner, cwd, &pr_url);
+    if let crate::fix_cloud::CloudDraftHardening::Alerted { reason } = &result {
+        log::warn!(
+            "{}",
+            crate::fix_cloud::build_nondraft_alert(&pr_url, reason)
+        );
+    }
+    if let Some(obj) = outcome.details.as_object_mut() {
+        obj.insert(
+            "draft_hardening".to_string(),
+            crate::fix_cloud::hardening_detail(&result),
+        );
+    }
+}
+
 fn execute_typed_operator(
     db: &Arc<Database>,
     workspace_root: &str,
@@ -1712,7 +1768,7 @@ fn execute_typed_operator(
         input_json,
         &typed.config,
     );
-    let outcome = run_possibly_blocking(|| {
+    let mut outcome = run_possibly_blocking(|| {
         let runner = crate::service::SystemProcessRunner;
         let http = crate::operators::ReqwestHttpClient::default();
         let secrets = SchedulerSecretResolver { db: Arc::clone(db) };
@@ -1724,6 +1780,21 @@ fn execute_typed_operator(
             on_progress: &on_progress,
         };
         operator.execute(&ctx, &effective_config)
+    });
+    // D05 PR2e cloud non-draft hardening: a `ui_fix_agent` `cursor_agent`
+    // dispatch that opened a PR must land as a DRAFT (never auto-merged). Detect
+    // a non-draft result and convert it back; alert on failure. A no-op for
+    // every other dispatch. Wrapped like the operator above so a brief `gh`
+    // subprocess never blocks a tokio worker (the REST path reaches here from a
+    // multi-thread runtime). See [`apply_cloud_fix_draft_hardening`].
+    run_possibly_blocking(|| {
+        apply_cloud_fix_draft_hardening(
+            &crate::service::SystemProcessRunner,
+            Some(workspace_root),
+            &typed.operator_type,
+            trigger_kind,
+            &mut outcome,
+        );
     });
     let status = if outcome.success { "success" } else { "failed" };
     if let Some(attempt_id) = &attempt_id {
@@ -5181,6 +5252,123 @@ mod tests {
         assert_eq!(
             effective.get("auto_create_pr").and_then(|v| v.as_bool()),
             Some(true)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cloud_fix_draft_hardening_only_fires_for_a_ui_fix_agent_cursor_agent_pr() {
+        // D05 PR2e seam: the post-run draft hardening is gated on the fix trigger
+        // kind + a `cursor_agent` operator + an opened PR — exactly the same M2
+        // gate as the config overlay. Verify (1) a non-fix trigger is a NO-OP
+        // (never probes gh, never annotates), (2) a fix dispatch with a non-draft
+        // PR probes + converts and records the outcome, and (3) a fix dispatch
+        // with no `pr_url` (no PR opened) is a no-op.
+        use crate::service::ProcessRunner;
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{ExitStatus, Output};
+        use std::sync::Mutex;
+
+        struct CountingRunner {
+            view_stdout: String,
+            calls: Mutex<usize>,
+        }
+        impl ProcessRunner for CountingRunner {
+            fn run(
+                &self,
+                _program: &str,
+                args: &[String],
+                _cwd: Option<&str>,
+                _env: &[(String, String)],
+            ) -> std::io::Result<Output> {
+                *self.calls.lock().unwrap() += 1;
+                let stdout = if args.iter().any(|a| a == "view") {
+                    self.view_stdout.clone()
+                } else {
+                    String::new()
+                };
+                Ok(Output {
+                    status: ExitStatus::from_raw(0),
+                    stdout: stdout.into_bytes(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+
+        let pr_details = || serde_json::json!({ "pr_url": "https://github.com/o/r/pull/7" });
+
+        // (1) A NON-fix trigger with a pr_url must NOT probe gh nor annotate.
+        let runner = CountingRunner {
+            view_stdout: "false".into(),
+            calls: Mutex::new(0),
+        };
+        let mut outcome = crate::operators::OperatorOutcome {
+            success: true,
+            summary: "s".into(),
+            details: pr_details(),
+        };
+        apply_cloud_fix_draft_hardening(
+            &runner,
+            Some("/tmp"),
+            "cursor_agent",
+            Some("ui_rerun"),
+            &mut outcome,
+        );
+        assert_eq!(
+            *runner.calls.lock().unwrap(),
+            0,
+            "a non-fix trigger must not probe"
+        );
+        assert!(outcome.details.get("draft_hardening").is_none());
+
+        // (2) A ui_fix_agent cursor_agent dispatch with a NON-draft PR: probe +
+        // convert, and record the converted outcome in details.
+        let runner = CountingRunner {
+            view_stdout: "false".into(),
+            calls: Mutex::new(0),
+        };
+        let mut outcome = crate::operators::OperatorOutcome {
+            success: true,
+            summary: "s".into(),
+            details: pr_details(),
+        };
+        apply_cloud_fix_draft_hardening(
+            &runner,
+            Some("/tmp"),
+            "cursor_agent",
+            Some(crate::service::FIX_AGENT_TRIGGER_KIND),
+            &mut outcome,
+        );
+        assert!(
+            *runner.calls.lock().unwrap() >= 1,
+            "a fix dispatch probes the PR draft state"
+        );
+        assert_eq!(
+            outcome.details["draft_hardening"]["cloud_pr_draft"],
+            serde_json::json!("converted_to_draft")
+        );
+
+        // (3) A fix dispatch that opened NO PR (no pr_url) is a no-op.
+        let runner = CountingRunner {
+            view_stdout: "false".into(),
+            calls: Mutex::new(0),
+        };
+        let mut outcome = crate::operators::OperatorOutcome {
+            success: false,
+            summary: "s".into(),
+            details: serde_json::json!({ "status": "POLL_EXHAUSTED" }),
+        };
+        apply_cloud_fix_draft_hardening(
+            &runner,
+            Some("/tmp"),
+            "cursor_agent",
+            Some(crate::service::FIX_AGENT_TRIGGER_KIND),
+            &mut outcome,
+        );
+        assert_eq!(
+            *runner.calls.lock().unwrap(),
+            0,
+            "no pr_url => nothing to harden"
         );
     }
 

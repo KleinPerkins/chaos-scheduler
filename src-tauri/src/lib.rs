@@ -4,6 +4,7 @@ mod branding;
 mod commands;
 mod db;
 mod email;
+mod fix_cloud;
 mod fix_local;
 mod fix_worktree;
 mod mcp;
