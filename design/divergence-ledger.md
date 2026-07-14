@@ -2,7 +2,7 @@
 
 > **Gate:** `G01 Contract` of the Design-to-Code Completion roadmap
 > (`.cursor/plans/design-to-code_completion_7b6a5788.plan.md`).
-> **Status snapshot:** 2026-07-12 · off `origin/main`.
+> **Status snapshot:** 2026-07-13 · off `origin/main`.
 > **Scope:** every screen/state `F01–F24`, every component `C01–C41`, and every
 > design-revision (`DR01/DR02/DR03`) entry, plus the `D04` accepted-final
 > divergence register.
@@ -165,11 +165,19 @@ demo/transient states = 24.
   gate and the forced `auto_create_pr=false`; every other guardrail
   (opt-in/consent, rate cap, hard-guard duplicate dispatch, audit, prompt-fence,
   path confinement, idempotency) is retained. Figma-mock-first then code.
-- **G00 (hybrid) — first bless/mirror surface landed:** `F15 Settings` was mirrored
-  **code→design as v1** in Figma (frame `633:5682`, page `0:1`), built from
-  `cs.*`-bound master instances and verified against the committed
-  `settings-linux.png` baseline. This is the first G00 bless/mirror surface; further
-  shipped surfaces remain in progress (G00 otherwise still open).
+- **G00 (hybrid) — code→design MIRROR half now covers all shipped surfaces:** the
+  first bless/mirror surface was `F15 Settings` (v1 — frame `633:5682`, page `0:1`,
+  from `cs.*`-bound master instances, verified vs `settings-linux.png`); the mirror
+  now spans the full shipped set — DS masters (§2/§2a) + the admin surfaces
+  (`F12 Queues`/`F13 Environments`/`F14 Integrations`) + the workflow cluster
+  (`F07`/`F08` `723:6619`/`F09` `709:6514`/`F18` `736:6719`) + the `F17` tray popup
+  (`797:6823`, 384×590) + `F10` global run-detail (`803:6838`, 960×1447) + `F11`
+  global run-history (`813:6934`, 960×390) — all Dark-pinned, `cs.*`-bound, and
+  screenshot-verified against the committed Linux baselines (evidence §5b). The
+  **mirror half is therefore satisfied for shipped surfaces.** The **co-design half**
+  — incomplete Mission Control surfaces `F01/F03/F04/F05`, demo states
+  `F19/F22/F23`, and MC components `C12–C29` — remains **OPERATOR-GATED /
+  outstanding** (issues #301/#305/#306), so **G00 is NOT yet fully complete**.
 - **Repo is ahead of the roadmap baseline** for the Mission Control surfaces: the
   `D07` chart primitives are already composed into `Overview` (race-track,
   status donut, dual-axis trend), `OperationalHealth` (dual-axis), `NeedsAttention`
@@ -446,6 +454,63 @@ nodes.
 accurate** (live Dark `cs.*` values match `figma-tokens.json`); `G05`/`G08` Code
 Connect **live-confirmed** (Button set `113:526` → `src/components/Button.tsx`, all
 5 variants mapped).
+
+### 5b. `G00` code→design mirror — evidence (2026-07-13)
+
+The **code→design MIRROR half** of the hybrid `G00` gate now covers the full set of
+**shipped** surfaces. Each frame below was hand-built in file
+`twQmWC8dWT4tqeqIigNsRy`, page "Mission Control" `0:1`, pinned to **Dark**, bound
+**100% to `cs.*`**, and **screenshot-verified** against the committed Linux visual
+baseline. These join the earlier-blessed `F15 Settings` (`633:5682`) + the
+`F12 Queues` / `F13 Environments` / `F14 Integrations` admin surfaces + the DS master
+library (§2/§2a).
+
+| Surface                     | F-ID  | Figma frame | Size     | Verified vs Linux baseline |
+| --------------------------- | ----- | ----------- | -------- | -------------------------- |
+| Tray popup mini-dashboard   | `F17` | `797:6823`  | 384×590  | popup baseline             |
+| Global run-detail           | `F10` | `803:6838`  | 960×1447 | run-detail-full-dark       |
+| Global run-history          | `F11` | `813:6934`  | 960×390  | global-history             |
+| Workflow list               | `F07` | (cluster)   | —        | confirmed present          |
+| Workflow detail             | `F08` | `723:6619`  | —        | confirmed present          |
+| Workflow builder / editor   | `F09` | `709:6514`  | —        | confirmed present          |
+| Workflow-scoped run history | `F18` | `736:6719`  | —        | confirmed present          |
+
+- **Workflow cluster (`F07`/`F08`/`F09`/`F18`)** was previously confirmed present,
+  audited faithful, and `cs.*`-bound; this pass **extended the `WorkflowEditor` mirror
+  `709:6514` below-the-fold** (Runtime & notifications, success/failure action rows,
+  advanced trigger/queue JSON).
+- **Consistency fixes on blessed frames:** Dark-pinned `WorkflowDetail` `723:6619` and
+  `RunHistory` `736:6719`; success-badge text rebound to `status/success/text`;
+  raw-white text rebound to `cs.text/inverse`.
+- **Audit:** **zero** unbound raw-hex SOLID fills/strokes across all hand-built nodes;
+  only the accepted env-badge runtime hex remains (the `AD2` dynamic-environment
+  badge).
+
+**Net.** The `G00` **mirror half** is **satisfied for shipped surfaces**: the DS
+masters (§2/§2a), the admin surfaces, the workflow cluster, the popup (`797:6823`),
+run-detail (`803:6838`), and global-history (`813:6934`), together with the shipped
+`D04` accepted-final divergences as-built on those surfaces (the formal `AD1–AD11`
+annotation reflection stays `G12`, §3a / issue #302). The **co-design half** —
+incomplete MC surfaces `F01/F03/F04/F05`, demo states `F19/F22/F23`, and components
+`C12–C29` — remains **OPERATOR-GATED / outstanding** (issues #301/#305/#306). **`G00`
+is NOT marked fully complete.**
+
+### 5c. `G12`/`G13` rollback-drill — evidence (2026-07-13)
+
+The release/rollback path was exercised **read-only / non-destructively** (Lane 8):
+
+- `scripts/guard-latest-release.mjs --dry-run` + `scripts/smoke-latest-json.mjs` both
+  ran and **passed (GREEN)**.
+- GitHub's **"Latest"** flag is pinned to tag **`v1.5.0`**; the live
+  `releases/latest/download/latest.json` is valid and serves **6 signed platform
+  artifacts**.
+- A **LIVE re-pin was unnecessary** and **remains operator-gated** (only on an
+  explicit operator go).
+
+This satisfies the **non-destructive** half of the `G12`/`G13` rollback drill — the
+release/rollback path is proven exercisable read-only. The live re-pin and the
+`AD1–AD11` Figma divergence reflection (§3a, issue #302) remain outstanding for full
+`G12`.
 
 ---
 
