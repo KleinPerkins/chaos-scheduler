@@ -693,11 +693,21 @@ impl CursorAgentOperator {
         let success = is_success_status(&terminal_status);
         // `git` is a per-agent snapshot returned on the run body once a branch
         // has been pushed: `{ branches: [{ repoUrl, branch?, prUrl? }] }`.
-        let pr_url = last_body
+        let branches = last_body
             .get("git")
             .and_then(|g| g.get("branches"))
-            .and_then(|b| b.as_array())
+            .and_then(|b| b.as_array());
+        let pr_url = branches
             .and_then(|branches| branches.iter().find_map(|b| b.get("prUrl")))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        // D05 PR2e (Option C): also surface the PUSHED branch. Under the
+        // cloud fix path the agent is forced `auto_create_pr=false`, so it only
+        // pushes a `cursor/…` branch and opens NO PR — the SCHEDULER then opens
+        // the DRAFT PR against this branch (born-draft ⇒ auto-merge-ineligible).
+        // See `crate::fix_cloud` / `scheduler::apply_cloud_fix_draft_hardening`.
+        let pushed_branch = branches
+            .and_then(|branches| branches.iter().find_map(|b| b.get("branch")))
             .and_then(|v| v.as_str())
             .map(str::to_string);
         let summary_text = last_body
@@ -716,6 +726,7 @@ impl CursorAgentOperator {
                 "poll_attempts": poll_attempts,
                 "poll_interval_ms": poll_interval_ms,
                 "pr_url": pr_url,
+                "pushed_branch": pushed_branch,
                 "result": last_body,
             }),
         }
@@ -1479,6 +1490,60 @@ mod tests {
         assert!(
             !details_str.contains("sk-secret"),
             "secret must not leak into details"
+        );
+    }
+
+    #[test]
+    fn cursor_agent_cloud_surfaces_the_pushed_branch_without_a_pr() {
+        // D05 PR2e (Option C): with `auto_create_pr=false` the cloud agent only
+        // PUSHES a `cursor/…` branch and opens NO PR. The outcome must surface
+        // that branch (so the scheduler can open the born-draft PR itself) and
+        // carry a null `pr_url`.
+        let runner = FakeRunner {
+            code: 0,
+            calls: Mutex::new(vec![]),
+        };
+        let http = MockHttp {
+            launch: serde_json::json!({"agent": {"id": "bc_5"}, "run": {"id": "run_5", "status": "RUNNING"}}),
+            polls: Mutex::new(vec![serde_json::json!({
+                "id": "run_5",
+                "status": "FINISHED",
+                "result": "pushed",
+                "git": { "branches": [{ "repoUrl": "https://github.com/acme/app", "branch": "cursor/fix-abc123" }] }
+            })]),
+            get_count: Mutex::new(0),
+            posted: Mutex::new(vec![]),
+        };
+        let mut secrets = HashMap::new();
+        secrets.insert("cursor_api_key".to_string(), "sk-secret".to_string());
+        let secrets = MapSecrets(secrets);
+        let ctx = cursor_ctx(&runner, &http, &secrets);
+        let outcome = CursorAgentOperator.execute(
+            &ctx,
+            &serde_json::json!({
+                "mode": "cloud",
+                "prompt": "fix the bug",
+                "repository": "acme/app",
+                "auto_create_pr": false,
+                "poll_interval_ms": 0
+            }),
+        );
+        assert!(outcome.success, "FINISHED => success: {}", outcome.summary);
+        assert_eq!(
+            outcome.details["pushed_branch"],
+            serde_json::json!("cursor/fix-abc123"),
+            "the pushed cursor/ branch is surfaced for the scheduler to open the PR"
+        );
+        assert_eq!(
+            outcome.details["pr_url"],
+            serde_json::Value::Null,
+            "the agent opened NO PR (auto_create_pr=false)"
+        );
+        // auto_create_pr=false must NOT set autoCreatePR on the launch payload.
+        let posted = http.posted.lock().unwrap();
+        assert!(
+            posted[0].1.get("autoCreatePR").is_none(),
+            "auto_create_pr=false leaves autoCreatePR off the launch payload"
         );
     }
 

@@ -288,11 +288,12 @@ impl std::error::Error for ManualDispatchError {}
 
 /// Trigger kind stamped on every Cursor fix-agent dispatch (D05 / F10). It is
 /// the SOLE key the operator seam keys the prompt overlay + forced
-/// `auto_create_pr=true` (propose-only DRAFT PR) on (see
-/// `scheduler::execute_typed_operator`), so a plain rerun/backfill/child
-/// dispatch of the same `cursor_agent` workflow — which never carries this kind
-/// — is NEVER hijacked. Exported so the seam and tests reference one constant,
-/// never a re-typed literal.
+/// `auto_create_pr=false` (D05 PR2e Option C: the agent opens NO PR — it only
+/// pushes its `cursor/…` branch and the SCHEDULER opens a born-DRAFT PR) on (see
+/// `scheduler::execute_typed_operator` + `scheduler::apply_cloud_fix_draft_hardening`),
+/// so a plain rerun/backfill/child dispatch of the same `cursor_agent` workflow —
+/// which never carries this kind — is NEVER hijacked. Exported so the seam and
+/// tests reference one constant, never a re-typed literal.
 pub const FIX_AGENT_TRIGGER_KIND: &str = "ui_fix_agent";
 
 /// Trigger kind for the D05 LOCAL fix-agent's source RERUN. RESERVED for the
@@ -1038,15 +1039,18 @@ fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
 ///
 /// - (app-forced) the app has NO PR-merge code path AND the seam never sets
 ///   `workOnCurrentBranch`, so the agent always pushes to a NEW branch and only
-///   opens a PR — a fix is NEVER auto-merged and NEVER auto-applied to the
+///   pushes it — a fix is NEVER auto-merged and NEVER auto-applied to the
 ///   running system (B3);
-/// - (app-forced) at execution the seam FORCES `auto_create_pr=true`, so a
-///   dispatch always yields a reviewable PR rather than a silent branch;
-/// - (external default) the opened PR being a DRAFT is Cursor Cloud's documented
-///   default for a programmatic dispatch — an accepted external dependency, NOT
-///   something this code byte-forces.
+/// - (app-forced) at execution the seam FORCES `auto_create_pr=false`, so the
+///   agent opens NO PR of its own; the SCHEDULER then opens a born-`--draft` PR
+///   against the pushed `cursor/…` branch (D05 PR2e Option C, see
+///   `scheduler::apply_cloud_fix_draft_hardening` + `crate::fix_cloud`);
+/// - (app-forced) that scheduler-opened PR is byte-forced `--draft` ⇒
+///   auto-merge-INELIGIBLE ⇒ race-free — the draft posture is NO LONGER an
+///   accepted external dependency on Cursor Cloud's default (as it was in #284).
 ///
-/// A human always reviews + merges, backed by the human-consent + rate gates (B4).
+/// A human always reviews + marks ready / merges, backed by the human-consent +
+/// rate gates (B4).
 fn build_fix_agent_prompt(workflow_name: &str, run: &Run) -> String {
     let raw_stderr = run.stderr.as_deref().unwrap_or("");
     // Neutralize the fence delimiter inside the untrusted text so it cannot
@@ -1369,10 +1373,11 @@ impl SchedulerService {
     /// rides `input_json` ONLY — never `payload` (which feeds the idempotency
     /// fingerprint). It supplies ONLY the prompt; repository / mode /
     /// `auto_create_pr` are read from the fix workflow's stored CONFIG at
-    /// execution, where the seam forces `auto_create_pr=true` so the agent opens
-    /// a reviewable DRAFT PR (the B3 prompt-only whitelist + forced-draft overlay
-    /// live on the operator seam). Never mutates the source run. Writes ONE audit
-    /// row (no prompt body).
+    /// execution, where the seam forces `auto_create_pr=false` so the agent opens
+    /// NO PR and the SCHEDULER opens a born-DRAFT PR against the pushed branch
+    /// (D05 PR2e Option C; the B3 prompt-only whitelist + forced-no-auto-PR
+    /// overlay live on the operator seam). Never mutates the source run. Writes
+    /// ONE audit row (no prompt body).
     pub fn dispatch_fix_agent(
         &self,
         workspace_root: &str,
@@ -3107,7 +3112,8 @@ mod tests {
     /// Seed a `cursor_agent` typed fix workflow in `environment` whose queue has
     /// an UNMET dependency, so a dispatch QUEUES (never executes → no real HTTP
     /// to the Cursor API). The stored config carries a secret NAME and
-    /// `auto_create_pr:true` so the leak / whitelist tests have bait to catch.
+    /// `auto_create_pr:true` so the leak / whitelist tests have bait to catch
+    /// (the D05 PR2e Option C overlay must OVERRIDE that stored true to false).
     fn seed_cursor_fix_workflow(db: &Arc<Database>, name: &str, environment: &str) -> String {
         let wf = db
             .create_workflow(

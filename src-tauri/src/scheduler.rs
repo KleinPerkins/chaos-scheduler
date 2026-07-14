@@ -1601,14 +1601,23 @@ fn run_possibly_blocking<T>(f: impl FnOnce() -> T) -> T {
 /// - overlays ONLY the `prompt` from `input_json` — a strict WHITELIST: no other
 ///   `input_json` field (`repository` / `auto_create_pr` / `workOnCurrentBranch`
 ///   / `api_key_secret` / …) can reach the operator config, and
-/// - FORCES `auto_create_pr = true` regardless of the stored config OR any value
-///   smuggled in `input_json` (capability forced AT EXECUTION, not merely
-///   defaulted). This is the PROPOSE-ONLY posture: Cursor Cloud opens the result
-///   as a reviewable DRAFT PR for a programmatic dispatch (its documented
-///   behavior), and — because the seam never sets `workOnCurrentBranch` — the
-///   agent always pushes to a NEW branch and only opens a PR; it never commits to
-///   an existing PR head or the base ref. The app has no PR-merge code path, so
-///   a fix is NEVER auto-merged and NEVER auto-applied to the running system.
+/// - FORCES `auto_create_pr = false` regardless of the stored config OR any value
+///   smuggled in `input_json` (forced AT EXECUTION, not merely defaulted).
+///
+/// **D05 PR2e — Option C (race-free born-draft).** The cloud agent is forced to
+/// push its `cursor/…` branch and open NO PR of its own; the SCHEDULER then
+/// opens a DRAFT PR against that branch (see
+/// [`apply_cloud_fix_draft_hardening`] + [`crate::fix_cloud`]). This REVERSES
+/// #284's "the cloud agent opens the PR" mechanism: a Cursor-opened PR is born
+/// NON-draft, and this repo's `app-auto-merge.yml` arms squash auto-merge + posts
+/// an approval at PR CREATION for ANY `draft == false` same-repo PR — so a
+/// machine-authored fix could auto-merge before a human reviews. A
+/// scheduler-opened `--draft` PR is born-draft ⇒ auto-merge-INELIGIBLE ⇒
+/// race-free (no window in which a non-draft cloud fix PR exists), unifying the
+/// CLOUD path with the LOCAL path (which already opens its own draft PR).
+/// Because the seam never sets `workOnCurrentBranch`, the agent always pushes to
+/// a NEW branch; the app has no PR-merge code path, so a fix is NEVER
+/// auto-merged and NEVER auto-applied to the running system.
 ///
 /// repository / mode / model / api_key_secret therefore ALWAYS come from the
 /// designated fix workflow's STORED config, never from caller-supplied input.
@@ -1639,34 +1648,49 @@ fn fix_agent_config_overlay<'a>(
     {
         obj.insert("prompt".to_string(), Value::String(prompt.to_string()));
     }
-    // Propose-only: a fix-agent dispatch ALWAYS opens a reviewable draft PR
-    // (Cursor Cloud drafts programmatic PRs) and never a silent direct push.
-    obj.insert("auto_create_pr".to_string(), Value::Bool(true));
+    // Option C: FORCE the agent to open NO PR — it only pushes its `cursor/…`
+    // branch. The scheduler then opens a born-DRAFT PR against that branch, so a
+    // machine fix is never a non-draft (auto-merge-eligible) PR at any moment.
+    obj.insert("auto_create_pr".to_string(), Value::Bool(false));
     std::borrow::Cow::Owned(Value::Object(obj))
 }
 
-/// D05 PR2e — cloud non-draft hardening seam. For a `ui_fix_agent`
-/// `cursor_agent` dispatch that OPENED a PR (propose-only), enforce the LOCKED
-/// D05 invariant that the fix PR is a DRAFT — never auto-merged. The CLOUD path
-/// only RELIES on Cursor Cloud's *documented* default of drafting a programmatic
-/// PR (an accepted external dependency, not app-forced), while this repo's
-/// `app-auto-merge.yml` arms squash auto-merge + posts an approval at PR
-/// CREATION for ANY `draft == false` same-repo PR. So DETECT a non-draft result
-/// and CONVERT it back to a draft; on an unverifiable state or a failed
-/// conversion, FAIL CLOSED with an operator-visible `log::warn!` alert (the
-/// established operator warning channel) and record the outcome under
-/// `outcome.details.draft_hardening` (surfaced in run detail / audit).
+/// D05 PR2e — cloud non-draft hardening seam, **Option C (race-free born-draft)**.
+/// For a `ui_fix_agent` `cursor_agent` dispatch, enforce the LOCKED D05 invariant
+/// that the fix PR is a DRAFT — never auto-merged — with NO window in which a
+/// non-draft cloud fix PR exists.
 ///
-/// Gated on `trigger_kind == ui_fix_agent` (NOT merely `operator_type ==
-/// cursor_agent`), exactly like [`fix_agent_config_overlay`], so a plain
-/// rerun/backfill/child dispatch of the same operator — or any non-fix
-/// `cursor_agent` workflow — is NEVER touched. Runner-injected so the gate +
-/// fold + alert path is unit-testable with a fake.
+/// The config overlay forces `auto_create_pr=false`, so the cloud agent ONLY
+/// pushes its `cursor/…` branch (surfaced as `outcome.details.pushed_branch`) and
+/// opens NO PR. This seam then:
+///
+/// - **PRIMARY** — on a pushed, VALIDATED branch with NO `pr_url`, the SCHEDULER
+///   opens the born-`--draft` PR itself (`gh pr create --draft --base main --head
+///   <branch>`, [`crate::fix_cloud::open_cloud_fix_draft_pr`]). Born-draft ⇒
+///   auto-merge-INELIGIBLE ⇒ race-free.
+/// - **FALLBACK** (defense-in-depth) — if a future Cursor change ignores the flag
+///   and the agent UNEXPECTEDLY returns a `pr_url`, the born-draft primary cannot
+///   apply, so DETECT the PR's draft state and CONVERT a non-draft back to a draft
+///   ([`crate::fix_cloud::harden_cloud_fix_pr_draft`]).
+/// - **FAIL CLOSED** — a pushed branch whose name fails validation is REFUSED (no
+///   PR opened); an unverifiable/failed convert or a failed open raises an
+///   operator-visible `log::warn!` alert. Every outcome is recorded under
+///   `outcome.details.draft_hardening` (surfaced in run detail / audit).
+///
+/// The born-draft vs convert-to-draft split is expressed by the pure
+/// [`crate::fix_cloud::decide_cloud_fix_pr_action`]. Gated on `trigger_kind ==
+/// ui_fix_agent` (NOT merely `operator_type == cursor_agent`), exactly like
+/// [`fix_agent_config_overlay`], so a plain rerun/backfill/child dispatch of the
+/// same operator — or any non-fix `cursor_agent` workflow — is NEVER touched.
+/// `workflow_name` + `run_id` feed the app-authored PR title/body (never agent
+/// free-text). Runner-injected so the whole path is unit-testable with a fake.
 fn apply_cloud_fix_draft_hardening(
     runner: &dyn crate::service::ProcessRunner,
     cwd: Option<&str>,
     operator_type: &str,
     trigger_kind: Option<&str>,
+    workflow_name: &str,
+    run_id: &str,
     outcome: &mut crate::operators::OperatorOutcome,
 ) {
     if operator_type != "cursor_agent"
@@ -1674,30 +1698,76 @@ fn apply_cloud_fix_draft_hardening(
     {
         return;
     }
-    // Only a dispatch that actually opened a PR needs hardening (a failed /
-    // poll-exhausted run may carry no `pr_url`).
-    let Some(pr_url) = outcome
+    use crate::fix_cloud;
+    let pr_url = outcome
         .details
         .get("pr_url")
         .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-    else {
-        return;
-    };
+        .map(str::to_string);
+    let pushed_branch = outcome
+        .details
+        .get("pushed_branch")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
-    let result = crate::fix_cloud::harden_cloud_fix_pr_draft(runner, cwd, &pr_url);
-    if let crate::fix_cloud::CloudDraftHardening::Alerted { reason } = &result {
-        log::warn!(
-            "{}",
-            crate::fix_cloud::build_nondraft_alert(&pr_url, reason)
-        );
-    }
+    let detail =
+        match fix_cloud::decide_cloud_fix_pr_action(pr_url.as_deref(), pushed_branch.as_deref()) {
+            // Nothing pushed and no PR (a failed / poll-exhausted run) — no-op.
+            fix_cloud::CloudFixPrAction::Noop => return,
+            // PRIMARY (race-free): the agent pushed a `cursor/…` branch and opened no
+            // PR — the scheduler opens the born-DRAFT PR against it.
+            fix_cloud::CloudFixPrAction::OpenDraftPr { branch } => {
+                let title = fix_cloud::build_cloud_fix_pr_title(workflow_name, run_id);
+                let body = fix_cloud::build_cloud_fix_pr_body(workflow_name, run_id, &branch);
+                match fix_cloud::open_cloud_fix_draft_pr(
+                    runner,
+                    cwd,
+                    fix_cloud::FIX_CLOUD_PR_BASE,
+                    &branch,
+                    &title,
+                    &body,
+                ) {
+                    fix_cloud::CloudDraftPrOpen::Opened { pr_url } => {
+                        fix_cloud::opened_draft_detail(&branch, pr_url.as_deref())
+                    }
+                    fix_cloud::CloudDraftPrOpen::Failed => {
+                        log::warn!(
+                            "{}",
+                            fix_cloud::build_cloud_open_alert(
+                                &branch,
+                                fix_cloud::CLOUD_DRAFT_OPEN_FAILED_REASON,
+                            )
+                        );
+                        fix_cloud::alert_detail(fix_cloud::CLOUD_DRAFT_OPEN_FAILED_REASON)
+                    }
+                }
+            }
+            // FALLBACK (defense-in-depth): the agent unexpectedly opened a PR itself
+            // (a future Cursor change ignored auto_create_pr=false) — ensure it is a
+            // draft via the detect→convert path.
+            fix_cloud::CloudFixPrAction::HardenExistingPr { pr_url } => {
+                let result = fix_cloud::harden_cloud_fix_pr_draft(runner, cwd, &pr_url);
+                if let fix_cloud::CloudDraftHardening::Alerted { reason } = &result {
+                    log::warn!("{}", fix_cloud::build_nondraft_alert(&pr_url, reason));
+                }
+                fix_cloud::hardening_detail(&result)
+            }
+            // FAIL CLOSED: a pushed branch whose name failed validation — refuse to
+            // open a PR against it (never trust an injection-y `--head` value).
+            fix_cloud::CloudFixPrAction::AlertInvalidBranch { branch } => {
+                log::warn!(
+                    "{}",
+                    fix_cloud::build_cloud_open_alert(
+                        &branch,
+                        fix_cloud::CLOUD_INVALID_BRANCH_REASON
+                    )
+                );
+                fix_cloud::alert_detail(fix_cloud::CLOUD_INVALID_BRANCH_REASON)
+            }
+        };
+
     if let Some(obj) = outcome.details.as_object_mut() {
-        obj.insert(
-            "draft_hardening".to_string(),
-            crate::fix_cloud::hardening_detail(&result),
-        );
+        obj.insert("draft_hardening".to_string(), detail);
     }
 }
 
@@ -1705,7 +1775,7 @@ fn execute_typed_operator(
     db: &Arc<Database>,
     workspace_root: &str,
     run_id: &str,
-    _workflow: &Workflow,
+    workflow: &Workflow,
     typed: &crate::workflow_spec::TypedSpec,
     trigger_kind: Option<&str>,
     input_json: Option<&str>,
@@ -1781,18 +1851,21 @@ fn execute_typed_operator(
         };
         operator.execute(&ctx, &effective_config)
     });
-    // D05 PR2e cloud non-draft hardening: a `ui_fix_agent` `cursor_agent`
-    // dispatch that opened a PR must land as a DRAFT (never auto-merged). Detect
-    // a non-draft result and convert it back; alert on failure. A no-op for
-    // every other dispatch. Wrapped like the operator above so a brief `gh`
-    // subprocess never blocks a tokio worker (the REST path reaches here from a
-    // multi-thread runtime). See [`apply_cloud_fix_draft_hardening`].
+    // D05 PR2e cloud non-draft hardening (Option C): a `ui_fix_agent`
+    // `cursor_agent` dispatch pushes a `cursor/…` branch and opens NO PR — the
+    // scheduler opens the born-DRAFT PR itself (race-free), with a
+    // convert-to-draft FALLBACK if a future Cursor change unexpectedly opens a PR.
+    // A no-op for every other dispatch. Wrapped like the operator above so the
+    // brief `gh` subprocess(es) never block a tokio worker (the REST path reaches
+    // here from a multi-thread runtime). See [`apply_cloud_fix_draft_hardening`].
     run_possibly_blocking(|| {
         apply_cloud_fix_draft_hardening(
             &crate::service::SystemProcessRunner,
             Some(workspace_root),
             &typed.operator_type,
             trigger_kind,
+            &workflow.name,
+            run_id,
             &mut outcome,
         );
     });
@@ -5128,21 +5201,23 @@ mod tests {
     // ---- D05 / F10: fix-agent operator-config overlay (seam) -------------
 
     #[test]
-    fn fix_agent_overlay_whitelists_prompt_and_forces_draft_pr() {
-        // PROPOSE-ONLY policy: the fix-agent seam FORCES `auto_create_pr = true`
-        // so Cursor Cloud opens a reviewable DRAFT PR (its documented behavior
-        // for a programmatic dispatch). Attacker-influenced input cannot flip
-        // this: it tries to SUPPRESS the PR (`auto_create_pr:false`), push
-        // straight to an existing branch (`workOnCurrentBranch:true`), and
-        // redirect the repository — all must be ignored (strict prompt-only
-        // whitelist), and the capability is forced by the backend regardless.
+    fn fix_agent_overlay_whitelists_prompt_and_forces_no_auto_pr() {
+        // OPTION C (race-free): the fix-agent seam FORCES `auto_create_pr = false`
+        // so the cloud agent only PUSHES its `cursor/…` branch and opens NO PR —
+        // the scheduler then opens a born-DRAFT PR. Attacker-influenced input
+        // cannot flip this: it tries to FORCE the agent to open the PR itself
+        // (`auto_create_pr:true` — which would be born NON-draft and could
+        // auto-merge), push straight to an existing branch
+        // (`workOnCurrentBranch:true`), and redirect the repository — all must be
+        // ignored (strict prompt-only whitelist), and `auto_create_pr` is forced
+        // false by the backend regardless of stored OR input.
         let stored = serde_json::json!({
             "repository": "https://github.com/owner/repo",
             "prompt": "STORED PROMPT",
-            "auto_create_pr": false,
+            "auto_create_pr": true,
             "api_key_secret": "cursor_api_key"
         });
-        let input = r#"{"prompt":"DIAGNOSTIC PROMPT","auto_create_pr":false,"workOnCurrentBranch":true,"repository":"https://github.com/attacker/evil"}"#;
+        let input = r#"{"prompt":"DIAGNOSTIC PROMPT","auto_create_pr":true,"workOnCurrentBranch":true,"repository":"https://github.com/attacker/evil"}"#;
 
         let effective = fix_agent_config_overlay(
             "cursor_agent",
@@ -5156,11 +5231,12 @@ mod tests {
             effective.get("prompt").and_then(|v| v.as_str()),
             Some("DIAGNOSTIC PROMPT")
         );
-        // ...auto_create_pr is FORCED true despite stored+input asking for false
-        // (a fix dispatch always opens a draft PR — never a silent direct push)...
+        // ...auto_create_pr is FORCED false despite stored+input asking for true
+        // (the agent never opens the PR itself — the scheduler opens a born-draft
+        // PR against the pushed branch)...
         assert_eq!(
             effective.get("auto_create_pr").and_then(|v| v.as_bool()),
-            Some(true)
+            Some(false)
         );
         // ...repository stays the STORED value (input's is ignored — whitelist)...
         assert_eq!(
@@ -5227,14 +5303,15 @@ mod tests {
     }
 
     #[test]
-    fn fix_agent_overlay_forces_draft_pr_without_input_prompt() {
-        // A fix-agent dispatch with no usable input prompt still forces the
-        // draft-PR capability (`auto_create_pr = true`) even when the stored
-        // config disabled it; the stored prompt is left in place.
+    fn fix_agent_overlay_forces_no_auto_pr_without_input_prompt() {
+        // A fix-agent dispatch with no usable input prompt still FORCES
+        // `auto_create_pr = false` (the agent opens no PR; the scheduler opens
+        // the born-draft PR) even when the stored config enabled it; the stored
+        // prompt is left in place.
         let stored = serde_json::json!({
             "repository": "https://github.com/o/r",
             "prompt": "STORED",
-            "auto_create_pr": false
+            "auto_create_pr": true
         });
 
         let effective = fix_agent_config_overlay(
@@ -5251,37 +5328,50 @@ mod tests {
         );
         assert_eq!(
             effective.get("auto_create_pr").and_then(|v| v.as_bool()),
-            Some(true)
+            Some(false)
         );
     }
 
     #[test]
     #[cfg(unix)]
-    fn cloud_fix_draft_hardening_only_fires_for_a_ui_fix_agent_cursor_agent_pr() {
-        // D05 PR2e seam: the post-run draft hardening is gated on the fix trigger
-        // kind + a `cursor_agent` operator + an opened PR — exactly the same M2
-        // gate as the config overlay. Verify (1) a non-fix trigger is a NO-OP
-        // (never probes gh, never annotates), (2) a fix dispatch with a non-draft
-        // PR probes + converts and records the outcome, and (3) a fix dispatch
-        // with no `pr_url` (no PR opened) is a no-op.
+    fn cloud_fix_draft_hardening_option_c_routes_primary_fallback_and_gate() {
+        // D05 PR2e Option C seam: gated on the fix trigger kind + a `cursor_agent`
+        // operator (the same M2 gate as the config overlay). Verify the routing:
+        // (1) a non-fix trigger is a NO-OP (never runs gh, never annotates);
+        // (2) PRIMARY — a fix dispatch with a pushed `cursor/…` branch + no
+        //     pr_url has the SCHEDULER open a born-draft PR (`gh pr create
+        //     --draft --base main --head <branch>`) and records `opened_draft`;
+        // (3) FALLBACK — a fix dispatch that UNEXPECTEDLY carries a pr_url (a
+        //     future Cursor change ignored auto_create_pr=false) probes + converts
+        //     the existing PR and records `converted_to_draft`;
+        // (4) a fix dispatch that pushed nothing + opened no PR is a no-op.
         use crate::service::ProcessRunner;
         use std::os::unix::process::ExitStatusExt;
         use std::process::{ExitStatus, Output};
         use std::sync::Mutex;
 
-        struct CountingRunner {
+        struct RecordingRunner {
             view_stdout: String,
-            calls: Mutex<usize>,
+            calls: Mutex<Vec<Vec<String>>>,
         }
-        impl ProcessRunner for CountingRunner {
+        impl RecordingRunner {
+            fn argvs(&self) -> Vec<Vec<String>> {
+                self.calls.lock().unwrap().clone()
+            }
+        }
+        impl ProcessRunner for RecordingRunner {
             fn run(
                 &self,
-                _program: &str,
+                program: &str,
                 args: &[String],
                 _cwd: Option<&str>,
                 _env: &[(String, String)],
             ) -> std::io::Result<Output> {
-                *self.calls.lock().unwrap() += 1;
+                let mut argv = vec![program.to_string()];
+                argv.extend_from_slice(args);
+                self.calls.lock().unwrap().push(argv);
+                // `gh pr view … --jq .isDraft` echoes the scripted draft state;
+                // `gh pr create` / `gh pr ready` succeed with empty stdout.
                 let stdout = if args.iter().any(|a| a == "view") {
                     self.view_stdout.clone()
                 } else {
@@ -5295,63 +5385,109 @@ mod tests {
             }
         }
 
-        let pr_details = || serde_json::json!({ "pr_url": "https://github.com/o/r/pull/7" });
-
-        // (1) A NON-fix trigger with a pr_url must NOT probe gh nor annotate.
-        let runner = CountingRunner {
+        // (1) A NON-fix trigger (even with a pr_url) must NOT run gh nor annotate.
+        let runner = RecordingRunner {
             view_stdout: "false".into(),
-            calls: Mutex::new(0),
+            calls: Mutex::new(vec![]),
         };
         let mut outcome = crate::operators::OperatorOutcome {
             success: true,
             summary: "s".into(),
-            details: pr_details(),
+            details: serde_json::json!({ "pr_url": "https://github.com/o/r/pull/7" }),
         };
         apply_cloud_fix_draft_hardening(
             &runner,
             Some("/tmp"),
             "cursor_agent",
             Some("ui_rerun"),
+            "Fix WF",
+            "run-1",
             &mut outcome,
         );
-        assert_eq!(
-            *runner.calls.lock().unwrap(),
-            0,
-            "a non-fix trigger must not probe"
+        assert!(
+            runner.argvs().is_empty(),
+            "a non-fix trigger must not run gh"
         );
         assert!(outcome.details.get("draft_hardening").is_none());
 
-        // (2) A ui_fix_agent cursor_agent dispatch with a NON-draft PR: probe +
-        // convert, and record the converted outcome in details.
-        let runner = CountingRunner {
+        // (2) PRIMARY: pushed cursor/ branch, no pr_url => the scheduler opens the
+        // born-draft PR itself and records opened_draft.
+        let runner = RecordingRunner {
             view_stdout: "false".into(),
-            calls: Mutex::new(0),
+            calls: Mutex::new(vec![]),
         };
         let mut outcome = crate::operators::OperatorOutcome {
             success: true,
             summary: "s".into(),
-            details: pr_details(),
+            details: serde_json::json!({ "pushed_branch": "cursor/fix-xyz", "pr_url": null }),
         };
         apply_cloud_fix_draft_hardening(
             &runner,
             Some("/tmp"),
             "cursor_agent",
             Some(crate::service::FIX_AGENT_TRIGGER_KIND),
+            "Fix WF",
+            "run-2",
             &mut outcome,
         );
+        let argvs = runner.argvs();
+        assert_eq!(argvs.len(), 1, "the scheduler runs exactly one gh command");
+        assert_eq!(
+            &argvs[0][..7],
+            &["gh", "pr", "create", "--draft", "--base", "main", "--head"],
+            "the scheduler opens a born --draft PR against main"
+        );
+        assert_eq!(argvs[0][7], "cursor/fix-xyz", "…--head <pushed branch>");
         assert!(
-            *runner.calls.lock().unwrap() >= 1,
-            "a fix dispatch probes the PR draft state"
+            !argvs[0].iter().any(|a| a == "--auto" || a == "merge"),
+            "the scheduler never arms auto-merge / merges"
+        );
+        assert_eq!(
+            outcome.details["draft_hardening"]["cloud_pr_draft"],
+            serde_json::json!("opened_draft")
+        );
+        assert_eq!(
+            outcome.details["draft_hardening"]["branch"],
+            serde_json::json!("cursor/fix-xyz")
+        );
+
+        // (3) FALLBACK: an unexpected pr_url => probe + convert the EXISTING PR.
+        let runner = RecordingRunner {
+            view_stdout: "false".into(),
+            calls: Mutex::new(vec![]),
+        };
+        let mut outcome = crate::operators::OperatorOutcome {
+            success: true,
+            summary: "s".into(),
+            details: serde_json::json!({ "pr_url": "https://github.com/o/r/pull/7" }),
+        };
+        apply_cloud_fix_draft_hardening(
+            &runner,
+            Some("/tmp"),
+            "cursor_agent",
+            Some(crate::service::FIX_AGENT_TRIGGER_KIND),
+            "Fix WF",
+            "run-3",
+            &mut outcome,
+        );
+        let argvs = runner.argvs();
+        assert!(
+            argvs.iter().any(|a| a.iter().any(|x| x == "view")),
+            "the fallback probes the existing PR draft state"
+        );
+        assert!(
+            argvs.iter().all(|a| !a.iter().any(|x| x == "create")),
+            "the fallback never opens a NEW PR (the PR already exists)"
         );
         assert_eq!(
             outcome.details["draft_hardening"]["cloud_pr_draft"],
             serde_json::json!("converted_to_draft")
         );
 
-        // (3) A fix dispatch that opened NO PR (no pr_url) is a no-op.
-        let runner = CountingRunner {
+        // (4) Nothing pushed + no PR (poll-exhausted) => no-op.
+        let runner = RecordingRunner {
             view_stdout: "false".into(),
-            calls: Mutex::new(0),
+            calls: Mutex::new(vec![]),
         };
         let mut outcome = crate::operators::OperatorOutcome {
             success: false,
@@ -5363,13 +5499,15 @@ mod tests {
             Some("/tmp"),
             "cursor_agent",
             Some(crate::service::FIX_AGENT_TRIGGER_KIND),
+            "Fix WF",
+            "run-4",
             &mut outcome,
         );
-        assert_eq!(
-            *runner.calls.lock().unwrap(),
-            0,
-            "no pr_url => nothing to harden"
+        assert!(
+            runner.argvs().is_empty(),
+            "no branch + no pr_url => nothing to do"
         );
+        assert!(outcome.details.get("draft_hardening").is_none());
     }
 
     #[test]
