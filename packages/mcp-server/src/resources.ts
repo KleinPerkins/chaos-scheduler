@@ -81,6 +81,35 @@ export function resourceIdentifier(uri: URL, value: unknown): string {
   return id;
 }
 
+async function completeWorkflowIds(
+  client: ChaosSchedulerClient,
+  prefix: string,
+): Promise<string[]> {
+  try {
+    const normalizedPrefix = prefix.toLowerCase();
+    const ids = new Set(
+      (await client.listWorkflows()).map((workflow) => workflow.id),
+    );
+    return [...ids]
+      .filter((id) => id.toLowerCase().startsWith(normalizedPrefix))
+      .sort();
+  } catch (error) {
+    throw mapResourceError(new URL("chaos://workflows"), error);
+  }
+}
+
+export function workflowResourceTemplate(
+  uriTemplate: string,
+  client: ChaosSchedulerClient,
+): ResourceTemplate {
+  return new ResourceTemplate(uriTemplate, {
+    list: undefined,
+    complete: {
+      id: async (prefix) => completeWorkflowIds(client, prefix),
+    },
+  });
+}
+
 function schemaPayload(schema: ZodType, extra: Record<string, unknown> = {}) {
   return {
     ...CONTRACT,
@@ -123,7 +152,14 @@ const CATALOG_RESOURCE = {
       "chaos://schemas/queue",
       "chaos://schemas/integrations",
     ],
-    state: ["chaos://workflows/index", "chaos://workflows/{id}/definition"],
+    state: [
+      "chaos://workflows/index",
+      "chaos://workflows/{id}/definition",
+      "chaos://runs/{id}",
+      "chaos://runs/{id}/logs",
+      "chaos://runs/{id}/tasks",
+      "chaos://runs/{id}/metrics",
+    ],
   },
   known_types: {
     workflow_kinds: ["generic", "typed"],
@@ -411,9 +447,7 @@ export function registerAuthoringResources(
 
   server.registerResource(
     "workflow-definition",
-    new ResourceTemplate("chaos://workflows/{id}/definition", {
-      list: undefined,
-    }),
+    workflowResourceTemplate("chaos://workflows/{id}/definition", client),
     {
       title: "Workflow stored definition",
       description:

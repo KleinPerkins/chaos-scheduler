@@ -142,8 +142,12 @@ Workflow state: `chaos://workflows/index`, `chaos://workflows/{id}/definition`,
 `chaos://workflows/{id}/runs`.
 
 Other state: `chaos://version`, `chaos://environments`, `chaos://runs/{id}`,
-`chaos://runs/{id}/logs`, `chaos://queues`, `chaos://queued-runs`, and
-`chaos://email-profiles`.
+`chaos://runs/{id}/logs`, `chaos://runs/{id}/tasks`,
+`chaos://runs/{id}/metrics`, `chaos://queues`, `chaos://queued-runs`, and
+`chaos://email-profiles`. Workflow-ID resource templates offer prefix-filtered,
+deterministic completions using MCP's native 100-value response cap and truthful
+`total` / `hasMore` metadata; template listing stays static and does not fetch
+backend records.
 Freshness is pull-based (Cursor does not document resource subscriptions).
 
 Workflow resources are safe context projections, not write round-trip payloads.
@@ -164,6 +168,11 @@ through MCP.
 `triage_failed_run(run_id)`, `summarize_workflow_health(environment)`,
 `register_workflow_for_repo(repo_path[, environment])`, and
 `safely_update_workflow(workflow_id)`.
+
+Failure triage starts with the run summary/logs, reads task or metric detail only
+when needed, and asks for explicit operator confirmation before any retry. After
+confirmation, use `rerun_workflow` with the failed source run for a faithful
+retry.
 
 ## Guardrails
 

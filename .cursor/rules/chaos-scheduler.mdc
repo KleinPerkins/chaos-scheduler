@@ -78,7 +78,12 @@ Read-only state is available as resources for @-referencing:
 `chaos://workflows/{id}/definition`, `chaos://environments`,
 `chaos://workflows`, `chaos://workflows/{id}`,
 `chaos://workflows/{id}/runs`, `chaos://runs/{id}`, `chaos://runs/{id}/logs`,
-`chaos://queues`, `chaos://queued-runs`, `chaos://version`.
+`chaos://runs/{id}/tasks`, `chaos://runs/{id}/metrics`, `chaos://queues`,
+`chaos://queued-runs`, `chaos://email-profiles`, `chaos://version`.
+
+Workflow-ID templates offer prefix-filtered completions with MCP's native
+100-value response cap and truthful pagination metadata. Template discovery
+itself stays static and does not list backend records.
 
 Definition resources always redact known secrets and report parse status.
 Parsed stored configuration is not effective configuration or proof of runtime
@@ -93,7 +98,8 @@ Reusable templates: `triage_failed_run(run_id)`,
 ## Failure triage loop
 
 When a run fails: read it with `get_run` or `get_run_logs` (stderr tail),
-inspect tasks via `get_run_tasks` when steps failed, inspect the owning workflow
-with `get_workflow`, propose a concrete fix, and use `rerun_workflow` (or
-`enqueue_workflow` with a fresh `idempotency_key`) only if the failure looks
-transient.
+inspect tasks via `get_run_tasks` only when step/retry detail is needed and
+metrics via `get_run_metrics` only when measurements can explain the failure,
+inspect the owning workflow with `get_workflow`, propose a concrete fix, and use
+`rerun_workflow` with the failed source run plus a fresh `idempotency_key` only
+if the failure looks transient and the operator explicitly confirms the retry.
