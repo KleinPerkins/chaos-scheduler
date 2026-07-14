@@ -125,6 +125,16 @@ const ROUTES: Record<string, unknown> = {
       environment: "production",
     },
   },
+  "GET /api/v1/workflows/w3": {
+    workflow: {
+      id: "w3",
+      name: "Malformed",
+      environment: "sandbox",
+      spec_json: '{"secret":"malformed-secret"',
+      trigger_config: null,
+      queue_config: null,
+    },
+  },
   "POST /api/v1/workflows/w1/run": {
     workflow_id: "w1",
     status: "admitted",
@@ -342,6 +352,7 @@ describe("Chaos MCP server", () => {
         "list_queues",
         "list_workflow_runs",
         "list_workflows",
+        "patch_workflow_spec",
         "register_workflow",
         "run_workflow_now",
         "set_workflow_email_profile",
@@ -358,12 +369,22 @@ describe("Chaos MCP server", () => {
     const { resources } = await client.listResources();
     expect(resources.map((r) => r.uri).sort()).toEqual(
       [
+        "chaos://authoring",
+        "chaos://catalog",
         "chaos://email-profiles",
         "chaos://environments",
+        "chaos://guides/integrations",
+        "chaos://guides/webhooks",
+        "chaos://guides/workflows",
         "chaos://queued-runs",
         "chaos://queues",
+        "chaos://schemas/integrations",
+        "chaos://schemas/queue",
+        "chaos://schemas/triggers",
+        "chaos://schemas/workflow-spec",
         "chaos://version",
         "chaos://workflows",
+        "chaos://workflows/index",
       ].sort(),
     );
 
@@ -373,6 +394,7 @@ describe("Chaos MCP server", () => {
         "chaos://runs/{id}",
         "chaos://runs/{id}/logs",
         "chaos://workflows/{id}",
+        "chaos://workflows/{id}/definition",
         "chaos://workflows/{id}/runs",
       ].sort(),
     );
@@ -381,6 +403,7 @@ describe("Chaos MCP server", () => {
     expect(prompts.map((p) => p.name).sort()).toEqual(
       [
         "register_workflow_for_repo",
+        "safely_update_workflow",
         "summarize_workflow_health",
         "triage_failed_run",
       ].sort(),
@@ -477,11 +500,175 @@ describe("Chaos MCP server", () => {
     expect(JSON.parse(bodies[0]!).environment).toBe("sandbox");
   });
 
+  it("validates workflow specs before registration", async () => {
+    const { client } = await connectedPair();
+    const result = (await client.callTool({
+      name: "register_workflow",
+      arguments: {
+        name: "Invalid",
+        script_path: "demo.sh",
+        cron_schedule: "0 0 * * *",
+        spec: { kind: "generic", generic: { steps: [] } },
+      },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/at least one step/i);
+  });
+
   it("reads the workflows resource", async () => {
     const { client } = await connectedPair();
     const res = await client.readResource({ uri: "chaos://workflows" });
     const text = (res.contents[0] as { text: string }).text;
     expect(JSON.parse(text)[0].id).toBe("w1");
+  });
+
+  it("serves backend-independent authoring discovery resources", async () => {
+    const { client } = await connectedPair();
+
+    const authoring = await client.readResource({ uri: "chaos://authoring" });
+    const authoringBody = JSON.parse(
+      (authoring.contents[0] as { text: string }).text,
+    );
+    expect(authoringBody).toMatchObject({
+      version: "v1",
+      view: "stored_config",
+    });
+    expect(authoringBody.start_here).toContain("chaos://workflows/index");
+
+    const schema = await client.readResource({
+      uri: "chaos://schemas/workflow-spec",
+    });
+    const schemaBody = JSON.parse(
+      (schema.contents[0] as { text: string }).text,
+    );
+    expect(schemaBody).toMatchObject({
+      version: "v1",
+      view: "stored_config",
+    });
+    expect(schemaBody.schema).toHaveProperty("$schema");
+
+    const catalog = await client.readResource({ uri: "chaos://catalog" });
+    const catalogBody = JSON.parse(
+      (catalog.contents[0] as { text: string }).text,
+    );
+    expect(catalogBody.known_types.trigger_kinds).toContain("on_completion");
+    expect(catalogBody.known_types.trigger_kinds).not.toContain(
+      "inbound_webhook",
+    );
+    expect(catalogBody.known_types.inbound_dispatch).toMatch(
+      /not a stored trigger_config kind/i,
+    );
+
+    const webhookGuide = await client.readResource({
+      uri: "chaos://guides/webhooks",
+    });
+    const webhookBody = JSON.parse(
+      (webhookGuide.contents[0] as { text: string }).text,
+    );
+    expect(JSON.stringify(webhookBody)).toMatch(
+      /inbound_webhook_secret.*unavailable/i,
+    );
+    expect(webhookBody.inbound.signature).toContain(
+      "METHOD\nPATH\nTIMESTAMP\nSHA256(body)",
+    );
+  });
+
+  it("serves a lightweight workflow index without nested configuration", async () => {
+    const { client } = await connectedPair();
+    const result = await client.readResource({
+      uri: "chaos://workflows/index",
+    });
+    const body = JSON.parse((result.contents[0] as { text: string }).text);
+
+    expect(body).toMatchObject({
+      version: "v1",
+      view: "stored_config",
+    });
+    expect(body.workflows[0]).toMatchObject({
+      id: "w1",
+      name: "A",
+      environment: "sandbox",
+      kind: "generic",
+    });
+    expect(body.workflows[0]).not.toHaveProperty("spec_json");
+    expect(JSON.stringify(body)).not.toContain("outbound-secret");
+  });
+
+  it("consolidates redacted stored configuration in workflow definitions", async () => {
+    const { client } = await connectedPair();
+    const result = await client.readResource({
+      uri: "chaos://workflows/w1/definition",
+    });
+    const text = (result.contents[0] as { text: string }).text;
+    const body = JSON.parse(text);
+
+    expect(body).toMatchObject({
+      version: "v1",
+      view: "stored_config",
+      workflow: { id: "w1", environment: "sandbox" },
+      stored_config: {
+        spec: { parse_status: "parsed" },
+        triggers: { parse_status: "parsed" },
+        queue: { parse_status: "parsed" },
+        completion_actions: {
+          parse_status: "parsed",
+        },
+      },
+    });
+    expect(body.stored_config.completion_actions.on_failure[0].secret).toBe(
+      "__redacted__",
+    );
+    expect(text).not.toMatch(
+      /outbound-secret|cursor-secret|smtp-secret|trigger-secret|queue-secret/,
+    );
+    expect(body.boundaries).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/not effective/i),
+        expect.stringMatching(/inbound.*unavailable/i),
+      ]),
+    );
+  });
+
+  it("reports invalid stored configuration without echoing raw JSON", async () => {
+    const { client } = await connectedPair();
+    const result = await client.readResource({
+      uri: "chaos://workflows/w3/definition",
+    });
+    const text = (result.contents[0] as { text: string }).text;
+    const body = JSON.parse(text);
+
+    expect(body.stored_config.spec).toEqual({
+      parse_status: "invalid",
+      value: null,
+    });
+    expect(body.warnings).toEqual(
+      expect.arrayContaining([expect.stringMatching(/spec.*invalid/i)]),
+    );
+    expect(text).not.toContain("malformed-secret");
+  });
+
+  it("steers registration and updates through discovery-first prompts", async () => {
+    const { client } = await connectedPair();
+    const register = await client.getPrompt({
+      name: "register_workflow_for_repo",
+      arguments: { repo_path: "/tmp/example" },
+    });
+    const registerText = JSON.stringify(register.messages);
+    expect(registerText).toContain("chaos://workflows/index");
+    expect(registerText).toMatch(/non-idempotent/i);
+
+    const update = await client.getPrompt({
+      name: "safely_update_workflow",
+      arguments: { workflow_id: "w1" },
+    });
+    const updateText = JSON.stringify(update.messages);
+    expect(updateText).toContain("chaos://workflows/w1/definition");
+    expect(updateText).toContain("patch_workflow_spec");
+    expect(updateText).toMatch(/redacted/i);
   });
 
   it("redacts nested secrets and allowlists workflow resource fields", async () => {
@@ -779,11 +966,122 @@ describe("Chaos MCP server", () => {
     expect(JSON.parse(textOf(result)).email_profile_id).toBe("ep1");
   });
 
+  it("blocks email-profile assignment for a protected workflow", async () => {
+    const { client } = await connectedPair({
+      CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "production",
+    });
+    const result = (await client.callTool({
+      name: "set_workflow_email_profile",
+      arguments: { workflow_id: "w2", profile_id: "ep1" },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/protected/i);
+  });
+
   it("reads the email-profiles resource", async () => {
     const { client } = await connectedPair();
     const res = await client.readResource({ uri: "chaos://email-profiles" });
     const text = (res.contents[0] as { text: string }).text;
     expect(JSON.parse(text)[0].id).toBe("ep1");
+  });
+
+  it("patches a full stored spec while preserving redacted secrets and unknown fields", async () => {
+    let writtenSpec: Record<string, unknown> | undefined;
+    const fetch: FetchLike = async (url, init) => {
+      const path = url.replace("http://127.0.0.1:9618", "");
+      const key = `${init?.method ?? "GET"} ${path}`;
+      if (key === "POST /api/v1/workflows/w1/spec") {
+        writtenSpec = JSON.parse(String(init?.body));
+        const current = (
+          ROUTES["GET /api/v1/workflows/w1"] as {
+            workflow: Record<string, unknown>;
+          }
+        ).workflow;
+        return {
+          ok: true,
+          status: 200,
+          text: async () =>
+            JSON.stringify({
+              workflow: {
+                ...current,
+                spec_json: JSON.stringify(writtenSpec),
+              },
+            }),
+        };
+      }
+      return routedFetch(ROUTES)(url, init);
+    };
+    const config = configFromEnv({ CHAOS_SCHEDULER_API_KEY: "id.secret" });
+    const sdk = new ChaosSchedulerClient({
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      fetch,
+    });
+    const server = buildServer({ client: sdk, config });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const result = (await client.callTool({
+      name: "patch_workflow_spec",
+      arguments: {
+        id: "w1",
+        patch: {
+          generic: {
+            steps: [{ id: "run", command: "echo updated" }],
+          },
+          on_failure: [
+            {
+              type: "webhook",
+              url: "https://example.com/hook",
+              secret: "__redacted__",
+            },
+          ],
+          future_contract: { enabled: true },
+        },
+      },
+    })) as {
+      content: Array<{ type: string; text?: string }>;
+      isError?: boolean;
+    };
+
+    expect(result.isError).toBeFalsy();
+    expect(writtenSpec).toMatchObject({
+      kind: "generic",
+      generic: {
+        steps: [{ id: "run", command: "echo updated" }],
+      },
+      on_failure: [
+        {
+          type: "webhook",
+          secret: "outbound-secret",
+        },
+      ],
+      nested: {
+        cursor_api_key: "cursor-secret",
+        smtp_password: "smtp-secret",
+      },
+      future_contract: { enabled: true },
+    });
+    const responseText = textOf(result);
+    expect(responseText).not.toMatch(
+      /outbound-secret|cursor-secret|smtp-secret/,
+    );
+    expect(JSON.parse(responseText)).toMatchObject({
+      version: "v1",
+      view: "stored_config",
+      stored_config: {
+        spec: { parse_status: "parsed" },
+      },
+    });
   });
 
   it("dispatch_workflow proxies through the SDK with signature header", async () => {
@@ -819,6 +1117,8 @@ describe("Chaos MCP server", () => {
         id: "w1",
         payload: "{}",
         signature_secret: "hook-secret",
+        event_id: "event-123",
+        timestamp: "1767225600",
       },
     })) as {
       content: Array<{ type: string; text?: string }>;
@@ -831,5 +1131,7 @@ describe("Chaos MCP server", () => {
     expect(dispatchCall?.headers?.["x-chaos-signature"]).toMatch(
       /^sha256=[0-9a-f]{64}$/,
     );
+    expect(dispatchCall?.headers?.["x-chaos-event-id"]).toBe("event-123");
+    expect(dispatchCall?.headers?.["x-chaos-timestamp"]).toBe("1767225600");
   });
 });

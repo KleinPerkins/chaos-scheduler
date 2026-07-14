@@ -12,14 +12,10 @@ import {
   McpServer,
   ResourceTemplate,
 } from "@modelcontextprotocol/sdk/server/mcp.js";
-import {
-  ErrorCode,
-  McpError,
-  type CallToolResult,
-  type ReadResourceResult,
-} from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { ChaosApiError, ChaosSchedulerClient } from "@chaos-scheduler/sdk";
 import { z } from "zod";
+import { WorkflowSpecSchema } from "./authoring-schemas.js";
 import type { ChaosMcpConfig } from "./config.js";
 import {
   assertEnvironmentWritable,
@@ -27,10 +23,17 @@ import {
   ToolBudget,
 } from "./guardrails.js";
 import { SERVER_ICONS, SERVER_WEBSITE_URL } from "./icon.js";
+import { applyWorkflowSpecMergePatch } from "./json-merge-patch.js";
 import {
   projectWorkflowForResource,
   projectWorkflowsForResource,
 } from "./resource-projection.js";
+import {
+  readJsonResource,
+  registerAuthoringResources,
+  resourceIdentifier,
+  workflowDefinition,
+} from "./resources.js";
 
 export const SERVER_NAME = "chaos-scheduler";
 export const SERVER_VERSION = "0.1.0";
@@ -58,63 +61,6 @@ function errorResult(err: unknown): CallToolResult {
     message = String(err);
   }
   return { content: [{ type: "text", text: message }], isError: true };
-}
-
-function jsonResource(uri: URL, data: unknown): ReadResourceResult {
-  return {
-    contents: [
-      {
-        uri: uri.href,
-        mimeType: "application/json",
-        text: JSON.stringify(data, null, 2),
-      },
-    ],
-  };
-}
-
-const RESOURCE_NOT_FOUND = -32002;
-
-function mapResourceError(uri: URL, err: unknown): McpError {
-  if (err instanceof McpError) return err;
-  if (err instanceof ChaosApiError && err.isNotFound) {
-    return new McpError(RESOURCE_NOT_FOUND, "Resource not found", {
-      uri: uri.href,
-    });
-  }
-  if (err instanceof ChaosApiError) {
-    return new McpError(
-      ErrorCode.InternalError,
-      "Scheduler resource read failed",
-      { uri: uri.href, status: err.status },
-    );
-  }
-  return new McpError(
-    ErrorCode.InternalError,
-    "Scheduler resource read failed",
-    { uri: uri.href },
-  );
-}
-
-async function readJsonResource<T>(
-  uri: URL,
-  load: () => Promise<T>,
-  project: (data: T) => unknown = (data) => data,
-): Promise<ReadResourceResult> {
-  try {
-    return jsonResource(uri, project(await load()));
-  } catch (err) {
-    throw mapResourceError(uri, err);
-  }
-}
-
-function resourceIdentifier(uri: URL, value: unknown): string {
-  const id = Array.isArray(value) ? value.join("/") : String(value ?? "");
-  if (!id.trim()) {
-    throw new McpError(ErrorCode.InvalidParams, "Invalid resource identifier", {
-      uri: uri.href,
-    });
-  }
-  return id;
 }
 
 /**
@@ -160,7 +106,7 @@ export function buildServer(deps: ServerDeps): McpServer {
         "workflows, dispatch runs on demand (with idempotency keys), and read run results. " +
         "Prefer `enqueue_workflow` for manual runs; `run_workflow_now` is a deprecated alias " +
         "that also goes through admission control. Read-only state is also available as " +
-        "`chaos://` resources.",
+        "`chaos://` resources. Start workflow authoring at `chaos://authoring`.",
     },
   );
 
@@ -307,10 +253,9 @@ export function buildServer(deps: ServerDeps): McpServer {
         domain: z.string().optional(),
         trigger_config: z.string().optional().describe("JSON string"),
         queue_config: z.string().optional().describe("JSON string"),
-        spec: z
-          .unknown()
-          .optional()
-          .describe("WorkflowSpec object (generic|typed)"),
+        spec: WorkflowSpecSchema.optional().describe(
+          "WorkflowSpec object (generic|typed); backend validation remains authoritative",
+        ),
       },
     },
     async (args) => {
@@ -333,7 +278,7 @@ export function buildServer(deps: ServerDeps): McpServer {
         "Replace a workflow's execution spec (generic step-flow or typed operator).",
       inputSchema: {
         id: z.string(),
-        spec: z.unknown().describe("WorkflowSpec object"),
+        spec: WorkflowSpecSchema.describe("Complete WorkflowSpec object"),
       },
     },
     async (args) => {
@@ -344,6 +289,48 @@ export function buildServer(deps: ServerDeps): McpServer {
           args.spec as Parameters<typeof client.setWorkflowSpec>[1],
         ),
       );
+    },
+  );
+
+  tool(
+    "patch_workflow_spec",
+    {
+      title: "Patch workflow spec",
+      description:
+        "Safely apply an RFC 7396 JSON Merge Patch to the full stored workflow spec. " +
+        "Omitted fields preserve stored values; __redacted__ sentinels in arrays require " +
+        "a unique id or unchanged webhook URL. Ambiguous secret restoration fails closed. " +
+        "Returns only the redacted stored definition. This is read-merge-write; " +
+        "serialize concurrent writers.",
+      inputSchema: {
+        id: z.string().describe("Workflow id"),
+        patch: z
+          .record(z.string(), z.unknown())
+          .describe("JSON Merge Patch object for the stored WorkflowSpec"),
+      },
+    },
+    async (args) => {
+      const currentWorkflow = await client.getWorkflow(args.id);
+      if (protectionActive) {
+        assertEnvironmentWritable(currentWorkflow.environment, config);
+      }
+      let currentSpec: unknown = {};
+      if (currentWorkflow.spec_json?.trim()) {
+        try {
+          currentSpec = JSON.parse(currentWorkflow.spec_json) as unknown;
+        } catch {
+          throw new Error(
+            "Stored workflow spec is invalid JSON; use set_workflow_spec for an intentional full replacement.",
+          );
+        }
+      }
+      const merged = applyWorkflowSpecMergePatch(currentSpec, args.patch);
+      const spec = WorkflowSpecSchema.parse(merged);
+      const updated = await client.setWorkflowSpec(
+        args.id,
+        spec as Parameters<typeof client.setWorkflowSpec>[1],
+      );
+      return jsonResult(workflowDefinition(updated));
     },
   );
 
@@ -484,6 +471,26 @@ export function buildServer(deps: ServerDeps): McpServer {
           .describe("Raw request body forwarded to the trigger"),
         signature_secret: z.string().optional(),
         idempotency_key: z.string().optional(),
+        event_id: z
+          .string()
+          .max(160)
+          .refine(
+            (value) =>
+              [...value].every((character) => {
+                const codePoint = character.codePointAt(0) ?? 0;
+                return codePoint >= 32 && codePoint !== 127;
+              }),
+            {
+              message: "event_id must not contain control characters",
+            },
+          )
+          .optional()
+          .describe("Stable inbound event id used for replay protection"),
+        timestamp: z
+          .string()
+          .regex(/^-?\d+$/, "timestamp must be Unix seconds")
+          .optional()
+          .describe("Unix timestamp used for deterministic signed replays"),
       },
     },
     async (args) => {
@@ -493,6 +500,8 @@ export function buildServer(deps: ServerDeps): McpServer {
           payload: args.payload,
           signatureSecret: args.signature_secret,
           idempotencyKey: args.idempotency_key,
+          eventId: args.event_id,
+          timestamp: args.timestamp,
         }),
       );
     },
@@ -663,13 +672,17 @@ export function buildServer(deps: ServerDeps): McpServer {
           .describe("Email profile id, or null to clear the selection"),
       },
     },
-    async (args) =>
-      jsonResult(
+    async (args) => {
+      await assertWorkflowWritable(args.workflow_id);
+      return jsonResult(
         await client.setWorkflowEmailProfile(args.workflow_id, args.profile_id),
-      ),
+      );
+    },
   );
 
   // ---- Resources (read-only state for @-referencing) ----
+
+  registerAuthoringResources(server, client);
 
   server.registerResource(
     "version",
@@ -878,10 +891,42 @@ export function buildServer(deps: ServerDeps): McpServer {
               `Help me register a Chaos Scheduler workflow for the repo at \`${repo_path}\`` +
               (environment ? ` in the \`${environment}\` environment` : "") +
               `.\n\n` +
-              `1. Inspect the repo to find the entry script/command and a sensible schedule.\n` +
-              `2. Draft a WorkflowSpec (generic step-flow) if there are multiple steps.\n` +
-              `3. Call \`register_workflow\` with name, script_path, cron_schedule, environment, ` +
-              `and the spec. Confirm the plan with me before writing.`,
+              `1. Read \`chaos://workflows/index\` and stop if an existing workflow should be updated; ` +
+              `registration is non-idempotent.\n` +
+              `2. Read \`chaos://guides/workflows\` and the relevant \`chaos://schemas/*\` resources.\n` +
+              `3. Inspect the repo to find the entry script/command and a sensible schedule.\n` +
+              `4. Draft a WorkflowSpec (generic step-flow) if there are multiple steps.\n` +
+              `5. Confirm the plan with me, then call \`register_workflow\` with name, script_path, ` +
+              `cron_schedule, environment, and the spec.`,
+          },
+        },
+      ],
+    }),
+  );
+
+  server.registerPrompt(
+    "safely_update_workflow",
+    {
+      title: "Safely update a workflow",
+      description:
+        "Inspect a redacted stored definition and draft a secret-preserving patch.",
+      argsSchema: {
+        workflow_id: z.string().describe("Workflow id"),
+      },
+    },
+    ({ workflow_id }) => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text:
+              `Safely update Chaos Scheduler workflow \`${workflow_id}\`.\n\n` +
+              `1. Read \`chaos://workflows/${workflow_id}/definition\` and relevant authoring guides/schemas.\n` +
+              `2. Treat it as redacted stored configuration, not effective runtime configuration.\n` +
+              `3. Draft the smallest RFC 7396 patch. Keep \`__redacted__\` sentinels; array items need a unique id or unchanged webhook URL, while identity changes need the real secret.\n` +
+              `4. Confirm the proposed change with me and ensure no concurrent writer is editing the spec.\n` +
+              `5. Call \`patch_workflow_spec\`; use \`set_workflow_spec\` only for an intentional full replacement.`,
           },
         },
       ],

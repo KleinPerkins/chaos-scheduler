@@ -51,6 +51,9 @@ const wf = await client.registerWorkflow({
 ```
 
 API-registered workflows are `managed_externally=true` (read-only in the UI).
+Registration is non-idempotent. MCP agents should read
+`chaos://workflows/index` before calling `register_workflow` so an existing
+definition is updated rather than duplicated.
 
 ## 3. Run or enqueue on demand (write, idempotent)
 
@@ -96,6 +99,9 @@ await client.dispatchWorkflow(wf.id, {
 ```
 
 `dispatchWorkflow` sets all three headers when `signatureSecret` is provided.
+The scheduler's `inbound_webhook_secret` configuration and status are not
+available through MCP; the caller must receive the signing secret through an
+appropriate external secret channel.
 Manual signing:
 
 ```ts
@@ -162,7 +168,10 @@ calls receive full values so PATCH round-trips work. MCP workflow resources
 (`chaos://workflows` and `chaos://workflows/{id}`) add a second, scope-independent
 projection: they always redact those fields before injecting workflow state
 into agent context, bound nested JSON parsing, and replace malformed nested JSON
-with `__redacted_invalid_json__`. See
+with `__redacted_invalid_json__`. The versioned
+`chaos://workflows/{id}/definition` resource additionally separates parsed
+spec/trigger/queue values, completion actions, and parse warnings. It is labeled
+`stored_config`: parsing does not prove effective runtime enforcement. See
 [SECURITY.md](../SECURITY.md#secrets-storage--read-scope-redaction).
 
 Terminal run `status` values include `success`, `failed`, `cancelled`,
@@ -175,15 +184,25 @@ status, so a slow run is distinguishable from a failed one.
 
 Run the MCP server and add it to Cursor (see the
 [mcp-server README](./mcp-server/README.md) and the repo's `.cursor/mcp.json`).
-The agent then uses tools like `register_workflow`, `update_workflow`,
-`enqueue_workflow`, `rerun_workflow`, `get_run`, `get_run_logs`, `list_queues`,
-`list_email_profiles` / `create_email_profile` / `set_workflow_email_profile`,
-and `chaos://` resources — the same operations as above, but
-conversational, with prod-write guardrails.
+Start at `chaos://authoring`. The `chaos://catalog`,
+`chaos://guides/{workflows|webhooks|integrations}`, and
+`chaos://schemas/{workflow-spec|triggers|queue|integrations}` resources provide
+progressive authoring context. These `v1 stored_config` schemas are permissive
+mirrors that preserve additive fields at the MCP validation boundary; the
+Rust/backend contract and persistence normalization remain authoritative, and
+the current backend may drop unsupported fields.
 
-MCP write tools are **fail-closed** on protected environments (lookup errors
-block writes; `update_workflow` checks `patch.environment`). A shared
-in-process tool-call budget caps runaway loops. Details in the
+The agent then uses tools like `register_workflow`, `patch_workflow_spec`,
+`update_workflow`, `enqueue_workflow`, `rerun_workflow`, `get_run`,
+`get_run_logs`, `list_queues`, `list_email_profiles` /
+`create_email_profile` / `set_workflow_email_profile`, and `chaos://` resources
+— the same operations as above, but conversational.
+
+MCP workflow/environment writes are **fail-closed** on protected environments
+(lookup errors block writes; `update_workflow` checks `patch.environment`;
+workflow email-profile assignment resolves the workflow first). Global
+email-profile CRUD has no environment target and relies on API scope/auth. A
+shared in-process tool-call budget caps runaway loops. Details in the
 [mcp-server README guardrails section](./mcp-server/README.md#guardrails).
 
 ## 8. Update or rerun a workflow (write)
@@ -203,6 +222,15 @@ const rerun = await client.rerunWorkflow(wf.id, {
 `updateWorkflow` maps to `PATCH /api/v1/workflows/{id}`; `rerunWorkflow` maps to
 `POST /api/v1/workflows/{id}/rerun` and supports the same idempotent-replay shape
 as run/enqueue.
+
+For MCP spec changes, read `chaos://workflows/{id}/definition` and prefer
+`patch_workflow_spec`. It applies RFC 7396 JSON Merge Patch to the full stored
+spec internally, preserves omitted fields and `__redacted__` secret sentinels,
+and returns only the redacted stored definition. `set_workflow_spec` remains the
+intentional full-replacement tool. This is a read-merge-write flow, so serialize
+concurrent spec writers until the backend exposes compare-and-swap semantics. A
+sentinel inside a replaced array requires a unique `id` or unchanged webhook
+URL; ambiguous edits fail closed, and identity changes require the real secret.
 
 ## 9. Email delivery profiles (CRUD + selection)
 
@@ -241,7 +269,9 @@ the stored password unchanged, or send a new value to replace it. A blank
 password means none is stored. The MCP tools (`list_email_profiles`,
 `create_email_profile`, `update_email_profile`, `delete_email_profile`,
 `set_workflow_email_profile`) and the `chaos://email-profiles` resource wrap the
-same calls with the standard prod-write guardrails.
+same calls. Workflow profile assignment uses the protected-environment
+guardrail; global profile CRUD is environment-agnostic and relies on API
+scope/auth.
 
 ## Error handling
 
