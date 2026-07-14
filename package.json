@@ -14,6 +14,8 @@
     "code-connect:check": "node scripts/check-code-connect.mjs",
     "test:code-connect": "node --test scripts/check-code-connect.test.mjs",
     "test:figma-snapshot": "node --test scripts/figma-snapshot.test.mjs",
+    "check:mcp-diff-attribute": "node scripts/check-mcp-diff-attribute.mjs",
+    "test:mcp-diff-attribute": "node --test scripts/check-mcp-diff-attribute.test.mjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc -b --noEmit",

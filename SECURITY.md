@@ -47,6 +47,28 @@ Never commit secrets. `.env` files are not read by the Tauri build; CI secrets
 live in GitHub Actions secrets (scoped to the `release` Environment for signing
 material).
 
+### MCP config and Git history
+
+The `.cursor/mcp.json` attributes are presentation aids, not security
+boundaries. `linguist-generated` is a default-collapsed presentation hint in
+GitHub's changed-files UI, and `binary` suppresses ordinary local CLI text
+diffs. Neither is redaction: reviewers can expand generated files, patch and
+compare API endpoints may return their text, and Git history retains every
+committed blob.
+
+The authoritative MCP credential controls are therefore independent of those
+attributes:
+
+- no live credential may remain in a tracked blob;
+- the final security follow-up must stop tracking project-local
+  `.cursor/mcp.json` and keep the app-managed user config at
+  `~/.cursor/mcp.json` outside Git;
+- a focused credential guard must prevent tracked MCP configs from reintroducing
+  scheduler API-key or bearer material; and
+- credential revocation plus GitHub Support cleanup/history handling remain
+  separate incident-response work. Attributes do not remove existing history or
+  prevent all disclosure.
+
 ## Network binding
 
 ### REST API (default `127.0.0.1:9618`)

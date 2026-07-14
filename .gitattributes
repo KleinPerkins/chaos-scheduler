@@ -1,4 +1,4 @@
-# A removed project-local MCP config may contain user-owned credentials.
-# Keep its contents out of text diffs before replacing it with app-managed
-# configuration outside Git.
-.cursor/mcp.json binary
+# Presentation hints only: GitHub collapses linguist-generated files by default,
+# and binary suppresses local CLI text diffs. Neither is redaction; reviewers,
+# patch/compare APIs, and Git history can still expose the tracked blob.
+.cursor/mcp.json binary linguist-generated
