@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.3.0](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v1.2.0...mcp-server-v1.3.0) (2026-07-18)
+
+
+### Features
+
+* **mcp-server:** add operational run resources ([#317](https://github.com/KleinPerkins/chaos-scheduler/issues/317)) ([99cc8cd](https://github.com/KleinPerkins/chaos-scheduler/commit/99cc8cd815cb2989f748a62e577a2a7d15344a29))
+* **mcp-server:** add workflow authoring resources ([#316](https://github.com/KleinPerkins/chaos-scheduler/issues/316)) ([c6108e3](https://github.com/KleinPerkins/chaos-scheduler/commit/c6108e3018471f94a7ce79fd0fcfef9291f7d048))
+
+
+### Bug Fixes
+
+* **mcp-server:** make workflow resources safe for context ([#296](https://github.com/KleinPerkins/chaos-scheduler/issues/296)) ([0c6ed4f](https://github.com/KleinPerkins/chaos-scheduler/commit/0c6ed4fdecbf80c4b85624c1681584eb37468a29))
+
 ## [1.2.0](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v1.1.0...mcp-server-v1.2.0) (2026-07-12)
 
 
