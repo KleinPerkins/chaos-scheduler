@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.6.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v1.5.0...chaos-scheduler-tauri-v1.6.0) (2026-07-18)
+
+
+### Features
+
+* **cursor:** fix-agent dispatch is propose-only (draft PR, production allowed) ([#284](https://github.com/KleinPerkins/chaos-scheduler/issues/284)) ([2ad54e1](https://github.com/KleinPerkins/chaos-scheduler/commit/2ad54e15b196e4a9c641f5e5f8f135435c7fc706))
+* **db:** schema v15 evolves fix_agent_dispatches for local fix mode ([#286](https://github.com/KleinPerkins/chaos-scheduler/issues/286)) ([1f04276](https://github.com/KleinPerkins/chaos-scheduler/commit/1f04276bc6218b825bf0d3de03fe07b39a95a28e))
+* **scheduler:** D05 LOCAL rerun-gated fix-agent orchestrator (M1/M3/M4/M5/M6) ([#289](https://github.com/KleinPerkins/chaos-scheduler/issues/289)) ([4beb8e4](https://github.com/KleinPerkins/chaos-scheduler/commit/4beb8e4d000351d04bd388ef49fd5f8117af5cf9))
+* **scheduler:** isolate local fix agent in a dedicated throwaway git worktree (M2/M6) ([#288](https://github.com/KleinPerkins/chaos-scheduler/issues/288)) ([86b9622](https://github.com/KleinPerkins/chaos-scheduler/commit/86b9622876c3890d5ef9b8fc1dba051c2daf27ca))
+* **scheduler:** thread suppress_completion_triggers through the queued-drain path (M5) ([#287](https://github.com/KleinPerkins/chaos-scheduler/issues/287)) ([1477a42](https://github.com/KleinPerkins/chaos-scheduler/commit/1477a42a5d238373370d40061838fb85dd7bf071))
+
+
+### Bug Fixes
+
+* **d05:** cloud fix PR born-draft, race-free (PR2e, Option C) ([#313](https://github.com/KleinPerkins/chaos-scheduler/issues/313)) ([01fce96](https://github.com/KleinPerkins/chaos-scheduler/commit/01fce96d807042ef303d491e91d99391e1638743))
+
 ## [1.5.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v1.4.0...chaos-scheduler-tauri-v1.5.0) (2026-07-12)
 
 
