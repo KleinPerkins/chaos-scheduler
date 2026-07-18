@@ -47,7 +47,7 @@ jobs:
       # `lefthook install` in the `prepare` lifecycle during `npm ci`.
       - name: Trust workspace (container runs as root)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
       - run: npm ci
