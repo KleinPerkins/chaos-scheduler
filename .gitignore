@@ -34,3 +34,6 @@ e2e/visual/__screenshots__/*-darwin.png
 e2e/visual/__screenshots__/*-win32.png
 scheduler.db
 *.db
+
+# machine-local continual-learning memory — never commit
+agent-learnings.md

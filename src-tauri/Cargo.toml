@@ -43,6 +43,6 @@ reqwest = { version = "0.13.3", default-features = false, features = ["rustls", 
 tauri-plugin-updater = "2.10.1"
 
 [dev-dependencies]
-base64 = "0.22.1"
+base64 = "0.23.0"
 minisign-verify = "0.2.5"
 tauri = { version = "2", features = ["tray-icon", "test"] }
