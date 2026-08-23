@@ -21,6 +21,11 @@ pre-commit:
       glob: "*.{ts,tsx,js,jsx}"
       run: npx --no-install eslint --fix {staged_files}
       stage_fixed: true
+    data-guard:
+      # Refuse database snapshots / secret files (scheduler.db, *.sqlite, .env,
+      # Apple .p12, ssh private keys). Local, bypassable defense; the `data-guard`
+      # CI job is the authoritative gate and also covers the git-data-API PR flow.
+      run: node scripts/check-no-committed-data.mjs {staged_files}
     cargo-fmt:
       root: "src-tauri/"
       glob: "*.rs"
