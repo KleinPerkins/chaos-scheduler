@@ -302,6 +302,25 @@ jobs:
       - name: Check Rust crate vs @tauri-apps/* parity
         run: node scripts/check-tauri-versions.mjs
 
+  # Data-guard: fail if the tracked tree contains a database snapshot (scheduler.db,
+  # *.sqlite, WAL/SHM sidecars) or a secret file (.env, Apple .p12, ssh private key).
+  # The lefthook pre-commit hook is a local, bypassable first line of defense and is
+  # skipped entirely by the git-data-API single-commit PR flow this repo uses — so
+  # this required, credential-free check that scans the whole tracked tree is the
+  # authoritative gate. Path-based, high-confidence matches only.
+  data-guard:
+    name: Data-guard (no committed db/secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+      - name: Scan tracked tree for db/secret files
+        run: node scripts/check-no-committed-data.mjs
+      - name: Unit tests (data-guard rules)
+        run: node --test scripts/check-no-committed-data.test.mjs
+
   # Single required status check for branch protection on `main`.
   # Configure "ci-required" as the sole required check; it fans in from every
   # other job so adding/removing jobs never requires editing branch protection.
@@ -326,6 +345,7 @@ jobs:
         code-connect,
         a11y,
         visual,
+        data-guard,
       ]
     runs-on: ubuntu-latest
     steps:
