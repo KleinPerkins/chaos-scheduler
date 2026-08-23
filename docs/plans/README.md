@@ -11,6 +11,7 @@ version is never modified.
 
 | Plan | Status | Date | Notes |
 |---|---|---|---|
+| [design-to-code-completion-v1](design-to-code-completion-v1.md) | DRAFT | 2026-08-22 | Program/roadmap map for the remaining Design-to-Code work: D05 Run-detail agent-actions UI (M1), P4 Mission Control composition + demo states (M2), P5 design↔code re-sync/audit close (M3). Each milestone promotes to its own task-block execution plan at dispatch. |
 
 ## Conventions
 
