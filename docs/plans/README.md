@@ -11,7 +11,7 @@ version is never modified.
 
 | Plan | Status | Date | Notes |
 |---|---|---|---|
-| [design-to-code-completion-v1](design-to-code-completion-v1.md) | DRAFT | 2026-08-22 | Program/roadmap map for the remaining Design-to-Code work: D05 Run-detail agent-actions UI (M1), P4 Mission Control composition + demo states (M2), P5 design↔code re-sync/audit close (M3). Each milestone promotes to its own task-block execution plan at dispatch. §8 cross-references out-of-band workstreams. |
+| [design-to-code-completion-v2](design-to-code-completion-v2.md) | DRAFT | 2026-08-23 | Screen-per-session roadmap superseding v1's M1/M2/M3 milestones: one UI surface uplifted to the Mission Control design language per session, each passing the G11 native-proof gate. Backbone = Figma triage (P0) + foundation primitives (F0) + Run Detail / Mission Control / History / Workflow authoring / Admin / Settings / tray-popup screen sessions + design↔code re-sync closeout. Each screen promotes to its own task-block execution plan at dispatch. |
 | [credential-security-hardening-v1](credential-security-hardening-v1.md) | DRAFT | 2026-08-23 | Credential-exposure hardening surfaced by a read-only security audit: redact MCP tool reads, secret-scan CI, at-rest file hardening, audit-log/offboarding + read-only managed key, optional envelope encryption (open decision). Distinct MCP/SDK/backend subsystem; anchored to open security issue #292. Not yet operator-accepted. |
 
 ## Conventions
@@ -46,3 +46,7 @@ self-review — a zero-context subagent must be able to execute each work item f
 
 Superseded and retired plans that are no longer active but preserved for history live in
 `docs/archive/plans/` (moved via `git mv`, not deleted).
+
+| Plan | Status | Date | Notes |
+|---|---|---|---|
+| [design-to-code-completion-v1](../archive/plans/design-to-code-completion-v1.md) | SUPERSEDED by v2 | 2026-08-23 | Original M1/M2/M3 milestone roadmap for the remaining Design-to-Code work; superseded by the screen-per-session `design-to-code-completion-v2.md`. Retained byte-identical, moved to `docs/archive/plans/` per POLICY §9. |
