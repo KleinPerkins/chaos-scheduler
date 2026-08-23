@@ -13,7 +13,7 @@
  * assertion here proves the MCP egress boundary redacts on its own, not because
  * REST happened to redact upstream.
  *
- * Read-surface matrix (the four classes named in the hardening plan):
+ * Surface matrix (the four classes named in the hardening plan):
  *   - REST / SDK  — the untrusted upstream. At `write`/`admin` scope it returns
  *                   full secrets by design (round-trip edits); exercised here as
  *                   the adversarial source feeding every MCP surface, and
@@ -22,13 +22,23 @@
  *                   returns full secrets to the local operator's own authoring
  *                   UI, is never agent/LLM context, and is covered by Rust-side
  *                   `service.rs` scope tests. Not executable from this package.
- *   - MCP tools   — `list_workflows`, `get_workflow`: MUST always redact.
+ *   - MCP tools   — every tool whose response embeds a `Workflow` MUST always
+ *                   redact, on BOTH read and write paths:
+ *                     read:  `list_workflows`, `get_workflow`
+ *                     write: `register_workflow`, `set_workflow_spec`,
+ *                            `update_workflow` (each echoes the full stored
+ *                            Workflow; a write-scoped key could otherwise read a
+ *                            raw secret back out via a no-op write side-door).
+ *                   `patch_workflow_spec` already returns the redacted
+ *                   `workflowDefinition` and keeps its own round-trip test.
  *   - MCP resources — `chaos://workflows`, `chaos://workflows/{id}`,
  *                   `chaos://workflows/{id}/definition`, `chaos://workflows/index`:
  *                   MUST always redact.
  *
- * Pre-fix, the two MCP tools returned the SDK result verbatim and this test
- * fails; after wrapping them in the resource projection it passes.
+ * Pre-fix, the read tools (and later the three write tools) returned the SDK
+ * result verbatim and this test fails; after wrapping them in the resource
+ * projection it passes. An enumeration guard forces any newly-added
+ * workflow-mutating tool to be categorized here rather than silently skipped.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -106,7 +116,26 @@ const RAW_WORKFLOW = {
 const BACKEND_ROUTES: Record<string, unknown> = {
   "GET /api/v1/workflows": { workflows: [RAW_WORKFLOW] },
   [`GET /api/v1/workflows/${WORKFLOW_ID}`]: { workflow: RAW_WORKFLOW },
+  // Write endpoints echo the full stored workflow (with secrets) exactly as a
+  // write-scoped REST caller sees it — the adversarial upstream for write tools.
+  "POST /api/v1/workflows": { workflow: RAW_WORKFLOW },
+  [`POST /api/v1/workflows/${WORKFLOW_ID}/spec`]: { workflow: RAW_WORKFLOW },
+  [`PATCH /api/v1/workflows/${WORKFLOW_ID}`]: { workflow: RAW_WORKFLOW },
 };
+
+/** A minimal, secret-free spec accepted by WorkflowSpecSchema (write inputs). */
+const MINIMAL_SPEC = {
+  kind: "generic",
+  generic: { steps: [{ id: "run", command: "echo ok" }] },
+} as const;
+
+/** Write-tool inputs that reach each workflow-returning write handler. */
+const REGISTER_ARGS = {
+  name: "Has Secrets",
+  script_path: "run.sh",
+  cron_schedule: "0 0 * * *",
+  environment: "sandbox",
+} as const;
 
 function rawBackendFetch(): FetchLike {
   return async (url, init) => {
@@ -220,6 +249,46 @@ const READ_SURFACES: ReadSurface[] = [
   },
 ];
 
+interface WriteSurface {
+  id: string;
+  /** The MCP tool name (used by the enumeration guard). */
+  toolName: string;
+  /** Invoke the write tool and return its rendered text response. */
+  call: (client: Client) => Promise<string>;
+}
+
+/**
+ * Write tools whose response embeds a full `Workflow`. Each must redact just
+ * like the read tools; a write-scoped key must not be able to read a raw secret
+ * back out via a create/replace/no-op-update echo.
+ */
+const WRITE_SURFACES: WriteSurface[] = [
+  {
+    id: "mcp-tool:register_workflow",
+    toolName: "register_workflow",
+    call: (client) => callToolText(client, "register_workflow", REGISTER_ARGS),
+  },
+  {
+    id: "mcp-tool:set_workflow_spec",
+    toolName: "set_workflow_spec",
+    call: (client) =>
+      callToolText(client, "set_workflow_spec", {
+        id: WORKFLOW_ID,
+        spec: MINIMAL_SPEC,
+      }),
+  },
+  {
+    id: "mcp-tool:update_workflow",
+    toolName: "update_workflow",
+    call: (client) =>
+      // A pure metadata no-op (rename) — the exact write-scoped side-door.
+      callToolText(client, "update_workflow", {
+        id: WORKFLOW_ID,
+        name: "renamed-noop",
+      }),
+  },
+];
+
 describe("redaction coverage matrix", () => {
   it("upstream REST/SDK write-scope read really carries the raw secrets (non-vacuous)", async () => {
     // If this ever stops holding, the matrix below would pass vacuously.
@@ -243,6 +312,35 @@ describe("redaction coverage matrix", () => {
         expect(text, `${surface.id} leaked ${secret}`).not.toContain(secret);
       }
       // The allowlisted projection also drops non-allowlisted columns.
+      expect(text, `${surface.id} leaked internal_only`).not.toContain(
+        INTERNAL_ONLY,
+      );
+    });
+  }
+
+  it("upstream REST/SDK write responses really carry the raw secrets (non-vacuous)", async () => {
+    // Same guard as the read case, for the write endpoints: prove the mock
+    // upstream is adversarial so the write-tool assertions below are non-vacuous.
+    const sdk = rawSdk();
+    const upstream =
+      JSON.stringify(await sdk.registerWorkflow(REGISTER_ARGS)) +
+      JSON.stringify(await sdk.setWorkflowSpec(WORKFLOW_ID, MINIMAL_SPEC)) +
+      JSON.stringify(await sdk.updateWorkflow(WORKFLOW_ID, { name: "noop" }));
+    for (const secret of SECRET_VALUES) {
+      expect(upstream, `upstream missing planted secret ${secret}`).toContain(
+        secret,
+      );
+    }
+    expect(upstream).toContain(INTERNAL_ONLY);
+  });
+
+  for (const surface of WRITE_SURFACES) {
+    it(`${surface.id} emits no raw secret (write tool returning a workflow)`, async () => {
+      const client = await connectedClient();
+      const text = await surface.call(client);
+      for (const secret of SECRET_VALUES) {
+        expect(text, `${surface.id} leaked ${secret}`).not.toContain(secret);
+      }
       expect(text, `${surface.id} leaked internal_only`).not.toContain(
         INTERNAL_ONLY,
       );
@@ -290,5 +388,59 @@ describe("redaction coverage matrix", () => {
     expect(new Set(workflowReadTools)).toEqual(
       new Set(["list_workflows", "get_workflow"]),
     );
+  });
+
+  it("categorizes every workflow-mutating tool so no write echo skips redaction", async () => {
+    const client = await connectedClient();
+    const { tools } = await client.listTools();
+
+    expect(tools.every((tool) => tool.annotations !== undefined)).toBe(true);
+
+    // Every write (non-readOnly) tool that operates on a workflow. A newly-added
+    // workflow-mutating tool falls into this set and MUST be categorized below,
+    // or this assertion fails — forcing an author to decide if it echoes a
+    // Workflow (and therefore needs the projection) rather than silently
+    // shipping an unredacted write side-door.
+    const workflowWriteTools = new Set(
+      tools
+        .filter((tool) => tool.annotations?.readOnlyHint === false)
+        .map((tool) => tool.name)
+        .filter((name) => name.includes("workflow") && !name.includes("runs")),
+    );
+
+    // Write tools whose response embeds a full Workflow — MUST redact.
+    const workflowReturningWriteTools = new Set([
+      ...WRITE_SURFACES.map((surface) => surface.toolName),
+      // Already returns the redacted workflowDefinition(updated); covered by its
+      // own secret-preserving round-trip test and intentionally not modified.
+      "patch_workflow_spec",
+    ]);
+
+    // Write tools that do NOT echo a Workflow (DispatchResult, { deleted },
+    // { workflow_id, email_profile_id }) — no workflow secret to redact.
+    const nonWorkflowWriteTools = new Set([
+      "rerun_workflow",
+      "delete_workflow",
+      "run_workflow_now",
+      "enqueue_workflow",
+      "dispatch_workflow",
+      "set_workflow_email_profile",
+    ]);
+
+    expect(workflowWriteTools).toEqual(
+      new Set([...workflowReturningWriteTools, ...nonWorkflowWriteTools]),
+    );
+
+    // Each workflow-returning write tool is either asserted per-surface above
+    // or is patch_workflow_spec (already redacted): no unwrapped echo escapes.
+    const assertedPerSurface = new Set(
+      WRITE_SURFACES.map((surface) => surface.toolName),
+    );
+    for (const name of workflowReturningWriteTools) {
+      expect(
+        assertedPerSurface.has(name) || name === "patch_workflow_spec",
+        `workflow-returning write tool not covered: ${name}`,
+      ).toBe(true);
+    }
   });
 });

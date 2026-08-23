@@ -271,11 +271,17 @@ export function buildServer(deps: ServerDeps): McpServer {
     async (args) => {
       const environment = args.environment ?? config.defaultEnvironment;
       assertEnvironmentWritable(environment, config);
+      // The create response echoes the full stored Workflow. Because the
+      // managed integration key is write-scoped, an unredacted echo would be a
+      // secret side-door equivalent to the read-tool leak. Redact with the same
+      // projection so redaction is a uniform invariant across read AND write.
       return jsonResult(
-        await client.registerWorkflow({
-          ...(args as Parameters<typeof client.registerWorkflow>[0]),
-          environment,
-        }),
+        projectWorkflowForResource(
+          await client.registerWorkflow({
+            ...(args as Parameters<typeof client.registerWorkflow>[0]),
+            environment,
+          }),
+        ),
       );
     },
   );
@@ -293,10 +299,14 @@ export function buildServer(deps: ServerDeps): McpServer {
     },
     async (args) => {
       await assertWorkflowWritable(args.id);
+      // See register_workflow: the write response echoes the full Workflow;
+      // redact it so a write-scoped key cannot read raw secrets back out.
       return jsonResult(
-        await client.setWorkflowSpec(
-          args.id,
-          args.spec as Parameters<typeof client.setWorkflowSpec>[1],
+        projectWorkflowForResource(
+          await client.setWorkflowSpec(
+            args.id,
+            args.spec as Parameters<typeof client.setWorkflowSpec>[1],
+          ),
         ),
       );
     },
@@ -372,7 +382,11 @@ export function buildServer(deps: ServerDeps): McpServer {
       if (patch.environment) {
         assertEnvironmentWritable(patch.environment, config);
       }
-      return jsonResult(await client.updateWorkflow(id, patch));
+      // See register_workflow: even a no-op update (e.g. a rename) echoes the
+      // full stored Workflow; redact so this cannot be a secret side-door.
+      return jsonResult(
+        projectWorkflowForResource(await client.updateWorkflow(id, patch)),
+      );
     },
   );
 

@@ -110,12 +110,15 @@ Write: `create_environment`, `register_workflow`, `update_workflow`,
 Email-profile `smtp_password` values are masked (`••••••••`) on read; echo the
 mask back on update to keep the stored secret.
 
-`list_workflows` and `get_workflow` reads apply the same secret projection as the
-`chaos://` workflow resources: known nested secret fields (`secret`,
+Every MCP tool whose response embeds a workflow applies the same secret
+projection as the `chaos://` workflow resources — on both the read and write
+paths. The read tools `list_workflows` / `get_workflow` **and** the write tools
+`register_workflow` / `set_workflow_spec` / `update_workflow` (each echoes the
+full stored workflow) all replace known nested secret fields (`secret`,
 `signature_secret`, `cursor_api_key`, `smtp_password`) inside `spec_json` /
-`trigger_config` / `queue_config` are always replaced with `__redacted__`,
-**regardless of API-key scope** — the managed integration key is write-scoped, so
-tool reads never surface raw workflow secrets into agent context. Secret-preserving
+`trigger_config` / `queue_config` with `__redacted__`, **regardless of API-key
+scope** — the managed integration key is write-scoped, so no tool, not even a
+no-op update, surfaces raw workflow secrets into agent context. Secret-preserving
 spec edits still round-trip because `patch_workflow_spec` restores the stored
 secret server-side (see below), not via the caller.
 
