@@ -5,7 +5,7 @@
 **Date:** 2026-08-23
 **Owning repository:** `KleinPerkins/chaos-scheduler` (`~/dev/personal/chaos-scheduler`)
 **Plan-type:** standard
-**Review provenance:** Consolidated from a read-only, multi-reviewer credential-security audit (2026-07-14, plan-mode; five parallel explore reviewers over inbound/outbound webhooks, the Cursor/agent path, the SDK, and the remote HTTP MCP), re-anchored to an enterprise "corporate-managed individual laptop" threat model. The managed-key scope and the MCP tool-vs-resource redaction asymmetry were **re-verified against current `main`** (file:line below); the remaining findings are cited to code/PRs/issue #292 and **must be re-verified at dispatch**. NOT operator-accepted; the at-rest-encryption option in §5 (PR-E) is an explicit open operator decision.
+**Review provenance:** Consolidated from a read-only, multi-reviewer credential-security audit (2026-07-14, plan-mode; five parallel explore reviewers over inbound/outbound webhooks, the Cursor/agent path, the SDK, and the remote HTTP MCP), re-anchored to an enterprise "corporate-managed individual laptop" threat model. The managed-key scope and the MCP tool-vs-resource redaction asymmetry were **re-verified against current `main`** (file:line below); the remaining findings are cited to code/PRs/issue #292 and **must be re-verified at dispatch**. **At-rest-encryption posture DECIDED 2026-08-23:** Option A (FileVault-stack, implemented in PR-C) adopted as the chosen at-rest posture; PR-E / Option B (envelope encryption) deferred as optional — revisit only if Affirm IT/security mandates application-level at-rest encryption beyond FileVault.
 
 **Goal:** Close the credential-exposure gaps that a company IT/security review would flag for an individual using Chaos Scheduler on a managed laptop — chiefly stopping workflow secrets from reaching agent/LLM context via MCP, hardening secrets at rest, gating secrets out of git, and giving an auditable revoke/offboard path — without moving business logic out of `SchedulerService` or adding a secret-manager to paths that do not need one.
 **Architecture:** Additive, defence-in-depth hardening delivered as small independently-revertible slices (PR-A…PR-E) layered on the existing surfaces; the foundational managed-MCP-key → macOS Keychain migration (tracked under security issue #292) is the base this plan amends. Redaction is treated as a system invariant with a coverage test; at-rest protection is FileVault + file-hardening by default, with app-level envelope encryption as an optional, operator-gated escalation.
@@ -36,7 +36,7 @@ A prior read-only audit found that, although Chaos Scheduler already does many t
 - **PR-B — Secret-scan gate.** A CI secret-scan (e.g. gitleaks) + a pre-commit hook; an e2e/artifact scan asserting no known test secret appears in the built app, process env/argv, or config files.
 - **PR-C — At-rest hardening (FileVault-stack).** `0600` on the DB and backups, `0700` on app-data; `secure_delete` + VACUUM-on-delete; Time-Machine/cloud-sync exclusion; `.bak` sidecars covered by `.gitignore`.
 - **PR-D — Audit + offboarding + least-privilege.** A read-only `api_audit_log` access view; a one-action revoke-all-keys / purge-secrets offboarding path; default the managed Cursor MCP key to **read-only**, elevating to write only during an explicit authoring action.
-- **PR-E — Optional envelope encryption (DECISION-GATED, staged after the Keychain foundation).** Encrypt secrets at rest with a Keychain-held data key, only if IT requires application-level encryption beyond FileVault.
+- **PR-E — Optional envelope encryption (DEFERRED, staged after the Keychain foundation).** Encrypt secrets at rest with a Keychain-held data key, only if IT requires application-level encryption beyond FileVault.
 - **Documentation/caller-responsibility fixes:** correct `SECURITY.md`/SDK-README language on MCP-tool-vs-resource redaction, the SDK env-var key being the embedding app's responsibility, the `inbound_webhook_secret` setter/HMAC status, the `fix_agent_dispatches.detail` doc/code mismatch, and remove the "Add to Cursor" argv key-passing flow.
 
 **Non-goals:**
@@ -59,7 +59,7 @@ Verified against current `main` where cited; other findings are audit-reported (
 - **Slice by concern, not by file.** PR-A…PR-E are independently reviewable and revertible; each ships a failing-first test. PR-A (off-device egress) is the highest risk-reduction-per-effort and goes first; PR-B and PR-C are independent; PR-D depends on the Keychain foundation (#292); PR-E is optional and staged after it.
 - **Redaction as an enforced invariant.** A single coverage-matrix test enumerates every read surface (REST, IPC, MCP tools, MCP resources) and asserts none emits a raw secret for a fixture workflow, so a future read path cannot silently regress.
 - **Least privilege for the everyday session.** Combined with PR-A, a read-only default managed key makes the routine managed MCP session both minimal-scope and redacted; write is elevated only during an explicit authoring action, and secret-preserving edits continue to route through the existing `patch_workflow_spec` merge-preserve-sentinel mechanism (which fetches the real secret server-side, never exposing it to the caller).
-- **At rest: FileVault + hardening by default; envelope encryption only if required.** See the open decision in §5 (PR-E).
+- **At rest: FileVault + hardening by default (Option A, DECIDED); envelope encryption only if Affirm IT mandates it (Option B, DEFERRED).** See §5 (PR-E).
 - **Delivery:** git-data-API single-commit PRs, one concern per PR, merged via the automerge App; `SECURITY.md` updated in lockstep so its claims match the code.
 
 ## 5. Work items
@@ -86,11 +86,11 @@ Verified against current `main` where cited; other findings are audit-reported (
 - **Prerequisites:** the managed-key → Keychain foundation (#292).
 - **DoD:** the audit log is readable through the product; one action revokes all keys and purges secrets/Keychain items; the everyday managed session is read-only + redacted, with write elevated only on authoring.
 
-### PR-E — Optional envelope encryption (DECISION-GATED)
-- **OPEN OPERATOR DECISION — the one fork in this plan.** Reduces to: *does IT's at-rest threat model count same-user malware / another process on the unlocked laptop as in-scope for secrets at rest?*
-  - **Option A — FileVault-stack (PR-C; ships regardless).** Covers powered-off device loss, other-local-user reads, forensic residue, and backup/sync exfil; does **not** cover a same-user process reading live plaintext while unlocked; near-zero cost, no migration, HMAC secrets stay usable. *Recommended for a personal-use tool.*
-  - **Option B — envelope encryption (this PR-E, staged after the Keychain foundation).** Secrets are encrypted with a Keychain-held data key (same trust boundary the Keychain foundation already establishes); a copied/backed-up DB becomes ciphertext and same-user malware must also pull the ACL-bound Keychain key. Adds a one-time reversible migration + secure-wipe of pre-migration `.bak`s, a startup key fetch, and an AEAD/rotation/failure-mode burden. Choose if IT mandates application-level at-rest encryption.
-- **DoD (only if Option B is chosen):** secrets are AEAD-encrypted at rest under a Keychain data key; the migration is transactional and reversible; pre-migration backups are securely wiped; startup fetch and rotation are tested.
+### PR-E — Optional envelope encryption (DEFERRED)
+- **DECIDED 2026-08-23 — Option A (FileVault-stack) is the chosen at-rest posture.** PR-C implements this baseline. PR-E / Option B is deferred as optional and should only be revisited if Affirm IT/security ever mandates application-level at-rest encryption beyond FileVault.
+  - **Option A — FileVault-stack (PR-C; chosen).** Covers powered-off device loss, other-local-user reads, forensic residue, and backup/sync exfil at near-zero cost and with no data migration; HMAC secrets remain runtime-usable. Does not defend against malware already running as the same user on an unlocked Mac — a narrow threat that falls outside the practical scope of a personal-use tool.
+  - **Option B — envelope encryption (this PR-E; DEFERRED / optional).** Secrets would be AEAD-encrypted at rest under a Keychain-held data key (same trust boundary established by the Keychain foundation); a copied/backed-up DB becomes ciphertext and same-user malware must also pull the ACL-bound Keychain key. The only added protection over Option A is against malware already running as the same user on an unlocked Mac. Cost: a one-time reversible migration + secure-wipe of pre-migration `.bak`s, a startup key fetch, and ongoing AEAD/rotation/failure-mode complexity. **Revisit trigger:** Affirm IT/security mandates application-level at-rest encryption beyond FileVault.
+- **DoD (only if Option B is later adopted):** secrets are AEAD-encrypted at rest under a Keychain data key; the migration is transactional and reversible; pre-migration backups are securely wiped; startup fetch and rotation are tested.
 
 ### Documentation / caller-responsibility fixes (fold into the nearest slice)
 - Correct `SECURITY.md`/SDK-README on MCP-tool-vs-resource redaction (PR-A) and that the SDK/remote-MCP env-var key is the embedding app's responsibility (Chaos Scheduler cannot secure the caller's environment).
@@ -106,8 +106,8 @@ Verified against current `main` where cited; other findings are audit-reported (
 - **PR-B:** a planted secret fails CI + pre-commit; artifact scan green.
 - **PR-C:** DB/backups `0600`, app-data `0700`, `secure_delete` on, backups Time-Machine-excluded, `.bak` gitignored; asserted by test.
 - **PR-D:** `api_audit_log` readable in-product; one-action revoke/purge works; managed key read-only-by-default with elevate-on-authoring.
-- **PR-E (if chosen):** secrets AEAD-encrypted at rest under a Keychain key; migration reversible; pre-migration backups wiped; rotation tested.
-- **Program:** `SECURITY.md` claims match the code; issue #292's Keychain foundation landed; ADR-0009 fix-agent invariants intact; the at-rest-encryption decision (A vs B) recorded.
+- **PR-E (deferred / optional — revisit only if Affirm IT mandates app-level encryption beyond FileVault):** secrets AEAD-encrypted at rest under a Keychain key; migration reversible; pre-migration backups wiped; rotation tested.
+- **Program:** `SECURITY.md` claims match the code; issue #292's Keychain foundation landed; ADR-0009 fix-agent invariants intact; at-rest-encryption posture recorded as Option A (FileVault-stack, decided 2026-08-23).
 
 ## 7. Rollback
 
