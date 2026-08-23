@@ -42,11 +42,22 @@ jobs:
               - 'tsconfig.figma.json'
               - 'scripts/check-code-connect.mjs'
               - 'scripts/check-code-connect.test.mjs'
+              # A dependency bump (e.g. Dependabot moving @figma/code-connect across a
+              # major) can break `figma connect parse`; watch the manifests so that
+              # re-validates Code Connect instead of landing latently-red on main.
+              - 'package.json'
+              - 'package-lock.json'
               - '.github/workflows/ci.yml'
             visual:
               - 'src/**'
               - 'e2e/visual/**'
               - 'playwright.visual.config.ts'
+              # The visual job renders inside a pinned Playwright container, so a
+              # @playwright/test bump that drifts from the container tag breaks it
+              # (browser revision mismatch). Watch the manifests so a dep bump
+              # re-validates instead of landing latently-red on main.
+              - 'package.json'
+              - 'package-lock.json'
               - '.github/workflows/ci.yml'
             a11y:
               - 'src/**'
