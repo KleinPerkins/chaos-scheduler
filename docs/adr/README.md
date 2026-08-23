@@ -19,6 +19,7 @@ after acceptance, not even a status-bullet edit. Supersession is recorded only v
 | [0006](0006-passwordless-minisign-updater-signing.md) | Passwordless minisign updater signing, separate from and additional to Apple Developer-ID signing | accepted | 2026-08-22 |
 | [0007](0007-manual-runs-through-admission-control.md) | All manual runs go through admission control via the `dispatch_manual_run` choke point | accepted | 2026-08-22 |
 | [0008](0008-bespoke-svg-chart-primitives.md) | Charts use bespoke in-repo SVG primitives (d3-scale/d3-shape), not a charting library | accepted | 2026-08-22 |
+| [0009](0009-d05-fix-agent-propose-only.md) | The D05 fix-agent is propose-only — never auto-merged or auto-applied (born-draft PR, trusted-local-tool threat model) | accepted | 2026-08-23 |
 
 ## Conventions
 
