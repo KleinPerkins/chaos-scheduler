@@ -125,29 +125,47 @@ Outbound completion webhooks use a **different** scheme: HMAC-SHA256 over the
 **raw POST body** with `X-Chaos-Event: run.succeeded | run.failed`. See
 [packages/INTEGRATION.md](packages/INTEGRATION.md) §4–5.
 
-## Secrets storage & read-scope redaction
+## Secrets storage & read redaction
 
-| Material                                    | At rest                                             | Over REST/MCP (read scope)            |
+| Material                                    | At rest                                             | Over REST (read scope)                |
 | ------------------------------------------- | --------------------------------------------------- | ------------------------------------- |
 | API key secrets                             | Salted hash in SQLite; plaintext shown once at mint | Keys are not listable over REST       |
 | Webhook / operator secrets in workflow JSON | Stored in `spec_json` / `trigger_config`            | Replaced with `__redacted__` sentinel |
 | Cursor / SMTP settings                      | Local SQLite settings                               | Desktop IPC only (not REST)           |
 
-**Read-scope redaction** (`read` scope and MCP tools): nested fields named
-`secret`, `signature_secret`, `cursor_api_key`, or `smtp_password` in workflow
-spec/trigger JSON are replaced with the stable sentinel `__redacted__`
-(distinct from empty/unset). Applied in the service layer so REST/SDK/tool reads
-inherit identical behavior.
+**Service-layer read-scope redaction** (REST/SDK): at `read` scope, nested
+fields named `secret`, `signature_secret`, `cursor_api_key`, or `smtp_password`
+in workflow spec/trigger JSON are replaced with the stable sentinel
+`__redacted__` (distinct from empty/unset). A `write` or `admin` REST/SDK caller
+instead receives full secrets so a direct edit/PATCH round-trip keeps working.
 
-**Resource projection** (`chaos://workflows` and
-`chaos://workflows/{id}`): MCP applies an additional scope-independent boundary
-before workflow state enters agent context. Known secret fields are always
-redacted across spec, trigger, and queue JSON; parsing is bounded; malformed or
-oversized nested JSON is replaced with `__redacted_invalid_json__`.
+**MCP redaction is unconditional — every workflow-returning tool and
+resource.** Every MCP surface that can place workflow state into agent/LLM
+context applies the projection redaction **regardless of API-key scope**, on
+BOTH the read and write paths:
 
-**Write/admin round-trip**: REST/SDK and MCP tool callers with `write` or `admin`
-scope receive full secrets so edit and PATCH round-trips keep working. Workflow
-resources are intentionally not write round-trip payloads.
+- **read tools** — `list_workflows`, `get_workflow`;
+- **write tools that echo the stored workflow** — `register_workflow`,
+  `set_workflow_spec`, `update_workflow`. A create/replace/no-op-update returns
+  the full stored row, so without redaction a write-scoped key could read a raw
+  secret back out through a write side-door;
+- **`patch_workflow_spec`** — returns only the redacted stored definition; and
+- **resources** — `chaos://workflows`, `chaos://workflows/{id}`,
+  `chaos://workflows/{id}/definition`, `chaos://workflows/index`.
+
+The managed Cursor MCP integration key is write-scoped, so this scope-independent
+boundary (not the service-layer scope check) is what keeps workflow secrets out
+of agent context. Known secret fields are always redacted across spec, trigger,
+and queue JSON; parsing is bounded; malformed or oversized nested JSON is
+replaced with `__redacted_invalid_json__`.
+
+**Secret-preserving edits never hand a secret to the caller.** MCP tool and
+resource reads are not write round-trip payloads. To edit a spec that still
+contains secrets, `patch_workflow_spec` re-fetches the stored value
+**server-side** and preserves it through the `__redacted__` sentinel, so the
+real secret is never returned to the MCP caller. A `write`/`admin` REST/SDK
+caller that needs the raw values for a round-trip must read them directly over
+REST, never through an MCP tool or resource.
 
 ## Child-process environment scrubbing
 
