@@ -216,7 +216,13 @@ export function buildServer(deps: ServerDeps): McpServer {
       description: "List all registered workflows across environments.",
       readOnly: true,
     },
-    async () => jsonResult(await client.listWorkflows()),
+    // Redact known secret fields before results reach agent/LLM context. The
+    // managed integration key is write-scoped, so the backend's scope-based
+    // redaction is bypassed; this projection (the same one the chaos://
+    // resources use) is applied unconditionally so tool reads are never a
+    // secret-leaking path regardless of key scope.
+    async () =>
+      jsonResult(projectWorkflowsForResource(await client.listWorkflows())),
   );
 
   tool(
@@ -227,7 +233,10 @@ export function buildServer(deps: ServerDeps): McpServer {
       inputSchema: { id: z.string().describe("Workflow id") },
       readOnly: true,
     },
-    async (args) => jsonResult(await client.getWorkflow(args.id)),
+    // See list_workflows: redact unconditionally so a write-scoped key cannot
+    // surface raw workflow secrets through this read tool.
+    async (args) =>
+      jsonResult(projectWorkflowForResource(await client.getWorkflow(args.id))),
   );
 
   tool(
