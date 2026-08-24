@@ -1897,6 +1897,39 @@ impl SchedulerService {
             .map_err(|e| ServiceError::Internal(e.to_string()))
     }
 
+    /// Whether at-rest secrets are currently LOCKED — the envelope master key
+    /// was missing/unreadable at open (ADR 0011). While locked, encrypted
+    /// fields read back as `__secret_unavailable__` and secret writes are
+    /// rejected; all non-secret operations proceed. The UI uses this to show
+    /// the "re-enter secrets" recovery affordance.
+    pub fn secrets_locked(&self) -> bool {
+        self.db.secrets_locked()
+    }
+
+    /// Rotate the envelope MASTER KEY (KEK): mint a fresh KEK and re-wrap the
+    /// same DEK under it. No field data is re-encrypted. See
+    /// [`crate::db::Database::rotate_kek`].
+    pub fn rotate_master_key(&self) -> ServiceResult<()> {
+        self.db.rotate_kek().map_err(ServiceError::Internal)
+    }
+
+    /// Rotate the envelope DATA KEY (DEK): mint a fresh DEK and re-encrypt every
+    /// in-scope secret field under it (bumping the key version). See
+    /// [`crate::db::Database::rotate_dek`].
+    pub fn rotate_data_key(&self) -> ServiceResult<()> {
+        self.db.rotate_dek().map_err(ServiceError::Internal)
+    }
+
+    /// Re-provision the envelope under a fresh KEK+DEK — the operator recovery
+    /// path when secrets are locked (lost/unreadable master key). Existing
+    /// ciphertext is left intact (reads as the sentinel) until the operator
+    /// re-enters each secret. See [`crate::db::Database::reprovision_secrets`].
+    pub fn reprovision_secrets(&self) -> ServiceResult<()> {
+        self.db
+            .reprovision_secrets()
+            .map_err(ServiceError::Internal)
+    }
+
     /// Begin an offboard: INCREMENT the in-flight offboard refcount and return an
     /// RAII guard that decrements it on drop. All key-mint paths
     /// ([`create_api_key`]) reject while the count is > 0, so a concurrent mint
@@ -2355,7 +2388,14 @@ fn redact_secret_fields(value: &mut serde_json::Value) {
         serde_json::Value::Object(map) => {
             for (key, child) in map.iter_mut() {
                 if crate::db::SECRET_SPEC_FIELD_NAMES.contains(&key.as_str())
-                    && child.as_str().is_some_and(|s| !s.is_empty())
+                    && child.as_str().is_some_and(|s| {
+                        // Preserve the distinct "master key unavailable" sentinel
+                        // that decrypt-on-read substitutes for an undecryptable
+                        // secret: it is an already-terminal state, not a value to
+                        // scope-redact. Collapsing it into `__redacted__` would hide
+                        // "re-enter this secret" behind "hidden on read".
+                        !s.is_empty() && s != crate::envelope::SECRET_UNAVAILABLE_SENTINEL
+                    })
                 {
                     *child = serde_json::Value::String(
                         SchedulerService::READ_SCOPE_SECRET_SENTINEL.into(),
@@ -2626,6 +2666,87 @@ mod tests {
         assert_eq!(db.get_email_profile(&saved.id).unwrap().smtp_password, "");
         let stored = db.get_workflow(&wf.id).unwrap().spec_json.unwrap();
         assert!(!stored.contains("hmac-shhh"), "webhook secret purged");
+    }
+
+    /// Envelope encryption (ADR 0011) fails-first: with the secret sealed as
+    /// `enc:v1:` at rest, the read-scope redaction still substitutes
+    /// `__redacted__` (decrypt-on-read yields plaintext, redaction runs ABOVE it),
+    /// while a write/admin scope round-trips the real decrypted plaintext. Before
+    /// the read seam exists, the write-scope assertion (plaintext recovered from
+    /// ciphertext) fails.
+    #[test]
+    fn read_scope_redaction_still_redacts_secret_encrypted_at_rest() {
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec![crate::branding::DEFAULT_ENVIRONMENT], true);
+
+        let wf = svc
+            .create_workflow(draft("hook", crate::branding::DEFAULT_ENVIRONMENT), false)
+            .unwrap();
+        db.set_workflow_spec(&wf.id, "generic", Some(r#"{"secret":"hmac-shhh"}"#))
+            .unwrap();
+
+        // Sealed at rest: `enc:v1:`, never the plaintext.
+        let raw: String = {
+            let conn = rusqlite::Connection::open(db.path()).unwrap();
+            conn.query_row(
+                "SELECT spec_json FROM workflows WHERE id = ?1",
+                rusqlite::params![wf.id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert!(
+            raw.contains("enc:v1:"),
+            "spec must be sealed at rest: {raw}"
+        );
+        assert!(!raw.contains("hmac-shhh"), "plaintext must not be at rest");
+
+        // Read scope: the DECRYPTED value is redacted to the sentinel.
+        let redacted = svc
+            .get_workflow_for_scopes(&wf.id, &["read".to_string()])
+            .unwrap();
+        let redacted_spec = redacted.spec_json.unwrap();
+        assert!(redacted_spec.contains(SchedulerService::READ_SCOPE_SECRET_SENTINEL));
+        assert!(!redacted_spec.contains("hmac-shhh"));
+
+        // Write scope: transparent decrypted plaintext (round-trip edit works).
+        let full = svc
+            .get_workflow_for_scopes(&wf.id, &["write".to_string()])
+            .unwrap();
+        assert!(full.spec_json.unwrap().contains("hmac-shhh"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// B2 fails-first (ADR 0011): read-scope / MCP redaction must PRESERVE the
+    /// `__secret_unavailable__` sentinel that decrypt-on-read substitutes when
+    /// the master key is unavailable — never collapse it into the scope
+    /// `__redacted__` sentinel. The two are distinct states to the operator:
+    /// "hidden on read" vs "master key unavailable — re-enter this secret". A
+    /// normal plaintext secret must still redact to `__redacted__`.
+    #[test]
+    fn redaction_preserves_secret_unavailable_sentinel() {
+        use crate::envelope::SECRET_UNAVAILABLE_SENTINEL;
+
+        let mut value: serde_json::Value = serde_json::from_str(&format!(
+            r#"{{"secret":"{SECRET_UNAVAILABLE_SENTINEL}","nested":{{"signature_secret":"real-plaintext"}}}}"#
+        ))
+        .unwrap();
+        redact_secret_fields(&mut value);
+
+        // The undecryptable-secret sentinel survives redaction unchanged.
+        assert_eq!(
+            value["secret"],
+            serde_json::Value::String(SECRET_UNAVAILABLE_SENTINEL.to_string()),
+            "the __secret_unavailable__ sentinel must survive redaction: {value}"
+        );
+        // A normal plaintext secret is still redacted to __redacted__.
+        assert_eq!(
+            value["nested"]["signature_secret"],
+            serde_json::Value::String(SchedulerService::READ_SCOPE_SECRET_SENTINEL.to_string()),
+            "a normal plaintext secret must still be scope-redacted: {value}"
+        );
     }
 
     /// PR-D(a) fails-first: overlapping offboards must keep API-key minting

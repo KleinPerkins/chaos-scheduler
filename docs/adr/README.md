@@ -21,6 +21,7 @@ after acceptance, not even a status-bullet edit. Supersession is recorded only v
 | [0008](0008-bespoke-svg-chart-primitives.md)              | Charts use bespoke in-repo SVG primitives (d3-scale/d3-shape), not a charting library                                     | accepted | 2026-08-22 |
 | [0009](0009-d05-fix-agent-propose-only.md)                | The D05 fix-agent is propose-only — never auto-merged or auto-applied (born-draft PR, trusted-local-tool threat model)    | accepted | 2026-08-23 |
 | [0010](0010-keychain-managed-mcp-key.md)                  | Managed MCP scheduler key lives in the macOS Keychain, resolved by an app-owned launcher — never at rest in a config file | accepted | 2026-08-24 |
+| [0011](0011-envelope-encryption-secrets-at-rest.md)       | Secret-bearing at-rest fields are envelope-encrypted (KEK in Keychain, wrapped DEK in the DB), on by default              | accepted | 2026-08-24 |
 
 ## Conventions
 

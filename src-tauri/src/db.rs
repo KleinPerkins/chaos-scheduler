@@ -1,6 +1,9 @@
+use crate::envelope::{self, EnvelopeState, FieldCipher, SECRET_UNAVAILABLE_SENTINEL};
+use crate::keychain::KeyStore;
 use rusqlite::{params, types::Type, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::Arc;
 
 // ─── At-rest hardening helpers (PR-C, FileVault-stack) ────────────────────────
 //
@@ -1442,6 +1445,36 @@ fn blank_secret_fields(value: &mut serde_json::Value) -> bool {
 /// and to document the column order the scrub loop relies on.
 type WorkflowSecretRow = (String, Option<String>, Option<String>, Option<String>);
 
+/// The persisted `envelope_keys` row. `kek_generation` records WHICH Keychain
+/// KEK slot the `wrapped_dek` is wrapped under (ADR 0011 B4) so crash-safe KEK
+/// rotation can flip generations atomically. A struct (not a tuple) keeps the
+/// generational fields legible at every call site.
+struct EnvelopeRow {
+    version: i64,
+    algo: String,
+    wrapped_dek: Vec<u8>,
+    wrap_nonce: Vec<u8>,
+    kek_generation: i64,
+}
+
+/// Where a crash-safe KEK rotation stops, so tests can simulate a crash at
+/// either two-store window (ADR 0011 B4). Production always runs
+/// [`KekRotateStop::Complete`]; the intermediate stops let a test prove BOTH
+/// crash windows leave the DB openable. The non-`Complete` variants are only
+/// constructed under `#[cfg(test)]`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
+enum KekRotateStop {
+    /// Run the entire rotation (production behavior).
+    Complete,
+    /// Stop right after the new KEK is written to its new Keychain slot, BEFORE
+    /// the DB transaction commits (crash window 1: DB still points at gen N).
+    AfterNewKekStored,
+    /// Stop right after the DB commit records gen N+1, BEFORE the old KEK slot is
+    /// deleted (crash window 2: both slots present, DB points at gen N+1).
+    AfterDbCommit,
+}
+
 /// Decide the new value (if any) for a stored JSON blob during the offboarding
 /// purge, returning `Some(new_value)` to write or `None` to leave the column
 /// untouched. Shares [`SECRET_SPEC_FIELD_NAMES`], so `spec_json`,
@@ -1488,6 +1521,49 @@ fn is_secret_scheduler_config_key(key: &str) -> bool {
         || key.ends_with(".cursor_api_key")
 }
 
+/// Count non-empty in-scope secret leaves in a JSON blob that are NOT yet
+/// `enc:v1:` ciphertext. A `None`/empty/non-JSON blob contributes zero. Mirrors
+/// the scope of [`Database::transform_secret_fields`] (a secret-named key with a
+/// non-string value is descended into) so the sealing state-machine's
+/// "plaintext remaining" count can never drift from what the sweep seals.
+fn count_plaintext_secret_leaves(blob: Option<&str>) -> usize {
+    fn walk(value: &serde_json::Value, count: &mut usize) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    if SECRET_SPEC_FIELD_NAMES.contains(&key.as_str()) {
+                        match child.as_str() {
+                            Some(s) if !s.is_empty() && !envelope::is_ciphertext(s) => *count += 1,
+                            Some(_) => {}
+                            None => walk(child, count),
+                        }
+                    } else {
+                        walk(child, count);
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, count);
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(raw) = blob else {
+        return 0;
+    };
+    if raw.is_empty() {
+        return 0;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return 0;
+    };
+    let mut count = 0usize;
+    walk(&value, &mut count);
+    count
+}
+
 #[derive(Debug, Clone)]
 pub struct IdempotencyRecord {
     pub run_id: Option<String>,
@@ -1505,17 +1581,90 @@ pub enum IdempotencyReservation {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 18;
+pub const CURRENT_SCHEMA_VERSION: i64 = 19;
 
 pub struct Database {
     path: String,
+    /// Envelope-encryption state (ADR 0011): the injected key store plus the
+    /// in-memory DEK cipher. Provisioned once at `open`; held for the process
+    /// lifetime so the KEK is never re-fetched per operation.
+    envelope: EnvelopeState,
+}
+
+/// Which envelope transform to apply to an in-scope secret field (ADR 0011).
+/// Encrypt/Decrypt use the process cipher; `Reencrypt` carries the explicit
+/// old/new ciphers used by DEK rotation.
+enum FieldTransform<'a> {
+    /// Seal plaintext under the active DEK. Rejected (Err) while locked.
+    Encrypt,
+    /// Open ciphertext under the active DEK. Never errors: a locked/undecryptable
+    /// value becomes the [`SECRET_UNAVAILABLE_SENTINEL`].
+    Decrypt,
+    /// Decrypt under `old` and re-seal under `new` (DEK rotation).
+    Reencrypt {
+        old: &'a FieldCipher,
+        new: &'a FieldCipher,
+    },
+}
+
+/// Wrap an [`envelope::EnvelopeError`] as a `rusqlite::Error` so the encryption
+/// seam can surface a clear failure through the existing `rusqlite::Result`
+/// write signatures (e.g. a rejected secret write while the master key is
+/// unavailable) without widening every function's error type.
+fn envelope_err_to_sqlite(err: envelope::EnvelopeError) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(err))
+}
+
+/// Securely wipe every pre-migration `.bak` sidecar for `db_path`. Called after
+/// a v19 upgrade actually sealed pre-existing plaintext: those backups still
+/// hold the plaintext secrets, so leaving them at rest would defeat the
+/// encryption. Best-effort and idempotent — overwrites-then-unlinks each
+/// sidecar via [`secure_remove`]; a fresh DB (nothing sealed) never calls this,
+/// preserving the normal "keep a rollback backup" behavior.
+fn secure_wipe_migration_backups(db_path: &str) {
+    let p = std::path::Path::new(db_path);
+    let dir = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let Some(file_name) = p.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let prefix = format!("{file_name}.pre-migrate-");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with(&prefix) && name.ends_with(".bak") {
+            secure_remove(&entry.path());
+        }
+    }
 }
 
 impl Database {
+    /// Production constructor: uses the platform key store (macOS Keychain).
     pub fn new(app_data_dir: &Path) -> Self {
+        // Tests MUST NEVER touch the real Keychain (it hangs/fails in headless
+        // CI — see `keychain.rs`), so a test build defaults to an in-memory
+        // fake key store; tests needing to drive the store explicitly use
+        // `new_with_key_store`.
+        #[cfg(test)]
+        let key_store: Arc<dyn KeyStore> = Arc::new(crate::keychain::FakeKeyStore::new());
+        #[cfg(not(test))]
+        let key_store: Arc<dyn KeyStore> = Arc::from(crate::keychain::default_key_store());
+        Self::new_with_key_store(app_data_dir, key_store)
+    }
+
+    /// Constructor with an injected key store. The envelope KEK/DEK are
+    /// provisioned during `init` using this store; a lost/unreadable master
+    /// key degrades to the secrets-locked state rather than panicking.
+    pub fn new_with_key_store(app_data_dir: &Path, key_store: Arc<dyn KeyStore>) -> Self {
         let db_path = app_data_dir.join("scheduler.db");
         let db = Database {
             path: db_path.to_string_lossy().to_string(),
+            envelope: EnvelopeState::new(key_store),
         };
         db.init().expect("Failed to initialize database");
         // Harden the DB and its parent directory at every startup: 0600 on
@@ -1523,6 +1672,18 @@ impl Database {
         // and the Time Machine backup-exclusion xattr (macOS).
         harden_db_files(&db_path);
         db
+    }
+
+    /// Test-only constructor for the migration-isolation fixtures that build a
+    /// `Database` around a bare path and drive `run_migrations` directly
+    /// (no `init`, so the cipher stays unprovisioned/locked — those migrations
+    /// never touch secret fields). Injects an in-memory fake key store.
+    #[cfg(test)]
+    fn test_at_path(path: String) -> Self {
+        Database {
+            path,
+            envelope: EnvelopeState::new(Arc::new(crate::keychain::FakeKeyStore::new())),
+        }
     }
 
     pub fn path(&self) -> &str {
@@ -1682,6 +1843,13 @@ impl Database {
         }
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN trigger_config TEXT;");
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN queue_config TEXT;");
+        // `spec_json` is authoritatively added by `migrate_v3`, so every real DB
+        // already carries it. Re-assert it here (idempotent; the duplicate-column
+        // error is swallowed) alongside its sibling secret-bearing blobs so the
+        // v19 envelope sweep's `SELECT ... spec_json FROM workflows` is always
+        // valid — including for partial migration-isolation fixtures stamped past
+        // v3 that never seeded the column.
+        let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN spec_json TEXT;");
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN domain TEXT;");
         let _ = conn.execute_batch("ALTER TABLE workflows ADD COLUMN timezone TEXT DEFAULT 'UTC';");
         let _ = conn.execute_batch("ALTER TABLE runs ADD COLUMN trigger_kind TEXT;");
@@ -1724,6 +1892,29 @@ impl Database {
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );",
         )?;
+        // Envelope-encryption key table (ADR 0011): a single row (id = 1) holds
+        // the KEK-wrapped DEK. Created here so provisioning can write it on a
+        // fresh DB before the migration chain runs; migration v19 also creates
+        // it (IF NOT EXISTS) for DBs upgrading from <= v18.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS envelope_keys (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL,
+                algo TEXT NOT NULL,
+                wrapped_dek BLOB NOT NULL,
+                wrap_nonce BLOB NOT NULL,
+                kek_generation INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
+        )?;
+        // Defensive backfill: a dev DB created from an earlier cut of this
+        // (unshipped) branch may already have an `envelope_keys` table WITHOUT
+        // `kek_generation`. Add it idempotently; `DEFAULT 1` backfills the single
+        // existing row to the initial generation (which is what a pre-rotation
+        // provision is). Harmless when the column already exists.
+        let _ = conn.execute_batch(
+            "ALTER TABLE envelope_keys ADD COLUMN kek_generation INTEGER NOT NULL DEFAULT 1;",
+        );
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS run_attempts (
                 id TEXT PRIMARY KEY,
@@ -1990,9 +2181,38 @@ impl Database {
              INSERT OR IGNORE INTO scheduler_config (key, value) VALUES ('notify_on_success', 'false');",
         )?;
 
+        // Provision the envelope keys (ADR 0011) BEFORE migrations so the DEK
+        // cipher is available for the at-rest encryption sweep below. A
+        // missing KEK is minted; an unreadable KEK degrades to secrets-locked
+        // (no panic) so the app still runs and non-secret operations proceed.
+        self.provision_envelope(&conn);
+
         // Apply versioned, transactional migrations (with a pre-migration backup)
         // on top of the idempotent base schema established above.
         self.run_migrations(&conn, existing_version)?;
+
+        // Encrypt any in-scope plaintext secret fields still at rest (ADR 0011).
+        // Idempotent (skips values already `enc:v1:`), transactional, and cheap
+        // once everything is sealed. This performs the v19 plaintext->ciphertext
+        // conversion and also self-heals a DB that was opened while the master
+        // key was temporarily unreadable. A no-op (returns 0) when locked.
+        // Sealing state-machine (ADR 0011 S2+S3), evaluated on EVERY open. A seal
+        // is "in progress" when in-scope plaintext is present at rest OR a prior
+        // open recorded the durable incomplete flag. Record that BEFORE the sweep
+        // so a crash mid-seal (or a locked KEK) leaves a durable marker; only when
+        // a seal is in progress do we reconcile afterward (wipe the plaintext
+        // `.pre-migrate` sidecars once fully sealed, else keep them and retry next
+        // open). A fresh DB with nothing to seal never touches its rollback
+        // backup, preserving the normal "keep a rollback backup" behavior.
+        let sealing_in_progress =
+            self.count_in_scope_plaintext(&conn)? > 0 || self.sealing_incomplete_flag(&conn)?;
+        if sealing_in_progress {
+            self.set_sealing_incomplete_flag(&conn, true)?;
+        }
+        let _ = self.encrypt_in_scope_plaintext(&conn)?;
+        if sealing_in_progress {
+            self.reconcile_sealing_state(&conn)?;
+        }
 
         // Seed default queues AFTER migrations so this always runs against the
         // final `environment`-keyed queues shape (v5+), never the legacy corpus
@@ -2001,6 +2221,914 @@ impl Database {
             "INSERT OR IGNORE INTO queues (name, environment, capacity) VALUES ('production-default', 'production', 4);
              INSERT OR IGNORE INTO queues (name, environment, capacity) VALUES ('sandbox-default', 'sandbox', 2);",
         )?;
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // Envelope encryption (ADR 0011)
+    // ---------------------------------------------------------------------
+
+    /// Whether secrets are currently LOCKED — the master key was
+    /// missing/unreadable at open (or a re-provision is pending), so encrypted
+    /// fields read back as the [`SECRET_UNAVAILABLE_SENTINEL`] and new secret
+    /// writes are rejected. Non-secret operations are unaffected.
+    pub fn secrets_locked(&self) -> bool {
+        self.envelope.is_locked()
+    }
+
+    /// Read the single `envelope_keys` row, if present.
+    fn read_envelope_row(&self, conn: &Connection) -> rusqlite::Result<Option<EnvelopeRow>> {
+        conn.query_row(
+            "SELECT version, algo, wrapped_dek, wrap_nonce, kek_generation \
+             FROM envelope_keys WHERE id = 1",
+            [],
+            |row| {
+                Ok(EnvelopeRow {
+                    version: row.get::<_, i64>(0)?,
+                    algo: row.get::<_, String>(1)?,
+                    wrapped_dek: row.get::<_, Vec<u8>>(2)?,
+                    wrap_nonce: row.get::<_, Vec<u8>>(3)?,
+                    kek_generation: row.get::<_, i64>(4)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Upsert the single `envelope_keys` row (id = 1). `kek_generation` records
+    /// which Keychain KEK slot `wrapped_dek` is wrapped under (ADR 0011 B4).
+    fn write_envelope_row(
+        &self,
+        conn: &Connection,
+        version: i64,
+        algo: &str,
+        wrapped_dek: &[u8],
+        wrap_nonce: &[u8],
+        kek_generation: i64,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT INTO envelope_keys \
+                (id, version, algo, wrapped_dek, wrap_nonce, kek_generation, created_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, datetime('now'))
+             ON CONFLICT(id) DO UPDATE SET
+                version = excluded.version,
+                algo = excluded.algo,
+                wrapped_dek = excluded.wrapped_dek,
+                wrap_nonce = excluded.wrap_nonce,
+                kek_generation = excluded.kek_generation",
+            params![version, algo, wrapped_dek, wrap_nonce, kek_generation],
+        )?;
+        Ok(())
+    }
+
+    /// Provision the envelope keys at open and install the in-memory cipher.
+    /// A failure to obtain a usable DEK degrades to the secrets-locked state
+    /// (logs a warning, leaves any existing ciphertext intact) rather than
+    /// panicking — a lost/unreadable master key must never brick the app or
+    /// destroy data.
+    fn provision_envelope(&self, conn: &Connection) {
+        match self.provision_envelope_inner(conn) {
+            Ok(cipher) => self.envelope.set_active(Arc::new(cipher)),
+            Err(reason) => {
+                log::warn!(
+                    "Envelope encryption LOCKED: {reason}. Non-secret operations proceed; \
+                     encrypted fields read as `{SECRET_UNAVAILABLE_SENTINEL}` and secret \
+                     writes are rejected until the master key is restored or secrets are \
+                     re-provisioned."
+                );
+                self.envelope.set_locked();
+            }
+        }
+    }
+
+    /// Core provisioning: fetch/mint the KEK and unwrap/create the DEK. Returns
+    /// the ready [`FieldCipher`] or a human-readable reason for locking.
+    ///
+    /// CRITICAL: a KEK is only ever MINTED when there is no existing wrapped-DEK
+    /// row (a fresh provision). If a wrapped DEK already exists, the KEK MUST be
+    /// present and readable to unwrap it — an absent/unreadable/wrong KEK locks
+    /// (never mints a replacement, which would orphan the existing ciphertext).
+    fn provision_envelope_inner(&self, conn: &Connection) -> Result<FieldCipher, String> {
+        let store = self.envelope.key_store();
+        let existing = self
+            .read_envelope_row(conn)
+            .map_err(|e| format!("reading envelope_keys: {e}"))?;
+
+        match existing {
+            // Existing wrapped DEK: require the KEK AT THE ROW'S RECORDED
+            // GENERATION to unwrap it (B4 — after a KEK rotation the live slot is
+            // `db-envelope-kek-v{N}`, not the gen-1 account). NEVER mint a
+            // replacement (that would orphan the ciphertext); an absent/unreadable
+            // KEK degrades to the locked state.
+            Some(row) => {
+                // Refuse to decrypt under an algorithm we do not implement (a
+                // future AEAD bump must ship its own read path); lock rather than
+                // misread. The algo identifier is non-secret.
+                if row.algo != envelope::ENVELOPE_ALGO {
+                    return Err(format!(
+                        "unsupported envelope algorithm at rest: {}",
+                        row.algo
+                    ));
+                }
+                let account = envelope::master_kek_account(row.kek_generation);
+                let kek_b64 = match store.get(envelope::MASTER_KEK_KEYCHAIN_SERVICE, &account) {
+                    Ok(Some(b64)) => b64,
+                    Ok(None) => return Err("master key absent but a wrapped DEK exists".into()),
+                    Err(e) => return Err(format!("master key unreadable: {e}")),
+                };
+                let kek = envelope::kek_from_b64(&kek_b64).map_err(|e| e.to_string())?;
+                let dek = envelope::unwrap_dek(&kek, &row.wrapped_dek, &row.wrap_nonce)
+                    .map_err(|e| format!("unwrapping DEK: {e}"))?;
+                Ok(FieldCipher::from_bytes(dek, row.version))
+            }
+            // No wrapped DEK yet: fresh provision at the initial generation. Mint
+            // the KEK if absent.
+            None => {
+                let account = envelope::master_kek_account(envelope::INITIAL_KEK_GENERATION);
+                let kek = match store.get(envelope::MASTER_KEK_KEYCHAIN_SERVICE, &account) {
+                    Ok(Some(b64)) => envelope::kek_from_b64(&b64).map_err(|e| e.to_string())?,
+                    Ok(None) => {
+                        let kek = envelope::generate_key();
+                        store
+                            .set(
+                                envelope::MASTER_KEK_KEYCHAIN_SERVICE,
+                                &account,
+                                &envelope::kek_to_b64(&kek),
+                            )
+                            .map_err(|e| format!("storing new master key: {e}"))?;
+                        kek
+                    }
+                    Err(e) => return Err(format!("master key unreadable: {e}")),
+                };
+                let dek = envelope::generate_key();
+                let (wrapped, nonce) = envelope::wrap_dek(&kek, &dek).map_err(|e| e.to_string())?;
+                self.write_envelope_row(
+                    conn,
+                    1,
+                    envelope::ENVELOPE_ALGO,
+                    &wrapped,
+                    &nonce,
+                    envelope::INITIAL_KEK_GENERATION,
+                )
+                .map_err(|e| format!("writing envelope_keys: {e}"))?;
+                Ok(FieldCipher::from_bytes(dek, 1))
+            }
+        }
+    }
+
+    /// Apply one field transform to a single string value, returning
+    /// `Some(new)` when the stored representation should change or `None` when
+    /// it is already in the desired form (idempotent no-op).
+    fn transform_one(
+        &self,
+        aad: &str,
+        value: &str,
+        mode: &FieldTransform<'_>,
+    ) -> envelope::EnvelopeResult<Option<String>> {
+        match mode {
+            FieldTransform::Encrypt => {
+                if envelope::is_ciphertext(value) {
+                    return Ok(None);
+                }
+                match self.envelope.cipher() {
+                    Some(cipher) => Ok(Some(cipher.encrypt(aad, value)?)),
+                    None => Err(envelope::EnvelopeError::SecretsLocked),
+                }
+            }
+            FieldTransform::Decrypt => {
+                if !envelope::is_ciphertext(value) {
+                    return Ok(None);
+                }
+                let plain = match self.envelope.cipher() {
+                    Some(cipher) => cipher
+                        .decrypt(aad, value)
+                        .unwrap_or_else(|_| SECRET_UNAVAILABLE_SENTINEL.to_string()),
+                    None => SECRET_UNAVAILABLE_SENTINEL.to_string(),
+                };
+                Ok(Some(plain))
+            }
+            FieldTransform::Reencrypt { old, new } => {
+                // Plaintext encountered mid-rotation: seal it under the new DEK.
+                if !envelope::is_ciphertext(value) {
+                    return Ok(Some(new.encrypt(aad, value)?));
+                }
+                let plain = old.decrypt(aad, value)?;
+                Ok(Some(new.encrypt(aad, &plain)?))
+            }
+        }
+    }
+
+    /// Recursively transform every in-scope secret-named string field of a JSON
+    /// value in place, mirroring [`blank_secret_fields`] so the encrypted field
+    /// set can never drift from the redaction/offboard field set
+    /// ([`SECRET_SPEC_FIELD_NAMES`]). Returns whether anything changed.
+    ///
+    /// AAD binds each value to `table:row_id:column:field` (ADR 0011 S1), so a
+    /// ciphertext cannot be relocated to a DIFFERENT ROW of the same table/column
+    /// (nor a different column/field): AEAD-open under the destination's AAD
+    /// fails. `row_id` is the row's stable primary key for multi-row tables; a
+    /// single-row config table passes a constant (it has no swap surface).
+    fn transform_secret_fields(
+        &self,
+        table: &str,
+        row_id: &str,
+        column: &str,
+        value: &mut serde_json::Value,
+        mode: &FieldTransform<'_>,
+    ) -> envelope::EnvelopeResult<bool> {
+        let mut changed = false;
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map.iter_mut() {
+                    if SECRET_SPEC_FIELD_NAMES.contains(&key.as_str())
+                        && child.as_str().is_some_and(|s| !s.is_empty())
+                    {
+                        let aad = format!("{table}:{row_id}:{column}:{key}");
+                        let current = child.as_str().unwrap_or_default().to_string();
+                        if let Some(new_val) = self.transform_one(&aad, &current, mode)? {
+                            *child = serde_json::Value::String(new_val);
+                            changed = true;
+                        }
+                    } else if self.transform_secret_fields(table, row_id, column, child, mode)? {
+                        changed = true;
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    if self.transform_secret_fields(table, row_id, column, item, mode)? {
+                        changed = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(changed)
+    }
+
+    /// Transform in-scope secret fields inside a JSON blob column, returning the
+    /// (possibly unchanged) blob to store/use. A `None` input stays `None`; a
+    /// non-JSON or secret-free blob is returned byte-for-byte (never reordered);
+    /// only a blob whose secret fields actually change is re-serialized.
+    fn transform_json_blob(
+        &self,
+        table: &str,
+        row_id: &str,
+        column: &str,
+        blob: Option<&str>,
+        mode: &FieldTransform<'_>,
+    ) -> envelope::EnvelopeResult<Option<String>> {
+        let Some(raw) = blob else {
+            return Ok(None);
+        };
+        if raw.is_empty() {
+            return Ok(Some(String::new()));
+        }
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            // Not JSON: cannot hold a field-keyed secret we manage — pass through.
+            return Ok(Some(raw.to_string()));
+        };
+        if self.transform_secret_fields(table, row_id, column, &mut value, mode)? {
+            Ok(Some(
+                serde_json::to_string(&value).unwrap_or_else(|_| raw.to_string()),
+            ))
+        } else {
+            Ok(Some(raw.to_string()))
+        }
+    }
+
+    /// Encrypt in-scope secret fields of a JSON blob for WRITE. Rejects (Err)
+    /// only when a NEW plaintext secret would be introduced while locked; a
+    /// secret-free blob passes through even when locked. `row_id` binds the
+    /// ciphertext to this row (ADR 0011 S1).
+    fn encrypt_json_blob(
+        &self,
+        table: &str,
+        row_id: &str,
+        column: &str,
+        blob: Option<&str>,
+    ) -> rusqlite::Result<Option<String>> {
+        self.transform_json_blob(table, row_id, column, blob, &FieldTransform::Encrypt)
+            .map_err(envelope_err_to_sqlite)
+    }
+
+    /// Decrypt in-scope secret fields of a JSON blob for READ. Never fails:
+    /// locked/undecryptable values become the sentinel inside the returned JSON.
+    /// `row_id` must match the row the blob was sealed under (ADR 0011 S1).
+    fn decrypt_json_blob(
+        &self,
+        table: &str,
+        row_id: &str,
+        column: &str,
+        blob: Option<String>,
+    ) -> Option<String> {
+        match self.transform_json_blob(
+            table,
+            row_id,
+            column,
+            blob.as_deref(),
+            &FieldTransform::Decrypt,
+        ) {
+            Ok(v) => v,
+            // Decrypt never errors, but never fail a read: fall back to raw.
+            Err(_) => blob,
+        }
+    }
+
+    /// Encrypt a scalar secret column value for WRITE. Empty / already-`enc:v1:`
+    /// values pass through (idempotent). A new plaintext secret while locked is
+    /// rejected so plaintext is never stored where ciphertext is expected.
+    fn encrypt_scalar(&self, aad: &str, value: &str) -> rusqlite::Result<String> {
+        match self
+            .transform_one(aad, value, &FieldTransform::Encrypt)
+            .map_err(envelope_err_to_sqlite)?
+        {
+            Some(new) => Ok(new),
+            None => Ok(value.to_string()),
+        }
+    }
+
+    /// Decrypt a scalar secret column value for READ. Never fails: a
+    /// locked/undecryptable value becomes the [`SECRET_UNAVAILABLE_SENTINEL`].
+    fn decrypt_scalar(&self, aad: &str, stored: &str) -> String {
+        match self.transform_one(aad, stored, &FieldTransform::Decrypt) {
+            Ok(Some(plain)) => plain,
+            Ok(None) => stored.to_string(),
+            Err(_) => SECRET_UNAVAILABLE_SENTINEL.to_string(),
+        }
+    }
+
+    /// Encrypt any in-scope plaintext secret fields still at rest, in one
+    /// transaction. Idempotent (skips values already `enc:v1:`) and a no-op
+    /// (returns 0) while locked — it never rewrites a field it cannot seal.
+    /// Returns the number of stored values transformed (used by `init` to
+    /// decide whether the pre-migration plaintext backups must be wiped).
+    fn encrypt_in_scope_plaintext(&self, conn: &Connection) -> rusqlite::Result<usize> {
+        if self.envelope.is_locked() {
+            return Ok(0);
+        }
+        let tx = conn.unchecked_transaction()?;
+        let mut changed = 0usize;
+
+        // email_config.smtp_password (single row, id = 1).
+        if let Some(pw) = tx
+            .query_row(
+                "SELECT smtp_password FROM email_config WHERE id = 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            let sealed = self.encrypt_scalar("email_config:smtp_password", &pw)?;
+            if sealed != pw {
+                tx.execute(
+                    "UPDATE email_config SET smtp_password = ?1 WHERE id = 1",
+                    params![sealed],
+                )?;
+                changed += 1;
+            }
+        }
+
+        // email_profiles.smtp_password (many rows).
+        let profiles: Vec<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT id, smtp_password FROM email_profiles")?;
+            let collected = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        };
+        for (id, pw) in profiles {
+            let sealed = self.encrypt_scalar(&format!("email_profiles:{id}:smtp_password"), &pw)?;
+            if sealed != pw {
+                tx.execute(
+                    "UPDATE email_profiles SET smtp_password = ?1 WHERE id = ?2",
+                    params![sealed, id],
+                )?;
+                changed += 1;
+            }
+        }
+
+        // workflows spec_json / trigger_config / queue_config (JSON blobs).
+        let workflows: Vec<WorkflowSecretRow> = {
+            let mut stmt =
+                tx.prepare("SELECT id, spec_json, trigger_config, queue_config FROM workflows")?;
+            let collected = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        };
+        for (id, spec, trigger, queue) in workflows {
+            for (column, current) in [
+                ("spec_json", spec),
+                ("trigger_config", trigger),
+                ("queue_config", queue),
+            ] {
+                let sealed =
+                    self.encrypt_json_blob("workflows", &id, column, current.as_deref())?;
+                if sealed != current {
+                    tx.execute(
+                        &format!("UPDATE workflows SET {column} = ?1 WHERE id = ?2"),
+                        params![sealed, id],
+                    )?;
+                    changed += 1;
+                }
+            }
+        }
+
+        // scheduler_config secret keys (inbound_webhook_secret + defensive set).
+        let configs: Vec<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT key, value FROM scheduler_config")?;
+            let collected = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        };
+        for (key, value) in configs {
+            if !is_secret_scheduler_config_key(&key) {
+                continue;
+            }
+            let sealed = self.encrypt_scalar(&format!("scheduler_config:{key}"), &value)?;
+            if sealed != value {
+                tx.execute(
+                    "UPDATE scheduler_config SET value = ?1 WHERE key = ?2",
+                    params![sealed, key],
+                )?;
+                changed += 1;
+            }
+        }
+
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Durable "sealing incomplete" flag key in `scheduler_config` (ADR 0011
+    /// S2+S3). `"true"` means in-scope plaintext may still be at rest (a locked
+    /// or partial seal): the sweep is retried on the next open and the
+    /// pre-migration plaintext sidecars are kept. `"false"` means fully sealed.
+    const SEALING_INCOMPLETE_KEY: &'static str = "envelope_sealing_incomplete";
+
+    /// Resolve an in-progress seal (ADR 0011 S2+S3), run after the in-scope sweep
+    /// ONLY when a seal is in progress (see [`Database::init`]). If the envelope
+    /// is available AND no in-scope plaintext remains, wipe any lingering
+    /// pre-migration plaintext sidecars and clear the incomplete flag. Otherwise
+    /// (locked, or plaintext still at rest) keep the sidecars — the main DB still
+    /// holds the same plaintext, so wiping the sidecar alone buys nothing — and
+    /// keep the incomplete flag so the sweep is retried and sealing is never
+    /// falsely reported complete.
+    fn reconcile_sealing_state(&self, conn: &Connection) -> rusqlite::Result<()> {
+        let plaintext_remaining = self.count_in_scope_plaintext(conn)?;
+        if !self.envelope.is_locked() && plaintext_remaining == 0 {
+            secure_wipe_migration_backups(&self.path);
+            self.set_sealing_incomplete_flag(conn, false)?;
+        } else {
+            self.set_sealing_incomplete_flag(conn, true)?;
+        }
+        Ok(())
+    }
+
+    /// Read the durable sealing-incomplete flag; `true` iff a prior open recorded
+    /// that in-scope plaintext may still be at rest.
+    fn sealing_incomplete_flag(&self, conn: &Connection) -> rusqlite::Result<bool> {
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM scheduler_config WHERE key = ?1",
+                params![Self::SEALING_INCOMPLETE_KEY],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(value.as_deref() == Some("true"))
+    }
+
+    /// Persist the durable sealing-incomplete flag (`true`/`false`).
+    fn set_sealing_incomplete_flag(
+        &self,
+        conn: &Connection,
+        incomplete: bool,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT INTO scheduler_config (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![
+                Self::SEALING_INCOMPLETE_KEY,
+                if incomplete { "true" } else { "false" }
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Count in-scope secret values still stored as PLAINTEXT (non-empty and not
+    /// `enc:v1:`). Zero means every in-scope secret at rest is sealed. Mirrors
+    /// the sweep's field scope ([`SECRET_SPEC_FIELD_NAMES`] /
+    /// [`is_secret_scheduler_config_key`]) so the two can never drift.
+    fn count_in_scope_plaintext(&self, conn: &Connection) -> rusqlite::Result<usize> {
+        fn is_plaintext_secret(value: &str) -> bool {
+            !value.is_empty() && !envelope::is_ciphertext(value)
+        }
+        let mut plaintext = 0usize;
+
+        // email_config.smtp_password (single row).
+        if let Some(pw) = conn
+            .query_row(
+                "SELECT smtp_password FROM email_config WHERE id = 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            if is_plaintext_secret(&pw) {
+                plaintext += 1;
+            }
+        }
+
+        // email_profiles.smtp_password (many rows).
+        {
+            let mut stmt = conn.prepare("SELECT smtp_password FROM email_profiles")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for pw in rows {
+                if is_plaintext_secret(&pw?) {
+                    plaintext += 1;
+                }
+            }
+        }
+
+        // workflows spec_json / trigger_config / queue_config (JSON blobs).
+        {
+            let mut stmt =
+                conn.prepare("SELECT spec_json, trigger_config, queue_config FROM workflows")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (spec, trigger, queue) = row?;
+                for blob in [spec, trigger, queue] {
+                    plaintext += count_plaintext_secret_leaves(blob.as_deref());
+                }
+            }
+        }
+
+        // scheduler_config secret keys.
+        {
+            let mut stmt = conn.prepare("SELECT key, value FROM scheduler_config")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (key, value) = row?;
+                if is_secret_scheduler_config_key(&key) && is_plaintext_secret(&value) {
+                    plaintext += 1;
+                }
+            }
+        }
+
+        Ok(plaintext)
+    }
+
+    /// Re-encrypt EVERY in-scope field from `old` to `new` (DEK rotation), in
+    /// the caller's transaction. Decrypts with the old DEK and re-seals with the
+    /// new; a value that fails to decrypt aborts the rotation (propagated error)
+    /// so a bad rotation can never silently corrupt data.
+    fn reencrypt_all_fields(
+        &self,
+        conn: &Connection,
+        old: &FieldCipher,
+        new: &FieldCipher,
+    ) -> rusqlite::Result<()> {
+        let mode = FieldTransform::Reencrypt { old, new };
+
+        // email_config.smtp_password.
+        if let Some(pw) = conn
+            .query_row(
+                "SELECT smtp_password FROM email_config WHERE id = 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            if !pw.is_empty() {
+                if let Some(new_val) = self
+                    .transform_one("email_config:smtp_password", &pw, &mode)
+                    .map_err(envelope_err_to_sqlite)?
+                {
+                    conn.execute(
+                        "UPDATE email_config SET smtp_password = ?1 WHERE id = 1",
+                        params![new_val],
+                    )?;
+                }
+            }
+        }
+
+        // email_profiles.smtp_password.
+        let profiles: Vec<(String, String)> = {
+            let mut stmt = conn.prepare("SELECT id, smtp_password FROM email_profiles")?;
+            let collected = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        };
+        for (id, pw) in profiles {
+            if pw.is_empty() {
+                continue;
+            }
+            if let Some(new_val) = self
+                .transform_one(&format!("email_profiles:{id}:smtp_password"), &pw, &mode)
+                .map_err(envelope_err_to_sqlite)?
+            {
+                conn.execute(
+                    "UPDATE email_profiles SET smtp_password = ?1 WHERE id = ?2",
+                    params![new_val, id],
+                )?;
+            }
+        }
+
+        // workflows JSON blobs.
+        let workflows: Vec<WorkflowSecretRow> = {
+            let mut stmt =
+                conn.prepare("SELECT id, spec_json, trigger_config, queue_config FROM workflows")?;
+            let collected = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        };
+        for (id, spec, trigger, queue) in workflows {
+            for (column, current) in [
+                ("spec_json", spec),
+                ("trigger_config", trigger),
+                ("queue_config", queue),
+            ] {
+                let new_blob = self
+                    .transform_json_blob("workflows", &id, column, current.as_deref(), &mode)
+                    .map_err(envelope_err_to_sqlite)?;
+                if new_blob != current {
+                    conn.execute(
+                        &format!("UPDATE workflows SET {column} = ?1 WHERE id = ?2"),
+                        params![new_blob, id],
+                    )?;
+                }
+            }
+        }
+
+        // scheduler_config secret keys.
+        let configs: Vec<(String, String)> = {
+            let mut stmt = conn.prepare("SELECT key, value FROM scheduler_config")?;
+            let collected = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        };
+        for (key, value) in configs {
+            if !is_secret_scheduler_config_key(&key) || value.is_empty() {
+                continue;
+            }
+            if let Some(new_val) = self
+                .transform_one(&format!("scheduler_config:{key}"), &value, &mode)
+                .map_err(envelope_err_to_sqlite)?
+            {
+                conn.execute(
+                    "UPDATE scheduler_config SET value = ?1 WHERE key = ?2",
+                    params![new_val, key],
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Rotate the KEK (master key) CRASH-CONSISTENTLY across its two stores
+    /// (Keychain + DB) using generation-addressed KEK slots (ADR 0011 B4). The
+    /// DEK is re-wrapped under a fresh KEK but unchanged, so NO field data is
+    /// re-encrypted and the in-memory cipher is untouched. Requires an unlocked
+    /// cipher (an active DEK to re-wrap).
+    ///
+    /// The old KEK write-order (`DB row first, then Keychain set`) left a crash
+    /// window where the DB referenced a KEK the Keychain lacked, permanently
+    /// locking every secret. Instead, EITHER crash point stays openable:
+    ///  1. Write the NEW KEK to a NEW slot (generation N+1); leave gen N intact.
+    ///  2. In ONE DB txn, persist the DEK re-wrapped under the new KEK together
+    ///     with the new generation marker.
+    ///  3. AFTER commit, best-effort delete the old (gen N) slot.
+    ///
+    /// Crash before step-2 commit → DB still gen N, old KEK present → opens.
+    /// Crash after commit, before step-3 → both KEKs present, DB gen N+1 → opens.
+    pub fn rotate_kek(&self) -> Result<(), String> {
+        self.rotate_kek_impl(KekRotateStop::Complete)
+    }
+
+    /// Implementation of [`Self::rotate_kek`] with a `stop` seam so tests can
+    /// simulate a crash at either two-store window (see [`KekRotateStop`]).
+    fn rotate_kek_impl(&self, stop: KekRotateStop) -> Result<(), String> {
+        let cipher = self
+            .envelope
+            .cipher()
+            .ok_or_else(|| envelope::EnvelopeError::SecretsLocked.to_string())?;
+        let dek = cipher.dek_bytes();
+
+        let conn = self.conn().map_err(|e| e.to_string())?;
+        let current = self
+            .read_envelope_row(&conn)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no envelope key row to rotate".to_string())?;
+        let old_generation = current.kek_generation;
+        let new_generation = old_generation + 1;
+        let new_account = envelope::master_kek_account(new_generation);
+
+        let new_kek = envelope::generate_key();
+        let (wrapped, nonce) = envelope::wrap_dek(&new_kek, &dek).map_err(|e| e.to_string())?;
+
+        // Step 1: write the NEW KEK to a NEW slot. The OLD slot (gen N) is left
+        // in place, so a crash here still opens under gen N.
+        self.envelope
+            .key_store()
+            .set(
+                envelope::MASTER_KEK_KEYCHAIN_SERVICE,
+                &new_account,
+                &envelope::kek_to_b64(&new_kek),
+            )
+            .map_err(|e| {
+                // Nothing persisted to the DB yet; best-effort clear the new slot.
+                let _ = self
+                    .envelope
+                    .key_store()
+                    .delete(envelope::MASTER_KEK_KEYCHAIN_SERVICE, &new_account);
+                envelope::EnvelopeError::KeyStore(e.to_string()).to_string()
+            })?;
+        if stop == KekRotateStop::AfterNewKekStored {
+            return Ok(());
+        }
+
+        // Step 2: in ONE transaction, point the DB at the new generation with the
+        // DEK re-wrapped under the new KEK. Field ciphertext is unchanged.
+        {
+            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            if let Err(e) = self
+                .write_envelope_row(
+                    &tx,
+                    current.version,
+                    envelope::ENVELOPE_ALGO,
+                    &wrapped,
+                    &nonce,
+                    new_generation,
+                )
+                .and_then(|()| tx.commit())
+            {
+                // The commit did not land; the DB still points at gen N (old KEK
+                // present → openable). Best-effort clear the orphaned new slot.
+                let _ = self
+                    .envelope
+                    .key_store()
+                    .delete(envelope::MASTER_KEK_KEYCHAIN_SERVICE, &new_account);
+                return Err(e.to_string());
+            }
+        }
+        if stop == KekRotateStop::AfterDbCommit {
+            return Ok(());
+        }
+
+        // Step 3: best-effort delete the OLD KEK slot. An orphaned old slot is
+        // harmless (the DB points at the new generation), so ignore failures.
+        let _ = self.envelope.key_store().delete(
+            envelope::MASTER_KEK_KEYCHAIN_SERVICE,
+            &envelope::master_kek_account(old_generation),
+        );
+        Ok(())
+    }
+
+    /// Rotate the DEK: mint a new DEK, decrypt every in-scope field with the old
+    /// DEK and re-seal with the new one, bump the key version, and store the new
+    /// DEK wrapped under the CURRENT KEK — all in one transaction. The commit and
+    /// the in-memory cipher swap are ATOMIC w.r.t. readers (ADR 0011 B3): both
+    /// happen under the write lock readers take via `EnvelopeState::cipher`, so
+    /// no reader can observe the committed new ciphertext through the stale old
+    /// DEK. A `commit` failure leaves the old DEK fully in force. A crash between
+    /// commit and swap self-heals: the next open unwraps the DEK from the DB's
+    /// current wrapped row, which already matches the committed ciphertext.
+    pub fn rotate_dek(&self) -> Result<(), String> {
+        let old = self
+            .envelope
+            .cipher()
+            .ok_or_else(|| envelope::EnvelopeError::SecretsLocked.to_string())?;
+
+        let conn = self.conn().map_err(|e| e.to_string())?;
+        let current = self
+            .read_envelope_row(&conn)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| envelope::EnvelopeError::SecretsLocked.to_string())?;
+        // Fetch the KEK from the slot the CURRENT generation records (B4: after a
+        // KEK rotation this is `db-envelope-kek-v{N}`, not the gen-1 account).
+        let kek_b64 = self
+            .envelope
+            .key_store()
+            .get(
+                envelope::MASTER_KEK_KEYCHAIN_SERVICE,
+                &envelope::master_kek_account(current.kek_generation),
+            )
+            .map_err(|e| envelope::EnvelopeError::KeyStore(e.to_string()).to_string())?
+            .ok_or_else(|| envelope::EnvelopeError::SecretsLocked.to_string())?;
+        let kek = envelope::kek_from_b64(&kek_b64).map_err(|e| e.to_string())?;
+
+        let new_version = old.version() + 1;
+        let new_dek = envelope::generate_key();
+        let new_cipher = Arc::new(FieldCipher::from_bytes(new_dek, new_version));
+        let (wrapped, nonce) = envelope::wrap_dek(&kek, &new_dek).map_err(|e| e.to_string())?;
+
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        self.reencrypt_all_fields(&tx, &old, &new_cipher)
+            .map_err(|e| e.to_string())?;
+        self.write_envelope_row(
+            &tx,
+            new_version,
+            envelope::ENVELOPE_ALGO,
+            &wrapped,
+            &nonce,
+            current.kek_generation,
+        )
+        .map_err(|e| e.to_string())?;
+
+        // B3: commit the re-encrypted fields + new wrapped DEK and swap the
+        // in-memory cipher under the readers' lock, so no read interleaves.
+        self.envelope
+            .commit_then_swap(new_cipher, || tx.commit())
+            .map_err(|e: rusqlite::Error| e.to_string())?;
+        Ok(())
+    }
+
+    /// Re-provision the envelope under a FRESH KEK + DEK — the operator recovery
+    /// path when secrets are locked (lost/unreadable master key). Mints and
+    /// stores a new KEK and a new wrapped DEK (version bumped), then installs the
+    /// active cipher so the operator can re-enter secrets. Existing field
+    /// ciphertext is deliberately LEFT INTACT (it is unrecoverable under the lost
+    /// key and reads back as the sentinel until overwritten by re-entry) — never
+    /// blindly overwritten or deleted.
+    pub fn reprovision_secrets(&self) -> Result<(), String> {
+        // B1 (ADR 0011): re-provision is the LOCKED-DB recovery path ONLY. It
+        // mints a fresh KEK+DEK and orphans the existing field ciphertext (which
+        // is unrecoverable under the lost key). Running it on a HEALTHY (unlocked)
+        // DB would silently swap the active DEK WITHOUT re-encrypting, stranding
+        // every previously-sealed secret. Refuse unless genuinely locked; healthy
+        // re-keying is `rotate_master_key` / `rotate_data_key`, which re-encrypt.
+        if !self.envelope.is_locked() {
+            return Err(
+                "refusing to re-provision: secrets are not locked. Re-provision mints a fresh \
+                 master key and data key and is only for recovering a locked database (a \
+                 lost/unreadable master key); on a healthy database it would strand the existing \
+                 encrypted secrets. Use rotate_master_key / rotate_data_key to re-key a healthy \
+                 database."
+                    .to_string(),
+            );
+        }
+
+        let new_kek = envelope::generate_key();
+        let new_dek = envelope::generate_key();
+        let (wrapped, nonce) = envelope::wrap_dek(&new_kek, &new_dek).map_err(|e| e.to_string())?;
+
+        let conn = self.conn().map_err(|e| e.to_string())?;
+        // Bump both the key version and the KEK generation past whatever the
+        // (possibly unwrappable) current row records, so the fresh KEK lands in a
+        // new Keychain slot and the DB unambiguously points at it.
+        let (next_version, next_generation) = self
+            .read_envelope_row(&conn)
+            .ok()
+            .flatten()
+            .map(|row| (row.version + 1, row.kek_generation + 1))
+            .unwrap_or((1, envelope::INITIAL_KEK_GENERATION));
+        let new_cipher = FieldCipher::from_bytes(new_dek, next_version);
+
+        // Store the KEK first: if that fails we remain locked with no partial DB
+        // change. Then persist the wrapped DEK + generation and install the cipher.
+        self.envelope
+            .key_store()
+            .set(
+                envelope::MASTER_KEK_KEYCHAIN_SERVICE,
+                &envelope::master_kek_account(next_generation),
+                &envelope::kek_to_b64(&new_kek),
+            )
+            .map_err(|e| envelope::EnvelopeError::KeyStore(e.to_string()).to_string())?;
+        self.write_envelope_row(
+            &conn,
+            next_version,
+            envelope::ENVELOPE_ALGO,
+            &wrapped,
+            &nonce,
+            next_generation,
+        )
+        .map_err(|e| e.to_string())?;
+        self.envelope.set_active(Arc::new(new_cipher));
         Ok(())
     }
 
@@ -2029,7 +3157,40 @@ impl Database {
             (16, Self::migrate_v16_queued_run_suppress_completion),
             (17, Self::migrate_v17_fix_agent_spend),
             (18, Self::migrate_v18_api_audit_log_view),
+            (19, Self::migrate_v19_envelope_keys),
         ]
+    }
+
+    /// v19: create the `envelope_keys` table for envelope encryption of
+    /// secret-bearing at-rest fields (ADR 0011). This migration is SCHEMA-ONLY
+    /// and additive/idempotent (`CREATE TABLE IF NOT EXISTS`) — it never touches
+    /// row data, so it obeys the append-only migration contract (ADR-0003) and
+    /// runs safely inside its own transaction like every other migration.
+    ///
+    /// The actual work of this feature — provisioning the KEK/wrapped-DEK and
+    /// encrypting existing plaintext rows in place — deliberately does NOT live
+    /// here: a `fn(&Connection)` migration cannot reach the injected
+    /// [`KeyStore`] (Keychain), which is required to mint/unwrap the DEK.
+    /// Instead [`Database::init`] provisions the envelope keys
+    /// ([`Database::provision_envelope`]) and then runs the transactional,
+    /// idempotent plaintext->ciphertext sweep
+    /// ([`Database::encrypt_in_scope_plaintext`]) after the migration chain, so
+    /// the KEK-dependent step has the cipher it needs. Fresh DBs also get this
+    /// table from the base schema in `init`; it is created here too for DBs
+    /// upgrading from <= v18.
+    fn migrate_v19_envelope_keys(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS envelope_keys (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL,
+                algo TEXT NOT NULL,
+                wrapped_dek BLOB NOT NULL,
+                wrap_nonce BLOB NOT NULL,
+                kek_generation INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
+        )?;
+        Ok(())
     }
 
     /// v18: add the read-only `api_audit_log_view` access view over the
@@ -2856,14 +4017,19 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), 'production'), COALESCE(managed_externally, 0), COALESCE(kind, 'generic'), spec_json, email_profile_id FROM workflows ORDER BY environment, name"
         )?;
-        let rows = stmt.query_map([], Self::row_to_workflow)?;
+        let rows = stmt.query_map([], |row| self.row_to_workflow(row))?;
         rows.collect()
     }
 
-    /// Shared projection decoder for the standard workflow column list used by
-    /// `list_workflows`, `get_workflow`, and `list_workflows_filtered`.
-    fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
-        Ok(Workflow {
+    /// Shared projection decoder for the standard workflow column list. Decrypts
+    /// the in-scope secret fields inside `spec_json` / `trigger_config` /
+    /// `queue_config` at this single read boundary (ADR 0011) so every caller —
+    /// and thus every adapter — transparently receives plaintext; the existing
+    /// read-scope/MCP redaction still runs ABOVE this. Takes `&self` (the cipher
+    /// lives on the `Database`), so call sites pass a `|row| self.row_to_workflow(row)`
+    /// closure rather than a bare function pointer.
+    fn row_to_workflow(&self, row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
+        let workflow = Workflow {
             id: row.get(0)?,
             name: row.get(1)?,
             description: row.get(2)?,
@@ -2890,6 +4056,29 @@ impl Database {
             trigger_config: row.get(13).unwrap_or(None),
             queue_config: row.get(14).unwrap_or(None),
             email_profile_id: row.get(19).unwrap_or(None),
+        };
+        // Bind the row id first, then decrypt each blob under the row-scoped AAD
+        // `workflows:{id}:{column}:{field}` (ADR 0011 S1). Local bindings keep the
+        // `&workflow.id` borrow disjoint from the per-field moves below.
+        let spec_json =
+            self.decrypt_json_blob("workflows", &workflow.id, "spec_json", workflow.spec_json);
+        let trigger_config = self.decrypt_json_blob(
+            "workflows",
+            &workflow.id,
+            "trigger_config",
+            workflow.trigger_config,
+        );
+        let queue_config = self.decrypt_json_blob(
+            "workflows",
+            &workflow.id,
+            "queue_config",
+            workflow.queue_config,
+        );
+        Ok(Workflow {
+            spec_json,
+            trigger_config,
+            queue_config,
+            ..workflow
         })
     }
 
@@ -2898,7 +4087,7 @@ impl Database {
         conn.query_row(
             "SELECT id, name, description, script_path, cron_schedule, enabled, async_mode, last_run_at, created_at, updated_at, email_on_failure, timezone, domain, trigger_config, queue_config, COALESCE(NULLIF(environment, ''), 'production'), COALESCE(managed_externally, 0), COALESCE(kind, 'generic'), spec_json, email_profile_id FROM workflows WHERE id = ?1",
             params![id],
-            Self::row_to_workflow,
+            |row| self.row_to_workflow(row),
         )
     }
 
@@ -2928,6 +4117,14 @@ impl Database {
     ) -> rusqlite::Result<Workflow> {
         let id = uuid::Uuid::new_v4().to_string();
         let conn = self.conn()?;
+        // Encrypt in-scope secret fields in the config blobs before persisting
+        // (ADR 0011). A secret-free blob is stored unchanged; a new secret while
+        // the master key is locked is rejected here. AAD binds each secret to
+        // this workflow id (S1) so ciphertext cannot be relocated across rows.
+        let trigger_config =
+            self.encrypt_json_blob("workflows", &id, "trigger_config", trigger_config)?;
+        let queue_config =
+            self.encrypt_json_blob("workflows", &id, "queue_config", queue_config)?;
         // `environment` is the authoritative partition. Governance
         // (`managed_externally`) is decoupled and set explicitly by the service
         // layer, never derived from the environment name.
@@ -2956,6 +4153,12 @@ impl Database {
         queue_config: Option<&str>,
     ) -> rusqlite::Result<Workflow> {
         let conn = self.conn()?;
+        // Encrypt in-scope secret fields in the config blobs before persisting
+        // (ADR 0011); secret-free blobs are stored unchanged. AAD binds each
+        // secret to this workflow id (S1).
+        let trigger_config =
+            self.encrypt_json_blob("workflows", id, "trigger_config", trigger_config)?;
+        let queue_config = self.encrypt_json_blob("workflows", id, "queue_config", queue_config)?;
         // `environment` is the authoritative partition column.
         conn.execute(
             "UPDATE workflows SET name = ?2, description = ?3, script_path = ?4, cron_schedule = ?5, enabled = ?6, async_mode = ?7, email_on_failure = ?8, timezone = ?9, environment = ?10, domain = ?11, trigger_config = ?12, queue_config = ?13, updated_at = datetime('now') WHERE id = ?1",
@@ -2984,6 +4187,10 @@ impl Database {
         spec_json: Option<&str>,
     ) -> rusqlite::Result<()> {
         let conn = self.conn()?;
+        // Encrypt in-scope secret fields in the spec blob before persisting
+        // (ADR 0011); a secret-free spec is stored unchanged. AAD binds each
+        // secret to this workflow id (S1).
+        let spec_json = self.encrypt_json_blob("workflows", id, "spec_json", spec_json)?;
         conn.execute(
             "UPDATE workflows SET kind = ?2, spec_json = ?3, updated_at = datetime('now') WHERE id = ?1",
             params![id, kind, spec_json],
@@ -4769,10 +5976,9 @@ impl Database {
                  OR TRIM(w.domain) = ?2)
              ORDER BY COALESCE(NULLIF(w.environment, ''), 'production'), COALESCE(NULLIF(TRIM(w.domain), ''), 'Unowned'), w.name",
         )?;
-        let rows = stmt.query_map(
-            params![environment_filter, domain_filter],
-            Self::row_to_workflow,
-        )?;
+        let rows = stmt.query_map(params![environment_filter, domain_filter], |row| {
+            self.row_to_workflow(row)
+        })?;
         rows.collect()
     }
 
@@ -6724,20 +7930,37 @@ impl Database {
 
     fn get_string_config(&self, key: &str) -> rusqlite::Result<Option<String>> {
         let conn = self.conn()?;
-        conn.query_row(
-            "SELECT value FROM scheduler_config WHERE key = ?1",
-            params![key],
-            |row| row.get(0),
-        )
-        .optional()
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT value FROM scheduler_config WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        // Decrypt at the read boundary for the secret-bearing keys (ADR 0011),
+        // e.g. `inbound_webhook_secret`; non-secret keys pass through untouched.
+        Ok(stored.map(|value| {
+            if is_secret_scheduler_config_key(key) {
+                self.decrypt_scalar(&format!("scheduler_config:{key}"), &value)
+            } else {
+                value
+            }
+        }))
     }
 
     fn set_string_config(&self, key: &str, value: &str) -> rusqlite::Result<()> {
         let conn = self.conn()?;
+        // Encrypt at the write boundary for the secret-bearing keys (ADR 0011);
+        // a new secret while the master key is locked is rejected here.
+        let stored = if is_secret_scheduler_config_key(key) {
+            self.encrypt_scalar(&format!("scheduler_config:{key}"), value)?
+        } else {
+            value.to_string()
+        };
         conn.execute(
             "INSERT INTO scheduler_config (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-            params![key, value],
+            params![key, stored],
         )?;
         Ok(())
     }
@@ -7636,7 +8859,7 @@ impl Database {
 
     pub fn get_email_config(&self) -> rusqlite::Result<EmailConfig> {
         let conn = self.conn()?;
-        conn.query_row(
+        let mut config = conn.query_row(
             "SELECT enabled, alert_email, smtp_host, smtp_port, smtp_user, smtp_password, from_address, from_name FROM email_config WHERE id = 1",
             [],
             |row| {
@@ -7651,11 +8874,20 @@ impl Database {
                     from_name: row.get(7)?,
                 })
             },
-        )
+        )?;
+        // Decrypt the SMTP password at the read boundary (ADR 0011). A locked
+        // master key yields the `__secret_unavailable__` sentinel here.
+        config.smtp_password =
+            self.decrypt_scalar("email_config:smtp_password", &config.smtp_password);
+        Ok(config)
     }
 
     pub fn set_email_config(&self, config: &EmailConfig) -> rusqlite::Result<()> {
         let conn = self.conn()?;
+        // Encrypt the SMTP password at the write boundary (ADR 0011); a new
+        // password while the master key is locked is rejected here.
+        let smtp_password =
+            self.encrypt_scalar("email_config:smtp_password", &config.smtp_password)?;
         conn.execute(
             "UPDATE email_config SET enabled = ?1, alert_email = ?2, smtp_host = ?3, smtp_port = ?4, smtp_user = ?5, smtp_password = ?6, from_address = ?7, from_name = ?8 WHERE id = 1",
             params![
@@ -7664,7 +8896,7 @@ impl Database {
                 config.smtp_host,
                 config.smtp_port,
                 config.smtp_user,
-                config.smtp_password,
+                smtp_password,
                 config.from_address,
                 config.from_name,
             ],
@@ -7678,7 +8910,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, name, enabled, alert_email, smtp_host, smtp_port, smtp_user, smtp_password, from_address, from_name, created_at, updated_at FROM email_profiles ORDER BY updated_at DESC, name",
         )?;
-        let rows = stmt.query_map([], Self::row_to_email_profile)?;
+        let rows = stmt.query_map([], |row| self.row_to_email_profile(row))?;
         rows.collect()
     }
 
@@ -7688,12 +8920,15 @@ impl Database {
         conn.query_row(
             "SELECT id, name, enabled, alert_email, smtp_host, smtp_port, smtp_user, smtp_password, from_address, from_name, created_at, updated_at FROM email_profiles WHERE id = ?1",
             params![id],
-            Self::row_to_email_profile,
+            |row| self.row_to_email_profile(row),
         )
     }
 
-    fn row_to_email_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<EmailProfile> {
-        Ok(EmailProfile {
+    /// Shared projection decoder for email profiles. Decrypts the SMTP password
+    /// at this single read boundary (ADR 0011); takes `&self` (the cipher lives
+    /// on the `Database`), so callers pass a closure rather than a bare fn.
+    fn row_to_email_profile(&self, row: &rusqlite::Row<'_>) -> rusqlite::Result<EmailProfile> {
+        let mut profile = EmailProfile {
             id: row.get(0)?,
             name: row.get(1)?,
             enabled: row.get::<_, i32>(2)? != 0,
@@ -7706,7 +8941,14 @@ impl Database {
             from_name: row.get(9)?,
             created_at: row.get(10)?,
             updated_at: row.get(11)?,
-        })
+        };
+        // AAD binds the SMTP password to this profile id (ADR 0011 S1) so a
+        // ciphertext cannot be relocated to another profile's row.
+        profile.smtp_password = self.decrypt_scalar(
+            &format!("email_profiles:{}:smtp_password", profile.id),
+            &profile.smtp_password,
+        );
+        Ok(profile)
     }
 
     /// Insert or update an email profile. A blank `id` is treated as a new
@@ -7718,6 +8960,13 @@ impl Database {
         } else {
             profile.id.clone()
         };
+        // Encrypt the SMTP password at the write boundary (ADR 0011); a new
+        // password while the master key is locked is rejected here. AAD binds the
+        // ciphertext to this profile id (S1) so it cannot be relocated across rows.
+        let smtp_password = self.encrypt_scalar(
+            &format!("email_profiles:{id}:smtp_password"),
+            &profile.smtp_password,
+        )?;
         conn.execute(
             "INSERT INTO email_profiles (id, name, enabled, alert_email, smtp_host, smtp_port, smtp_user, smtp_password, from_address, from_name, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'), datetime('now'))
@@ -7740,7 +8989,7 @@ impl Database {
                 profile.smtp_host,
                 profile.smtp_port,
                 profile.smtp_user,
-                profile.smtp_password,
+                smtp_password,
                 profile.from_address,
                 profile.from_name,
             ],
@@ -8167,9 +9416,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("scheduler.db");
-        let db = Database {
-            path: db_path.to_string_lossy().to_string(),
-        };
+        let db = Database::test_at_path(db_path.to_string_lossy().to_string());
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(
@@ -8733,16 +9980,14 @@ mod tests {
         // Tripwire: refresh this fixture (seed schema + asserted columns) the
         // next time a migration lands so the newest N-1 -> N paths stay covered.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 18,
+            CURRENT_SCHEMA_VERSION, 19,
             "add a v(N-1)->v(N) fixture when a new migration ships"
         );
 
         let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("scheduler.db");
-        let db = Database {
-            path: db_path.to_string_lossy().to_string(),
-        };
+        let db = Database::test_at_path(db_path.to_string_lossy().to_string());
 
         // Seed the pre-v8 shape of `runs` (no execution/truncation metadata),
         // the pre-v9 shape of `workflows` (still carrying the legacy `corpus`
@@ -9554,9 +10799,7 @@ mod tests {
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION + 5)
                 .unwrap();
         }
-        let db = Database {
-            path: db_path.to_string_lossy().to_string(),
-        };
+        let db = Database::test_at_path(db_path.to_string_lossy().to_string());
         let result = db.init();
         assert!(result.is_err(), "opening a newer-schema DB must fail");
         let _ = std::fs::remove_dir_all(dir);
@@ -12099,9 +13342,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("scheduler.db");
-        let db = Database {
-            path: db_path.to_string_lossy().to_string(),
-        };
+        let db = Database::test_at_path(db_path.to_string_lossy().to_string());
 
         // Seed a pre-v13 shape: `runs` WITHOUT the snapshot column, a workflow
         // in sandbox, and a run for it. Stamp v12 so ONLY v13 is pending. We
@@ -12166,9 +13407,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("scheduler.db");
-        let db = Database {
-            path: db_path.to_string_lossy().to_string(),
-        };
+        let db = Database::test_at_path(db_path.to_string_lossy().to_string());
 
         // Seed a pre-v14 shape (just enough for the REFERENCES targets to exist)
         // and stamp v13 so ONLY the v14 migration is pending. Drive
@@ -12237,9 +13476,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("scheduler.db");
-        let db = Database {
-            path: db_path.to_string_lossy().to_string(),
-        };
+        let db = Database::test_at_path(db_path.to_string_lossy().to_string());
 
         // Seed a v14-shaped DB (the pre-v15 `fix_agent_dispatches` shape) and
         // stamp user_version=14 so ONLY the v15 migration is pending.
@@ -12335,9 +13572,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("scheduler.db");
-        let db = Database {
-            path: db_path.to_string_lossy().to_string(),
-        };
+        let db = Database::test_at_path(db_path.to_string_lossy().to_string());
 
         // Seed a v15-shaped `queued_runs` (pre-v16 column set) and stamp
         // user_version=15 so ONLY the v16 migration is pending.
@@ -12417,9 +13652,7 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("scheduler.db");
-        let db = Database {
-            path: db_path.to_string_lossy().to_string(),
-        };
+        let db = Database::test_at_path(db_path.to_string_lossy().to_string());
 
         // A v16 DB has no spend table yet; stamp user_version=16 so ONLY v17 runs.
         {
@@ -14248,5 +15481,887 @@ SUMMARY_JSON:{\"title\":\"current\"}
             "secure_remove should have deleted the file"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Envelope encryption (ADR 0011) — every test injects a FakeKeyStore and
+    // NEVER touches the real Keychain (mandatory for headless CI).
+    // -----------------------------------------------------------------------
+
+    fn envelope_test_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("chaos-env-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn envelope_fake_ks() -> Arc<crate::keychain::FakeKeyStore> {
+        Arc::new(crate::keychain::FakeKeyStore::new())
+    }
+
+    fn raw_string(db: &Database, sql: &str) -> String {
+        let conn = db.conn().unwrap();
+        conn.query_row(sql, [], |r| r.get::<_, String>(0)).unwrap()
+    }
+
+    /// v19 fails-first: assert the sweep converts pre-existing plaintext to
+    /// `enc:v1:` at rest AND that reads return plaintext, and that a second
+    /// pass is a no-op. Before the sweep exists, the at-rest `enc:v1:`
+    /// assertions fail (the plaintext survives verbatim).
+    #[test]
+    fn migration_v18_to_v19_encrypts_existing_plaintext_in_place_idempotently() {
+        let dir = envelope_test_dir();
+        let ks = envelope_fake_ks();
+
+        // Build a full current-schema DB, plant PLAINTEXT secrets, then strip the
+        // envelope key material and stamp it back to v18 — a genuine pre-envelope
+        // fixture that the next open must upgrade + seal.
+        let wf_id = {
+            let db = Database::new_with_key_store(&dir, ks.clone());
+            let wf = db
+                .create_workflow(
+                    "wf",
+                    None,
+                    "s.py",
+                    "* * * * *",
+                    false,
+                    true,
+                    "UTC",
+                    "production",
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let conn = db.conn().unwrap();
+            conn.execute(
+                "UPDATE workflows SET spec_json = ?2, trigger_config = ?3 WHERE id = ?1",
+                params![
+                    wf.id,
+                    r#"{"secret":"hmac-plain"}"#,
+                    r#"{"signature_secret":"sig-plain"}"#
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE email_config SET smtp_password = 'smtp-plain' WHERE id = 1",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO email_profiles (id, name, smtp_password) VALUES ('p1', 'ops', 'profile-plain')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO scheduler_config (key, value) VALUES ('inbound_webhook_secret', 'hook-plain')",
+                [],
+            )
+            .unwrap();
+            conn.execute("DELETE FROM envelope_keys", []).unwrap();
+            conn.pragma_update(None, "user_version", 18i64).unwrap();
+            wf.id
+        };
+        ks.delete(
+            envelope::MASTER_KEK_KEYCHAIN_SERVICE,
+            envelope::MASTER_KEK_KEYCHAIN_ACCOUNT,
+        )
+        .unwrap();
+
+        // Reopen → runs the v19 upgrade and the plaintext->ciphertext sweep.
+        let db = Database::new_with_key_store(&dir, ks.clone());
+        assert!(!db.secrets_locked());
+
+        for (label, sql, plain) in [
+            (
+                "spec_json",
+                format!("SELECT spec_json FROM workflows WHERE id = '{wf_id}'"),
+                "hmac-plain",
+            ),
+            (
+                "trigger_config",
+                format!("SELECT trigger_config FROM workflows WHERE id = '{wf_id}'"),
+                "sig-plain",
+            ),
+            (
+                "email_config",
+                "SELECT smtp_password FROM email_config WHERE id = 1".to_string(),
+                "smtp-plain",
+            ),
+            (
+                "email_profile",
+                "SELECT smtp_password FROM email_profiles WHERE id = 'p1'".to_string(),
+                "profile-plain",
+            ),
+            (
+                "inbound_webhook_secret",
+                "SELECT value FROM scheduler_config WHERE key = 'inbound_webhook_secret'"
+                    .to_string(),
+                "hook-plain",
+            ),
+        ] {
+            let raw = raw_string(&db, &sql);
+            assert!(
+                raw.contains(envelope::CIPHERTEXT_PREFIX),
+                "{label} must be sealed at rest, got: {raw}"
+            );
+            assert!(
+                !raw.contains(plain),
+                "{label} plaintext must not remain at rest, got: {raw}"
+            );
+        }
+
+        // Reads are transparent plaintext across the db boundary.
+        let wf = db.get_workflow(&wf_id).unwrap();
+        assert!(wf.spec_json.unwrap().contains("hmac-plain"));
+        assert!(wf.trigger_config.unwrap().contains("sig-plain"));
+        assert_eq!(db.get_email_config().unwrap().smtp_password, "smtp-plain");
+        assert_eq!(
+            db.get_email_profile("p1").unwrap().smtp_password,
+            "profile-plain"
+        );
+        assert_eq!(
+            db.get_scheduler_config("inbound_webhook_secret").unwrap(),
+            Some("hook-plain".to_string())
+        );
+
+        // Idempotent: a second sweep transforms nothing and ciphertext is stable.
+        let before = raw_string(&db, "SELECT smtp_password FROM email_config WHERE id = 1");
+        let swept = {
+            let conn = db.conn().unwrap();
+            db.encrypt_in_scope_plaintext(&conn).unwrap()
+        };
+        assert_eq!(swept, 0, "re-running the sweep must be a no-op");
+        let after = raw_string(&db, "SELECT smtp_password FROM email_config WHERE id = 1");
+        assert_eq!(before, after, "ciphertext must be stable across sweeps");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Round-trip fails-first: every in-scope field written through the db API
+    /// is `enc:v1:` at rest and plaintext on read. Before the write/read seam
+    /// exists, the at-rest `enc:v1:` assertions fail (plaintext is stored).
+    #[test]
+    fn envelope_round_trips_every_in_scope_field_via_db_api() {
+        let dir = envelope_test_dir();
+        let db = Database::new_with_key_store(&dir, envelope_fake_ks());
+
+        let mut cfg = db.get_email_config().unwrap();
+        cfg.smtp_password = "global-smtp".into();
+        db.set_email_config(&cfg).unwrap();
+
+        let profile = db
+            .upsert_email_profile(&EmailProfile {
+                id: String::new(),
+                name: "ops".into(),
+                enabled: true,
+                alert_email: "a@b.c".into(),
+                smtp_host: "h".into(),
+                smtp_port: 587,
+                smtp_user: "u".into(),
+                smtp_password: "profile-smtp".into(),
+                from_address: "f@b.c".into(),
+                from_name: "n".into(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .unwrap();
+
+        let wf = db
+            .create_workflow(
+                "wf",
+                None,
+                "s.py",
+                "* * * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                Some(r#"{"signature_secret":"trig-secret"}"#),
+                Some(r#"{"secret":"queue-secret"}"#),
+            )
+            .unwrap();
+        db.set_workflow_spec(&wf.id, "generic", Some(r#"{"secret":"spec-secret"}"#))
+            .unwrap();
+        db.set_string_config("inbound_webhook_secret", "hook-secret")
+            .unwrap();
+
+        // At rest: sealed, no plaintext.
+        {
+            let conn = db.conn().unwrap();
+            let (spec, trig, queue): (String, String, String) = conn
+                .query_row(
+                    "SELECT spec_json, trigger_config, queue_config FROM workflows WHERE id = ?1",
+                    params![wf.id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            for raw in [&spec, &trig, &queue] {
+                assert!(
+                    raw.contains(envelope::CIPHERTEXT_PREFIX),
+                    "workflow blob must be sealed: {raw}"
+                );
+            }
+            assert!(!spec.contains("spec-secret"));
+            assert!(!trig.contains("trig-secret"));
+            assert!(!queue.contains("queue-secret"));
+        }
+        assert!(
+            raw_string(&db, "SELECT smtp_password FROM email_config WHERE id = 1")
+                .starts_with(envelope::CIPHERTEXT_PREFIX)
+        );
+        assert!(raw_string(
+            &db,
+            &format!(
+                "SELECT smtp_password FROM email_profiles WHERE id = '{}'",
+                profile.id
+            )
+        )
+        .starts_with(envelope::CIPHERTEXT_PREFIX));
+        assert!(raw_string(
+            &db,
+            "SELECT value FROM scheduler_config WHERE key = 'inbound_webhook_secret'"
+        )
+        .starts_with(envelope::CIPHERTEXT_PREFIX));
+
+        // On read: transparent plaintext.
+        assert_eq!(db.get_email_config().unwrap().smtp_password, "global-smtp");
+        assert_eq!(
+            db.get_email_profile(&profile.id).unwrap().smtp_password,
+            "profile-smtp"
+        );
+        assert_eq!(
+            db.get_scheduler_config("inbound_webhook_secret").unwrap(),
+            Some("hook-secret".to_string())
+        );
+        let read = db.get_workflow(&wf.id).unwrap();
+        assert!(read.spec_json.unwrap().contains("spec-secret"));
+        assert!(read.trigger_config.unwrap().contains("trig-secret"));
+        assert!(read.queue_config.unwrap().contains("queue-secret"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Offboard fails-first: the purge must blank the CIPHERTEXT (not just
+    /// plaintext). Values are `enc:v1:` at rest before the purge and empty after.
+    #[test]
+    fn offboard_blanks_encrypted_ciphertext_at_rest() {
+        let dir = envelope_test_dir();
+        let db = Database::new_with_key_store(&dir, envelope_fake_ks());
+
+        let mut cfg = db.get_email_config().unwrap();
+        cfg.smtp_password = "smtp-secret".into();
+        db.set_email_config(&cfg).unwrap();
+        let wf = db
+            .create_workflow(
+                "wf",
+                None,
+                "s.py",
+                "* * * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        db.set_workflow_spec(&wf.id, "generic", Some(r#"{"secret":"hmac-shhh"}"#))
+            .unwrap();
+        db.set_string_config("inbound_webhook_secret", "hook-secret")
+            .unwrap();
+
+        // Sealed at rest before the purge.
+        assert!(
+            raw_string(&db, "SELECT smtp_password FROM email_config WHERE id = 1")
+                .starts_with(envelope::CIPHERTEXT_PREFIX)
+        );
+
+        let report = db.offboard_purge_secrets().unwrap();
+        assert_eq!(report.smtp_passwords_cleared, 1);
+        assert_eq!(report.workflow_specs_scrubbed, 1);
+        assert_eq!(report.scheduler_config_secrets_cleared, 1);
+
+        // Ciphertext is gone at rest.
+        assert_eq!(
+            raw_string(&db, "SELECT smtp_password FROM email_config WHERE id = 1"),
+            ""
+        );
+        let spec = raw_string(
+            &db,
+            &format!("SELECT spec_json FROM workflows WHERE id = '{}'", wf.id),
+        );
+        assert!(!spec.contains(envelope::CIPHERTEXT_PREFIX));
+        assert!(!spec.contains("hmac-shhh"));
+        assert!(db
+            .get_scheduler_config("inbound_webhook_secret")
+            .unwrap()
+            .is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// KEK rotation fails-first: the KEK changes and the field ciphertext is
+    /// byte-identical (the DEK is unchanged), and the DEK still unwraps under the
+    /// new KEK on reopen.
+    #[test]
+    fn kek_rotation_rewraps_dek_and_leaves_data_intact() {
+        let dir = envelope_test_dir();
+        let ks = envelope_fake_ks();
+        let db = Database::new_with_key_store(&dir, ks.clone());
+
+        let mut cfg = db.get_email_config().unwrap();
+        cfg.smtp_password = "rot-smtp".into();
+        db.set_email_config(&cfg).unwrap();
+
+        let ct_before = raw_string(&db, "SELECT smtp_password FROM email_config WHERE id = 1");
+        // Read the KEK at the row's CURRENT generation (B4: rotation advances the
+        // generation and addresses a NEW slot).
+        let gen_before = {
+            let conn = db.conn().unwrap();
+            db.read_envelope_row(&conn).unwrap().unwrap().kek_generation
+        };
+        let kek_before = ks
+            .get(
+                envelope::MASTER_KEK_KEYCHAIN_SERVICE,
+                &envelope::master_kek_account(gen_before),
+            )
+            .unwrap();
+
+        db.rotate_kek().unwrap();
+
+        let ct_after = raw_string(&db, "SELECT smtp_password FROM email_config WHERE id = 1");
+        let gen_after = {
+            let conn = db.conn().unwrap();
+            db.read_envelope_row(&conn).unwrap().unwrap().kek_generation
+        };
+        let kek_after = ks
+            .get(
+                envelope::MASTER_KEK_KEYCHAIN_SERVICE,
+                &envelope::master_kek_account(gen_after),
+            )
+            .unwrap();
+
+        assert_eq!(
+            gen_after,
+            gen_before + 1,
+            "KEK rotation must advance the generation"
+        );
+        assert_ne!(kek_before, kek_after, "KEK must change on rotation");
+        assert_eq!(
+            ct_before, ct_after,
+            "field ciphertext must be untouched by KEK rotation"
+        );
+        // The OLD generation slot is cleaned up (step 3), leaving only the new one.
+        assert!(
+            ks.get(
+                envelope::MASTER_KEK_KEYCHAIN_SERVICE,
+                &envelope::master_kek_account(gen_before),
+            )
+            .unwrap()
+            .is_none(),
+            "the superseded KEK slot must be deleted after a completed rotation"
+        );
+        assert_eq!(db.get_email_config().unwrap().smtp_password, "rot-smtp");
+
+        // Reopen with the same store: the new KEK unwraps the DEK → still readable.
+        let db2 = Database::new_with_key_store(&dir, ks.clone());
+        assert!(!db2.secrets_locked());
+        assert_eq!(db2.get_email_config().unwrap().smtp_password, "rot-smtp");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// DEK rotation fails-first: the field is RE-ENCRYPTED (ciphertext changes)
+    /// and the key version is bumped, while reads remain transparent plaintext.
+    #[test]
+    fn dek_rotation_reencrypts_fields_and_bumps_version() {
+        let dir = envelope_test_dir();
+        let ks = envelope_fake_ks();
+        let db = Database::new_with_key_store(&dir, ks.clone());
+
+        let mut cfg = db.get_email_config().unwrap();
+        cfg.smtp_password = "dek-smtp".into();
+        db.set_email_config(&cfg).unwrap();
+
+        let ct_before = raw_string(&db, "SELECT smtp_password FROM email_config WHERE id = 1");
+        let version_before = {
+            let conn = db.conn().unwrap();
+            db.read_envelope_row(&conn).unwrap().unwrap().version
+        };
+
+        db.rotate_dek().unwrap();
+
+        let ct_after = raw_string(&db, "SELECT smtp_password FROM email_config WHERE id = 1");
+        let version_after = {
+            let conn = db.conn().unwrap();
+            db.read_envelope_row(&conn).unwrap().unwrap().version
+        };
+
+        assert_ne!(
+            ct_before, ct_after,
+            "field must be re-encrypted under the new DEK"
+        );
+        assert_eq!(version_after, version_before + 1, "key version must bump");
+        assert_eq!(db.get_email_config().unwrap().smtp_password, "dek-smtp");
+
+        // Reopen: the new wrapped DEK unwraps and decrypts the re-encrypted data.
+        let db2 = Database::new_with_key_store(&dir, ks.clone());
+        assert_eq!(db2.get_email_config().unwrap().smtp_password, "dek-smtp");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Missing/unreadable master key fails-first: the DB opens in secrets-locked
+    /// mode (no crash), encrypted reads yield the DISTINCT sentinel, non-secret
+    /// ops proceed, secret writes are rejected, and re-provision recovers.
+    #[test]
+    fn missing_master_key_locks_secrets_and_reprovision_recovers() {
+        let dir = envelope_test_dir();
+        let ks = envelope_fake_ks();
+
+        // Provision + store an encrypted secret.
+        {
+            let db = Database::new_with_key_store(&dir, ks.clone());
+            let mut cfg = db.get_email_config().unwrap();
+            cfg.smtp_password = "locked-smtp".into();
+            db.set_email_config(&cfg).unwrap();
+        }
+
+        // Next open sees an UNREADABLE master key → secrets-locked (no panic).
+        ks.set_get_unavailable(true);
+        let db = Database::new_with_key_store(&dir, ks.clone());
+        assert!(
+            db.secrets_locked(),
+            "unreadable master key must lock secrets"
+        );
+
+        // Encrypted field reads back as the DISTINCT sentinel (not __redacted__).
+        assert_eq!(
+            db.get_email_config().unwrap().smtp_password,
+            SECRET_UNAVAILABLE_SENTINEL
+        );
+
+        // Non-secret operations still work.
+        let wf = db
+            .create_workflow(
+                "nonsecret",
+                None,
+                "s.py",
+                "* * * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(db.get_workflow(&wf.id).is_ok());
+        assert!(!db.list_workflows().unwrap().is_empty());
+
+        // Secret WRITES are rejected while locked.
+        let mut cfg = db.get_email_config().unwrap();
+        cfg.smtp_password = "new-secret".into();
+        assert!(
+            db.set_email_config(&cfg).is_err(),
+            "secret write must be rejected while locked"
+        );
+
+        // Re-provision under a fresh KEK+DEK; the operator can re-enter secrets.
+        ks.set_get_unavailable(false);
+        db.reprovision_secrets().unwrap();
+        assert!(!db.secrets_locked());
+
+        // The old ciphertext is unrecoverable (lost DEK) → sentinel until re-entered.
+        assert_eq!(
+            db.get_email_config().unwrap().smtp_password,
+            SECRET_UNAVAILABLE_SENTINEL
+        );
+
+        // Re-entering a secret now round-trips under the new key.
+        let cfg = EmailConfig {
+            smtp_password: "reentered".into(),
+            ..EmailConfig::default()
+        };
+        db.set_email_config(&cfg).unwrap();
+        assert_eq!(db.get_email_config().unwrap().smtp_password, "reentered");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// B1 fails-first (ADR 0011): `reprovision_secrets` on a HEALTHY (unlocked)
+    /// DB must REFUSE and leave the active DEK + existing ciphertext untouched.
+    /// Blindly minting a fresh KEK/DEK on a healthy DB would strand every
+    /// previously-sealed secret (unrecoverable). Healthy re-keying is the job of
+    /// `rotate_master_key` / `rotate_data_key`, which re-encrypt.
+    #[test]
+    fn reprovision_refused_on_healthy_db_leaves_ciphertext_intact() {
+        let dir = envelope_test_dir();
+        let ks = envelope_fake_ks();
+        let db = Database::new_with_key_store(&dir, ks.clone());
+
+        let mut cfg = db.get_email_config().unwrap();
+        cfg.smtp_password = "healthy-secret".into();
+        db.set_email_config(&cfg).unwrap();
+        assert!(!db.secrets_locked(), "DB must be healthy/unlocked");
+        let ct_before = raw_string(&db, "SELECT smtp_password FROM email_config WHERE id = 1");
+
+        // Refuse on a healthy DB.
+        assert!(
+            db.reprovision_secrets().is_err(),
+            "reprovision_secrets must refuse on a healthy/unlocked DB"
+        );
+
+        // Keys + ciphertext untouched; the secret still decrypts.
+        let ct_after = raw_string(&db, "SELECT smtp_password FROM email_config WHERE id = 1");
+        assert_eq!(ct_before, ct_after, "ciphertext must be left untouched");
+        assert!(!db.secrets_locked());
+        assert_eq!(
+            db.get_email_config().unwrap().smtp_password,
+            "healthy-secret",
+            "the previously-sealed secret must still decrypt after a refused reprovision"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// S1 fails-first (ADR 0011): the field AAD must bind a stable ROW identity
+    /// for multi-row tables, so a ciphertext sealed for one row cannot be
+    /// relocated into another row's same column and still decrypt (integrity
+    /// gap / relocation attack). The correct row must still round-trip.
+    #[test]
+    fn aad_binds_row_identity_blocks_cross_row_ciphertext_swap() {
+        let dir = envelope_test_dir();
+        let db = Database::new_with_key_store(&dir, envelope_fake_ks());
+
+        let wf_a = db
+            .create_workflow(
+                "a",
+                None,
+                "s.py",
+                "* * * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let wf_b = db
+            .create_workflow(
+                "b",
+                None,
+                "s.py",
+                "* * * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        db.set_workflow_spec(&wf_a.id, "generic", Some(r#"{"secret":"a-secret"}"#))
+            .unwrap();
+        db.set_workflow_spec(&wf_b.id, "generic", Some(r#"{"secret":"b-secret"}"#))
+            .unwrap();
+
+        // Relocate row A's sealed spec_json ciphertext verbatim into row B (same
+        // table + column, different row).
+        let a_ct = raw_string(
+            &db,
+            &format!("SELECT spec_json FROM workflows WHERE id = '{}'", wf_a.id),
+        );
+        assert!(a_ct.contains(envelope::CIPHERTEXT_PREFIX));
+        {
+            let conn = db.conn().unwrap();
+            conn.execute(
+                "UPDATE workflows SET spec_json = ?2 WHERE id = ?1",
+                params![wf_b.id, a_ct],
+            )
+            .unwrap();
+        }
+
+        // Reading B must NOT yield A's plaintext — the relocated ciphertext must
+        // fail AEAD-open under B's row-bound AAD and surface the sentinel.
+        let spec_b = db.get_workflow(&wf_b.id).unwrap().spec_json.unwrap();
+        assert!(
+            !spec_b.contains("a-secret"),
+            "row A's secret must not decrypt under row B's identity: {spec_b}"
+        );
+        assert!(
+            spec_b.contains(SECRET_UNAVAILABLE_SENTINEL),
+            "relocated ciphertext must fail AEAD-open and surface the sentinel: {spec_b}"
+        );
+
+        // The correct row still round-trips.
+        assert!(db
+            .get_workflow(&wf_a.id)
+            .unwrap()
+            .spec_json
+            .unwrap()
+            .contains("a-secret"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// S2 fails-first (ADR 0011): the pre-migration plaintext `.bak` wipe must be
+    /// driven off ACTUAL at-rest state (sidecar exists AND all in-scope fields
+    /// sealed), evaluated on EVERY open — not off "crossed v19 this open". A
+    /// crash after the encrypt txn committed but before the wipe leaves a
+    /// plaintext sidecar that the old `existing_version < CURRENT && encrypted>0`
+    /// gate skips forever (the next open is already v19 with nothing to seal).
+    #[test]
+    fn sealing_wipes_lingering_plaintext_backup_after_crash_skipped_wipe() {
+        let dir = envelope_test_dir();
+        let ks = envelope_fake_ks();
+        let db = Database::new_with_key_store(&dir, ks.clone());
+
+        let mut cfg = db.get_email_config().unwrap();
+        cfg.smtp_password = "sealed".into();
+        db.set_email_config(&cfg).unwrap();
+
+        // Simulate the S2 crash window: fields are sealed and the durable
+        // "sealing incomplete" flag was set, but the wipe never ran — a
+        // plaintext sidecar lingers.
+        let bak = dir.join("scheduler.db.pre-migrate-v18-20260101T000000.bak");
+        std::fs::write(&bak, b"PLAINTEXT smtp-password=sealed").unwrap();
+        {
+            let conn = db.conn().unwrap();
+            conn.execute(
+                "INSERT INTO scheduler_config (key, value) VALUES ('envelope_sealing_incomplete', 'true') \
+                 ON CONFLICT(key) DO UPDATE SET value = 'true'",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(bak.exists());
+        drop(db);
+
+        // Reopen: the sealing state machine wipes the lingering plaintext sidecar
+        // because everything is sealed now.
+        let db2 = Database::new_with_key_store(&dir, ks.clone());
+        assert!(!db2.secrets_locked());
+        assert!(
+            !bak.exists(),
+            "a lingering plaintext .pre-migrate .bak must be wiped once all fields are sealed"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// S3 fails-first (ADR 0011): a v18->v19 open with an UNAVAILABLE KEK must
+    /// advance the schema (migrations are unconditional) BUT must set a durable
+    /// "sealing incomplete" flag and never falsely report sealed while plaintext
+    /// remains at rest; a later UNLOCKED open must seal everything, clear the
+    /// flag, and wipe the plaintext sidecar.
+    #[test]
+    fn v19_with_locked_kek_flags_incomplete_then_seals_on_unlock() {
+        let dir = envelope_test_dir();
+        let ks = envelope_fake_ks();
+
+        // v18 pre-envelope fixture with plaintext secrets.
+        let wf_id = {
+            let db = Database::new_with_key_store(&dir, ks.clone());
+            let wf = db
+                .create_workflow(
+                    "wf",
+                    None,
+                    "s.py",
+                    "* * * * *",
+                    false,
+                    true,
+                    "UTC",
+                    "production",
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let conn = db.conn().unwrap();
+            conn.execute(
+                "UPDATE workflows SET spec_json = ?2 WHERE id = ?1",
+                params![wf.id, r#"{"secret":"hmac-plain"}"#],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE email_config SET smtp_password = 'smtp-plain' WHERE id = 1",
+                [],
+            )
+            .unwrap();
+            conn.execute("DELETE FROM envelope_keys", []).unwrap();
+            conn.pragma_update(None, "user_version", 18i64).unwrap();
+            wf.id
+        };
+        ks.delete(
+            envelope::MASTER_KEK_KEYCHAIN_SERVICE,
+            envelope::MASTER_KEK_KEYCHAIN_ACCOUNT,
+        )
+        .unwrap();
+
+        // First upgrade open with an UNREADABLE KEK.
+        ks.set_get_unavailable(true);
+        let db = Database::new_with_key_store(&dir, ks.clone());
+        let ver: i64 = {
+            let conn = db.conn().unwrap();
+            conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(
+            ver, 19,
+            "schema must advance even when the KEK is unavailable"
+        );
+        assert!(db.secrets_locked(), "unreadable KEK must lock secrets");
+        assert_eq!(
+            raw_string(&db, "SELECT smtp_password FROM email_config WHERE id = 1"),
+            "smtp-plain",
+            "plaintext must remain at rest (sweep is a no-op while locked)"
+        );
+        let flag: Option<String> = {
+            let conn = db.conn().unwrap();
+            conn.query_row(
+                "SELECT value FROM scheduler_config WHERE key = 'envelope_sealing_incomplete'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap()
+        };
+        assert_eq!(
+            flag.as_deref(),
+            Some("true"),
+            "sealing must be flagged incomplete while locked with plaintext at rest"
+        );
+        drop(db);
+
+        // Reopen UNLOCKED: the sweep seals everything, clears the flag.
+        ks.set_get_unavailable(false);
+        let db = Database::new_with_key_store(&dir, ks.clone());
+        assert!(!db.secrets_locked());
+        assert!(
+            raw_string(&db, "SELECT smtp_password FROM email_config WHERE id = 1")
+                .starts_with(envelope::CIPHERTEXT_PREFIX),
+            "the sweep must seal plaintext on the first unlocked open"
+        );
+        let flag: Option<String> = {
+            let conn = db.conn().unwrap();
+            conn.query_row(
+                "SELECT value FROM scheduler_config WHERE key = 'envelope_sealing_incomplete'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap()
+        };
+        assert_eq!(
+            flag.as_deref(),
+            Some("false"),
+            "the sealing-incomplete flag must be cleared once fully sealed"
+        );
+        assert_eq!(db.get_email_config().unwrap().smtp_password, "smtp-plain");
+        assert!(db
+            .get_workflow(&wf_id)
+            .unwrap()
+            .spec_json
+            .unwrap()
+            .contains("hmac-plain"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// B4 fails-first (ADR 0011): a crash during KEK rotation at EITHER two-store
+    /// window must leave the DB openable and every secret decryptable. The
+    /// generational slot scheme keeps the OLD KEK until the DB commit flips the
+    /// generation, and keeps the NEW KEK afterward, so neither crash point
+    /// strands an unwrappable DEK. (The pre-fix order — persist the DB row first,
+    /// then `set` the Keychain — stranded the DEK on a crash between the two:
+    /// the DB referenced a KEK the Keychain lacked, locking every secret.)
+    ///
+    /// Crash is simulated by [`Database::rotate_kek_impl`] stopping at each
+    /// window, then dropping and reopening the DB (the real restart path).
+    #[test]
+    fn kek_rotation_crash_windows_leave_db_openable() {
+        // Window 1: NEW KEK stored, DB NOT yet flipped (still generation N).
+        {
+            let dir = envelope_test_dir();
+            let ks = envelope_fake_ks();
+            let db = Database::new_with_key_store(&dir, ks.clone());
+            let mut cfg = db.get_email_config().unwrap();
+            cfg.smtp_password = "w1-secret".into();
+            db.set_email_config(&cfg).unwrap();
+
+            db.rotate_kek_impl(KekRotateStop::AfterNewKekStored)
+                .unwrap();
+            let gen = {
+                let conn = db.conn().unwrap();
+                db.read_envelope_row(&conn).unwrap().unwrap().kek_generation
+            };
+            assert_eq!(
+                gen,
+                envelope::INITIAL_KEK_GENERATION,
+                "before the DB commit the row must still reference the OLD generation"
+            );
+            drop(db);
+
+            let db2 = Database::new_with_key_store(&dir, ks.clone());
+            assert!(
+                !db2.secrets_locked(),
+                "a crash after storing the new KEK but before the DB commit must still open"
+            );
+            assert_eq!(db2.get_email_config().unwrap().smtp_password, "w1-secret");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        // Window 2: DB committed at generation N+1, OLD slot not yet deleted.
+        {
+            let dir = envelope_test_dir();
+            let ks = envelope_fake_ks();
+            let db = Database::new_with_key_store(&dir, ks.clone());
+            let mut cfg = db.get_email_config().unwrap();
+            cfg.smtp_password = "w2-secret".into();
+            db.set_email_config(&cfg).unwrap();
+
+            db.rotate_kek_impl(KekRotateStop::AfterDbCommit).unwrap();
+            let gen = {
+                let conn = db.conn().unwrap();
+                db.read_envelope_row(&conn).unwrap().unwrap().kek_generation
+            };
+            assert_eq!(
+                gen,
+                envelope::INITIAL_KEK_GENERATION + 1,
+                "after the DB commit the row must reference the NEW generation"
+            );
+            // Both KEK slots are present (the old one is only best-effort deleted
+            // in the final step, which this crash skipped).
+            assert!(ks
+                .get(
+                    envelope::MASTER_KEK_KEYCHAIN_SERVICE,
+                    &envelope::master_kek_account(envelope::INITIAL_KEK_GENERATION),
+                )
+                .unwrap()
+                .is_some());
+            assert!(ks
+                .get(
+                    envelope::MASTER_KEK_KEYCHAIN_SERVICE,
+                    &envelope::master_kek_account(envelope::INITIAL_KEK_GENERATION + 1),
+                )
+                .unwrap()
+                .is_some());
+            drop(db);
+
+            let db2 = Database::new_with_key_store(&dir, ks.clone());
+            assert!(
+                !db2.secrets_locked(),
+                "a crash after the DB commit but before deleting the old KEK must still open"
+            );
+            assert_eq!(db2.get_email_config().unwrap().smtp_password, "w2-secret");
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

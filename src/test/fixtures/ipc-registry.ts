@@ -122,7 +122,11 @@ export type IpcCommand =
   | "save_email_profile"
   | "delete_email_profile"
   | "test_email_profile"
-  | "set_workflow_email_profile";
+  | "set_workflow_email_profile"
+  | "secrets_locked"
+  | "rotate_master_key"
+  | "rotate_data_key"
+  | "reprovision_secrets";
 
 export type IpcArgs = Record<string, unknown>;
 
@@ -514,6 +518,13 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
     delete_email_profile: () => undefined,
     test_email_profile: () => ({ success: true }),
     set_workflow_email_profile: () => undefined,
+    // Envelope-encryption (ADR 0011) admin surface. `secrets_locked` reports the
+    // secrets-locked state (master key present by default in the fixture);
+    // rotation/reprovision are void admin actions.
+    secrets_locked: () => false,
+    rotate_master_key: () => undefined,
+    rotate_data_key: () => undefined,
+    reprovision_secrets: () => undefined,
   };
 }
 

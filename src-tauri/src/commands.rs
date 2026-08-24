@@ -454,6 +454,39 @@ pub fn offboard_and_purge_secrets(
     Ok(report)
 }
 
+/// Whether at-rest secrets are currently LOCKED (envelope master key
+/// missing/unreadable — ADR 0011). The UI uses this to surface the
+/// "re-enter secrets" recovery affordance.
+#[tauri::command]
+pub fn secrets_locked(state: State<AppState>) -> Result<bool, String> {
+    Ok(state.service.secrets_locked())
+}
+
+/// Rotate the envelope MASTER KEY (KEK): re-wrap the DEK under a fresh KEK.
+/// Field data is untouched (ADR 0011).
+#[tauri::command]
+pub fn rotate_master_key(state: State<AppState>) -> Result<(), String> {
+    state.service.rotate_master_key().map_err(|e| e.to_string())
+}
+
+/// Rotate the envelope DATA KEY (DEK): re-encrypt every in-scope field under a
+/// fresh DEK (ADR 0011).
+#[tauri::command]
+pub fn rotate_data_key(state: State<AppState>) -> Result<(), String> {
+    state.service.rotate_data_key().map_err(|e| e.to_string())
+}
+
+/// Re-provision the envelope under a fresh KEK+DEK so the operator can re-enter
+/// secrets after a lost/unreadable master key (ADR 0011). Existing ciphertext
+/// is left intact (reads as the sentinel) until each secret is re-entered.
+#[tauri::command]
+pub fn reprovision_secrets(state: State<AppState>) -> Result<(), String> {
+    state
+        .service
+        .reprovision_secrets()
+        .map_err(|e| e.to_string())
+}
+
 /// Mint a new HTTP API key. Returns the plaintext token exactly once.
 #[tauri::command]
 pub fn create_api_key(
