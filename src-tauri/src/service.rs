@@ -1816,6 +1816,40 @@ impl SchedulerService {
         Ok(())
     }
 
+    /// Read the append-only API audit log (credential-security PR-D) through the
+    /// read-only `api_audit_log_view`, newest-first. `limit` is clamped to
+    /// `1..=1000` and `offset` is floored at `0` so an adapter can pass raw
+    /// caller input safely. The view exposes only non-secret request metadata
+    /// (method/path/status/remote/key_id/at) — never any secret material.
+    pub fn list_api_audit_log(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> ServiceResult<Vec<crate::db::ApiAuditLogEntry>> {
+        let limit = limit.clamp(1, 1000);
+        let offset = offset.max(0);
+        self.db
+            .list_api_audit_log(limit, offset)
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
+    /// One-action offboarding (governed DB half, credential-security PR-D):
+    /// revoke EVERY live API key and purge EVERY secret-bearing DB field in one
+    /// transaction (SMTP passwords + workflow-spec secrets — see
+    /// [`crate::db::Database::offboard_purge_secrets`]). Destructive and
+    /// irreversible; the caller (UI) owns the confirmation prompt.
+    ///
+    /// Filesystem-resident secrets — the managed MCP token/manifest and the
+    /// Cursor config entry — are NOT touched here: `SchedulerService` is
+    /// GUI-agnostic and holds no app-data path (ADR-0001), so the adapter that
+    /// owns those paths (`mcp::offboard`) clears them and composes this method
+    /// into the full one-action offboarding flow.
+    pub fn offboard_revoke_all_and_purge(&self) -> ServiceResult<crate::db::OffboardPurgeReport> {
+        self.db
+            .offboard_purge_secrets()
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
     /// Update a user-managed environment's metadata/caps.
     #[allow(clippy::too_many_arguments)]
     pub fn update_environment(
@@ -2223,14 +2257,15 @@ impl ApiIdentity {
 /// Recursively replace known secret-bearing fields with the read-scope sentinel.
 /// Matches by key name so it covers webhook `secret`, operator `cursor_api_key`,
 /// SMTP `smtp_password`, and `signature_secret` wherever they nest in the JSON.
+/// The matched key set is [`crate::db::SECRET_SPEC_FIELD_NAMES`] — the single
+/// source of truth shared with the offboarding purge, so redact-on-read and
+/// purge-on-offboard can never cover different fields.
 fn redact_secret_fields(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
             for (key, child) in map.iter_mut() {
-                if matches!(
-                    key.as_str(),
-                    "secret" | "signature_secret" | "cursor_api_key" | "smtp_password"
-                ) && child.as_str().is_some_and(|s| !s.is_empty())
+                if crate::db::SECRET_SPEC_FIELD_NAMES.contains(&key.as_str())
+                    && child.as_str().is_some_and(|s| !s.is_empty())
                 {
                     *child = serde_json::Value::String(
                         SchedulerService::READ_SCOPE_SECRET_SENTINEL.into(),
@@ -2419,6 +2454,67 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    #[test]
+    fn list_api_audit_log_clamps_bounds_and_returns_metadata_only() {
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec![crate::branding::DEFAULT_ENVIRONMENT], true);
+
+        db.record_api_audit(Some("k"), "GET", "/api/v1/runs", 200, None)
+            .unwrap();
+        db.record_api_audit(Some("k"), "GET", "/api/v1/queues", 200, None)
+            .unwrap();
+
+        // limit <= 0 clamps to 1, negative offset floors at 0.
+        let one = svc.list_api_audit_log(0, -5).unwrap();
+        assert_eq!(one.len(), 1, "limit clamps to at least 1");
+        // A huge limit is clamped to the ceiling (>= our row count), so both rows return.
+        let all = svc.list_api_audit_log(10_000, 0).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().all(|e| e.method == "GET" && e.status == 200));
+    }
+
+    #[test]
+    fn offboard_revoke_all_and_purge_revokes_keys_and_purges_spec_and_smtp_secrets() {
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec![crate::branding::DEFAULT_ENVIRONMENT], true);
+
+        // A live key whose token verifies BEFORE offboarding (fails-first proof:
+        // the post-offboard assertion would fail if revoke-all didn't happen).
+        let key = svc.create_api_key(Some("k"), &["read", "write"]).unwrap();
+        assert!(
+            svc.verify_api_key(&key.token).is_some(),
+            "freshly minted key must verify before offboarding"
+        );
+
+        // A secret-bearing SMTP profile + a workflow spec with a webhook secret.
+        let saved = db
+            .upsert_email_profile(&email_profile("ops", "smtp-pw"))
+            .unwrap();
+        let wf = svc
+            .create_workflow(draft("hook", crate::branding::DEFAULT_ENVIRONMENT), false)
+            .unwrap();
+        db.set_workflow_spec(&wf.id, "generic", Some(r#"{"secret":"hmac-shhh"}"#))
+            .unwrap();
+
+        let report = svc.offboard_revoke_all_and_purge().unwrap();
+        assert!(report.keys_revoked >= 1);
+        assert_eq!(report.smtp_passwords_cleared, 1);
+        assert_eq!(report.workflow_specs_scrubbed, 1);
+
+        // Verification now FAILS — the key is revoked.
+        assert!(
+            svc.verify_api_key(&key.token).is_none(),
+            "key must no longer verify after offboarding"
+        );
+
+        // Secret-bearing fields are blanked at rest.
+        assert_eq!(db.get_email_profile(&saved.id).unwrap().smtp_password, "");
+        let stored = db.get_workflow(&wf.id).unwrap().spec_json.unwrap();
+        assert!(!stored.contains("hmac-shhh"), "webhook secret purged");
     }
 
     #[test]

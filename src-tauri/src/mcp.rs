@@ -1168,6 +1168,50 @@ pub fn remove(
     ))
 }
 
+/// What a one-action offboarding cleared, for the caller's confirmation UI
+/// (credential-security PR-D).
+#[derive(Debug, Clone, Serialize)]
+pub struct OffboardReport {
+    /// API keys revoked (managed + all user keys).
+    pub keys_revoked: usize,
+    /// SMTP-password fields blanked across `email_config` + `email_profiles`.
+    pub smtp_passwords_cleared: usize,
+    /// Workflow `spec_json` blobs that had at least one secret field blanked.
+    pub workflow_specs_scrubbed: usize,
+    /// Whether the managed MCP integration (token/manifest + Cursor config
+    /// entry) was cleared.
+    pub managed_integration_removed: bool,
+}
+
+/// One-action offboarding (credential-security PR-D): revoke EVERY API key,
+/// purge EVERY secret-bearing DB field, and clear the managed MCP integration
+/// (token + manifest + Cursor config entry). This is the composition seam that
+/// unites the governed DB purge (owned by `SchedulerService`, which has no
+/// app-data path) with the filesystem cleanup this module already owns via
+/// [`remove`]. Destructive and irreversible; the caller (UI/IPC command) owns
+/// the confirmation prompt — the backend does not prompt.
+pub fn offboard(
+    app_data_dir: &Path,
+    service: &SchedulerService,
+    config_path: &Path,
+) -> Result<OffboardReport, String> {
+    // Governed DB half first: revoke every key + blank every secret DB field in
+    // one transaction.
+    let purge = service
+        .offboard_revoke_all_and_purge()
+        .map_err(|e| e.to_string())?;
+    // Then clear the managed MCP token from the manifest + Cursor config, reusing
+    // the audited `remove` path. `remove` also revokes the managed key, which the
+    // bulk purge above already covered — a harmless idempotent repeat.
+    remove(app_data_dir, service, config_path, false)?;
+    Ok(OffboardReport {
+        keys_revoked: purge.keys_revoked,
+        smtp_passwords_cleared: purge.smtp_passwords_cleared,
+        workflow_specs_scrubbed: purge.workflow_specs_scrubbed,
+        managed_integration_removed: true,
+    })
+}
+
 /// Startup re-provision hook (plan Section 12 "Auto-update (re-provision)").
 /// If the managed integration was previously enabled, silently repair it in
 /// the background: [`provision`] is already idempotent, so this is a no-op
@@ -2440,5 +2484,93 @@ exit 0
         let after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(after, unmanaged);
+    }
+
+    /// PR-D one-action offboarding, end-to-end: revokes ALL keys (managed +
+    /// user), purges secret-bearing DB fields (SMTP + workflow-spec secret),
+    /// and clears the managed integration (manifest token + Cursor config entry).
+    #[test]
+    fn offboard_revokes_all_keys_purges_secrets_and_clears_managed_integration() {
+        let app_data_dir = tmpdir();
+        let config_path = tmpdir().join("mcp.json");
+        let service_dir = tmpdir();
+        // Build the service manually so we keep the db handle for seeding secrets.
+        let db = Arc::new(Database::new(&service_dir));
+        let service = SchedulerService::new(db.clone(), Arc::new(NoopNotifier));
+        let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+
+        // Provision: mints the managed key + writes the manifest token.
+        let provisioned =
+            provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false).unwrap();
+        let managed_key_id = provisioned.managed_key_id.clone().unwrap();
+        assert!(key_is_alive(&service, &managed_key_id));
+        assert!(ManagedManifest::load(&app_data_dir)
+            .managed_key_id
+            .is_some());
+
+        // An extra user key + secret-bearing DB fields.
+        let extra = service.create_api_key(Some("extra"), &["read"]).unwrap();
+        assert!(key_is_alive(&service, &extra.id));
+        let profile = db
+            .upsert_email_profile(&crate::db::EmailProfile {
+                id: String::new(),
+                name: "ops".into(),
+                enabled: true,
+                alert_email: "a@b.c".into(),
+                smtp_host: "smtp.example.com".into(),
+                smtp_port: 587,
+                smtp_user: "u".into(),
+                smtp_password: "smtp-pw".into(),
+                from_address: "f@b.c".into(),
+                from_name: "Chaos".into(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .unwrap();
+        let wf = db
+            .create_workflow(
+                "hook",
+                None,
+                "scripts/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        db.set_workflow_spec(&wf.id, "generic", Some(r#"{"secret":"hmac-shhh"}"#))
+            .unwrap();
+
+        // One-action offboarding.
+        let report = offboard(&app_data_dir, &service, &config_path).unwrap();
+        assert!(report.managed_integration_removed);
+        assert!(report.keys_revoked >= 2, "managed + extra key revoked");
+        assert_eq!(report.smtp_passwords_cleared, 1);
+        assert_eq!(report.workflow_specs_scrubbed, 1);
+
+        // Every key is revoked.
+        assert!(
+            !key_is_alive(&service, &managed_key_id),
+            "managed key revoked"
+        );
+        assert!(!key_is_alive(&service, &extra.id), "extra key revoked");
+
+        // Managed integration cleared: manifest/token dir gone + Cursor entry gone.
+        assert!(!mcp_root(&app_data_dir).exists(), "manifest token cleared");
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(
+            after["mcpServers"]["chaos-scheduler"].is_null(),
+            "Cursor managed entry cleared"
+        );
+
+        // Secrets purged at rest.
+        assert_eq!(db.get_email_profile(&profile.id).unwrap().smtp_password, "");
+        let stored = db.get_workflow(&wf.id).unwrap().spec_json.unwrap();
+        assert!(!stored.contains("hmac-shhh"), "webhook secret purged");
     }
 }
