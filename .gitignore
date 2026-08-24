@@ -38,6 +38,8 @@ scheduler.db
 *.sqlite3
 *.db-wal
 *.db-shm
+# Migration backup sidecars — 0600 at-rest hardened, never committed (PR-C)
+*.bak
 
 # Secrets — never commit (the data-guard CI check enforces this too)
 .env

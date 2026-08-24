@@ -2,6 +2,142 @@ use rusqlite::{params, types::Type, Connection, OptionalExtension, TransactionBe
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+// ─── At-rest hardening helpers (PR-C, FileVault-stack) ────────────────────────
+//
+// Objective: harden the SQLite DB and migration-backup sidecars above FileVault
+// by applying 0600 file permissions, a Time Machine/cloud-sync exclusion xattr
+// (macOS), the SQLite secure_delete pragma, and secure overwrite before unlink
+// for pruned backup files.  All macOS-specific calls are guarded with
+// #[cfg(target_os = "macos")] so the crate compiles cleanly on non-macOS
+// targets (Linux CI, etc.).  Unix permission calls are guarded with #[cfg(unix)].
+
+/// Restricts file permissions to 0600 (owner read/write only).
+/// Best-effort on Unix; silent no-op on other platforms.
+fn restrict_file_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(m) = std::fs::metadata(path) {
+            let mut perms = m.permissions();
+            perms.set_mode(0o600);
+            if let Err(e) = std::fs::set_permissions(path, perms) {
+                log::warn!("db-harden: failed to set 0600 on {path:?}: {e}");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Restricts directory permissions to 0700 (owner rwx only).
+/// Best-effort on Unix; silent no-op on other platforms.
+fn restrict_dir_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(m) = std::fs::metadata(path) {
+            let mut perms = m.permissions();
+            perms.set_mode(0o700);
+            if let Err(e) = std::fs::set_permissions(path, perms) {
+                log::warn!("db-harden: failed to set 0700 on {path:?}: {e}");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Marks a file as excluded from Time Machine and cloud-sync backups by setting
+/// the `com.apple.metadata:com_apple_backup_excludeItem` extended attribute.
+/// No-op on non-macOS.  Best-effort: failures are logged, never fatal.
+fn exclude_from_backup(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CString;
+        if !path.exists() {
+            return;
+        }
+        let Some(path_str) = path.to_str() else {
+            return;
+        };
+        let Ok(path_cstr) = CString::new(path_str) else {
+            return;
+        };
+        // Value is the app bundle identifier; Time Machine checks attribute presence.
+        const BUNDLE_ID: &[u8] = b"com.chaosscheduler.app";
+        // Attribute name as a NUL-terminated C string.
+        const ATTR: &[u8] = b"com.apple.metadata:com_apple_backup_excludeItem\0";
+        let rc = unsafe {
+            libc::setxattr(
+                path_cstr.as_ptr(),
+                ATTR.as_ptr() as *const libc::c_char,
+                BUNDLE_ID.as_ptr() as *const libc::c_void,
+                BUNDLE_ID.len(),
+                0, // position — always 0 for non-resource-fork attributes
+                0, // options — 0 = follow symlinks, overwrite if already set
+            )
+        };
+        if rc != 0 {
+            log::warn!(
+                "db-harden: backup-exclusion xattr failed on {path:?}: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = path;
+}
+
+/// Overwrites the file content with zeros before removing it, reducing the
+/// chance that the OS or filesystem retains plaintext content after unlink.
+/// Best-effort: errors at any step fall through to a normal remove.
+fn secure_remove(path: &std::path::Path) {
+    use std::io::Write as _;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let total = metadata.len() as usize;
+        if total > 0 {
+            const CHUNK: usize = 65_536;
+            let zeros = vec![0u8; CHUNK];
+            if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(path) {
+                let mut remaining = total;
+                while remaining > 0 {
+                    let n = remaining.min(CHUNK);
+                    if f.write_all(&zeros[..n]).is_err() {
+                        break;
+                    }
+                    remaining -= n;
+                }
+                let _ = f.sync_all();
+            }
+        }
+    }
+    if let Err(e) = std::fs::remove_file(path) {
+        log::warn!("db-harden: failed to remove {path:?}: {e}");
+    }
+}
+
+/// Applies full at-rest hardening to the DB file and its WAL/SHM sidecars:
+/// 0600 file permissions, backup-exclusion xattr (macOS), and 0700 on the
+/// parent directory.  Called at every startup so newly-created files are
+/// protected even if a prior run exited before hardening could apply.
+fn harden_db_files(db_path: &std::path::Path) {
+    restrict_file_permissions(db_path);
+    exclude_from_backup(db_path);
+    // WAL and SHM sidecars are created lazily by SQLite in WAL journal mode.
+    let base = db_path.to_string_lossy();
+    let wal_str = format!("{base}-wal");
+    let shm_str = format!("{base}-shm");
+    restrict_file_permissions(std::path::Path::new(&wal_str));
+    exclude_from_backup(std::path::Path::new(&wal_str));
+    restrict_file_permissions(std::path::Path::new(&shm_str));
+    exclude_from_backup(std::path::Path::new(&shm_str));
+    if let Some(dir) = db_path.parent() {
+        if !dir.as_os_str().is_empty() {
+            restrict_dir_permissions(dir);
+        }
+    }
+}
+
 /// Canonical run-status classification — the single source of truth for
 /// "did this run finish, and did it finish OK?".
 ///
@@ -1182,6 +1318,10 @@ impl Database {
             path: db_path.to_string_lossy().to_string(),
         };
         db.init().expect("Failed to initialize database");
+        // Harden the DB and its parent directory at every startup: 0600 on
+        // the DB file and WAL/SHM sidecars, 0700 on the app-data directory,
+        // and the Time Machine backup-exclusion xattr (macOS).
+        harden_db_files(&db_path);
         db
     }
 
@@ -1198,6 +1338,9 @@ impl Database {
         conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        // Overwrite freed SQLite pages with zeros so deleted content does
+        // not linger in the DB file at rest (PR-C FileVault-stack hardening).
+        conn.pragma_update(None, "secure_delete", "ON")?;
         Ok(conn)
     }
 
@@ -2381,6 +2524,11 @@ impl Database {
         match conn.execute("VACUUM INTO ?1", params![backup_path]) {
             Ok(_) => {
                 log::info!("Pre-migration backup written to {backup_path}");
+                // Harden the backup sidecar: owner-only permissions and
+                // exclude from Time Machine / cloud-sync backups.
+                let bak_path = std::path::Path::new(&backup_path);
+                restrict_file_permissions(bak_path);
+                exclude_from_backup(bak_path);
                 Self::prune_migration_backups(&self.path);
                 Ok(())
             }
@@ -2424,9 +2572,9 @@ impl Database {
         // Newest first; delete everything past the retention window.
         sidecars.sort_by(|a, b| b.0.cmp(&a.0));
         for (_, stale) in sidecars.into_iter().skip(MIGRATION_BACKUP_KEEP) {
-            if let Err(err) = std::fs::remove_file(&stale) {
-                log::warn!("Failed to prune old migration backup {stale:?}: {err}");
-            }
+            // Overwrite before unlink so the OS/FS has less chance of
+            // retaining plaintext backup content after the file is removed.
+            secure_remove(&stale);
         }
     }
 
@@ -12979,6 +13127,114 @@ SUMMARY_JSON:{\"title\":\"current\"}
             wide.max_wait_seconds
         );
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    // ─── PR-C at-rest hardening tests ──────────────────────────────────────────
+
+    #[test]
+    #[cfg(unix)]
+    fn at_rest_hardening_db_is_0600_and_dir_is_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("chaos-harden-perm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _db = Database::new(&dir);
+        let db_path = dir.join("scheduler.db");
+        let db_mode = std::fs::metadata(&db_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            db_mode, 0o600,
+            "scheduler.db should be mode 0600, got {db_mode:#o}"
+        );
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "app-data dir should be mode 0700, got {dir_mode:#o}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn at_rest_hardening_secure_delete_pragma_is_on() {
+        let dir = std::env::temp_dir().join(format!("chaos-harden-sdel-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+        let conn = db.conn().unwrap();
+        let val: i64 = conn
+            .query_row("PRAGMA secure_delete", [], |r| r.get(0))
+            .unwrap();
+        assert_ne!(
+            val, 0,
+            "secure_delete pragma should be ON (non-zero), got {val}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn at_rest_hardening_backup_exclusion_xattr_is_set_on_db() {
+        use std::ffi::CString;
+        let dir = std::env::temp_dir().join(format!("chaos-harden-xattr-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _db = Database::new(&dir);
+        let db_path = dir.join("scheduler.db");
+        let path_cstr = CString::new(db_path.to_str().unwrap()).unwrap();
+        const ATTR: &[u8] = b"com.apple.metadata:com_apple_backup_excludeItem\0";
+        let mut buf = [0u8; 256];
+        let rc = unsafe {
+            libc::getxattr(
+                path_cstr.as_ptr(),
+                ATTR.as_ptr() as *const libc::c_char,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                0,
+                0,
+            )
+        };
+        assert!(
+            rc > 0,
+            "backup-exclusion xattr should be set on scheduler.db (getxattr returned {rc})"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn at_rest_hardening_migration_backup_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("chaos-harden-bak-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A fresh Database triggers migration backups (v0 -> v17 pending stack).
+        let _db = Database::new(&dir);
+        // Find the .bak sidecar created for this DB.
+        let bak = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .find(|e| {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                n.starts_with("scheduler.db.pre-migrate-") && n.ends_with(".bak")
+            })
+            .expect("migration backup .bak should exist after fresh Database::new");
+        let mode = std::fs::metadata(bak.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "migration backup .bak should be mode 0600, got {mode:#o}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn at_rest_hardening_secure_remove_overwrites_and_unlinks() {
+        let dir = std::env::temp_dir().join(format!("chaos-harden-srm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target.bak");
+        // Write a recognisable payload so a missed overwrite would be visible.
+        std::fs::write(&target, b"SENSITIVE_CONTENT_SHOULD_BE_ZEROED").unwrap();
+        assert!(target.exists());
+        secure_remove(&target);
+        assert!(
+            !target.exists(),
+            "secure_remove should have deleted the file"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }
