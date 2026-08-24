@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.8.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v1.7.0...chaos-scheduler-tauri-v1.8.0) (2026-08-24)
+
+
+### Features
+
+* **mcp-server:** add workflow authoring resources ([#362](https://github.com/KleinPerkins/chaos-scheduler/issues/362)) ([26519e2](https://github.com/KleinPerkins/chaos-scheduler/commit/26519e20cb48a8a2e31cc9a35f7a29a9ca2177fe))
+* **security:** envelope-encrypt secret-bearing fields at rest (on by default) ([#389](https://github.com/KleinPerkins/chaos-scheduler/issues/389)) ([13401ec](https://github.com/KleinPerkins/chaos-scheduler/commit/13401ec745e1d0fcaa7f0091e2e25592736dfdf4))
+* **security:** move managed MCP key into macOS Keychain; secret-free tracked config ([#292](https://github.com/KleinPerkins/chaos-scheduler/issues/292)) ([#388](https://github.com/KleinPerkins/chaos-scheduler/issues/388)) ([dcb49b9](https://github.com/KleinPerkins/chaos-scheduler/commit/dcb49b9f5b5a358d880d6468c0504733074b76b9))
+
 ## [1.7.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v1.6.0...chaos-scheduler-tauri-v1.7.0) (2026-08-24)
 
 
