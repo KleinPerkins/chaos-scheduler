@@ -1378,6 +1378,16 @@ pub struct OffboardPurgeReport {
     pub smtp_passwords_cleared: usize,
     /// Workflow `spec_json` blobs that had at least one secret field blanked.
     pub workflow_specs_scrubbed: usize,
+    /// Workflow `trigger_config` blobs that had at least one secret field
+    /// blanked (matches the read-path redaction + MCP projection contract).
+    pub trigger_configs_scrubbed: usize,
+    /// Workflow `queue_config` blobs that had at least one secret field blanked
+    /// (the MCP resource projection treats `queue_config` as secret-bearing).
+    pub queue_configs_scrubbed: usize,
+    /// Secret-bearing `scheduler_config` rows deleted (the global inbound
+    /// webhook HMAC secret and any future `*_secret`/`*_token`/`cursor_api_key`
+    /// keys — see [`is_secret_scheduler_config_key`]).
+    pub scheduler_config_secrets_cleared: usize,
 }
 
 /// Names of the JSON fields that hold secret material inside a workflow's
@@ -1423,6 +1433,45 @@ fn blank_secret_fields(value: &mut serde_json::Value) -> bool {
         _ => {}
     }
     changed
+}
+
+/// A workflow row read during the offboarding purge: `(id, spec_json,
+/// trigger_config, queue_config)`. Named to satisfy `clippy::type_complexity`
+/// and to document the column order the scrub loop relies on.
+type WorkflowSecretRow = (String, Option<String>, Option<String>, Option<String>);
+
+/// Parse a stored JSON blob, blank every known secret-bearing field via
+/// [`blank_secret_fields`], and return the re-serialized JSON only if something
+/// actually changed. `None` means "nothing to purge" — an absent/empty/
+/// unparseable blob, or one with no secret field — so the caller skips the
+/// UPDATE (keeping the purge idempotent). Shares [`SECRET_SPEC_FIELD_NAMES`],
+/// so `spec_json`, `trigger_config`, and `queue_config` are all scrubbed with
+/// the exact field set the read-path redaction and MCP projection use.
+fn blank_secret_json_blob(blob: Option<&str>) -> Option<String> {
+    let raw = blob?;
+    if raw.is_empty() {
+        return None;
+    }
+    let mut value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    if blank_secret_fields(&mut value) {
+        serde_json::to_string(&value).ok()
+    } else {
+        None
+    }
+}
+
+/// Whether a `scheduler_config` KEY names secret material that offboarding must
+/// clear. `scheduler_config` is a flat key/value store (distinct from the
+/// JSON-blob fields covered by [`SECRET_SPEC_FIELD_NAMES`]): the global inbound
+/// webhook HMAC secret lives here as `inbound_webhook_secret`. The suffix rules
+/// defensively catch any future `*_secret` / `*_token` / `cursor_api_key` key
+/// without maintaining a second hand-edited allow-list.
+fn is_secret_scheduler_config_key(key: &str) -> bool {
+    key == "inbound_webhook_secret"
+        || key == "cursor_api_key"
+        || key.ends_with("_secret")
+        || key.ends_with("_token")
+        || key.ends_with(".cursor_api_key")
 }
 
 #[derive(Debug, Clone)]
@@ -3067,14 +3116,25 @@ impl Database {
     }
 
     /// Destructive offboarding purge (credential-security PR-D): in ONE
-    /// transaction, revoke EVERY live API key and blank EVERY secret-bearing DB
-    /// field — SMTP passwords (`email_config` + all `email_profiles`) and the
-    /// secret fields embedded in every workflow's `spec_json` (outbound-webhook
-    /// `secret`, `signature_secret`, `cursor_api_key`, inline `smtp_password`;
-    /// see [`SECRET_SPEC_FIELD_NAMES`]). Idempotent: a second run purges nothing
-    /// further and reports all-zero counts. Filesystem-resident secrets (the
-    /// managed MCP token/manifest and the Cursor config entry) live outside the
-    /// DB and are cleared by the adapter that owns those paths (`mcp::offboard`).
+    /// transaction, revoke EVERY live API key and blank/clear EVERY
+    /// secret-bearing DB field the product treats as secret on read or projects
+    /// as secret:
+    /// - SMTP passwords (`email_config` + all `email_profiles`).
+    /// - The secret fields embedded in every workflow's `spec_json`,
+    ///   `trigger_config`, AND `queue_config` (outbound-webhook `secret`,
+    ///   `signature_secret`, `cursor_api_key`, inline `smtp_password`; see
+    ///   [`SECRET_SPEC_FIELD_NAMES`]) — the exact union of the read-path
+    ///   redaction (`service::redact_workflow_secrets`) and the MCP resource
+    ///   projection, via the SHARED field set so purge and redaction can never
+    ///   drift.
+    /// - Secret keys in `scheduler_config` — the global `inbound_webhook_secret`
+    ///   HMAC key plus any `*_secret`/`*_token`/`cursor_api_key` key (see
+    ///   [`is_secret_scheduler_config_key`]).
+    ///
+    /// Idempotent: a second run purges nothing further and reports all-zero
+    /// counts. Filesystem-resident secrets (the managed MCP token/manifest and
+    /// the Cursor config entry) live outside the DB and are cleared by the
+    /// adapter that owns those paths (`mcp::offboard`).
     pub fn offboard_purge_secrets(&self) -> rusqlite::Result<OffboardPurgeReport> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
@@ -3090,34 +3150,69 @@ impl Database {
             [],
         )?;
 
-        // Scrub secret fields embedded in workflow specs. Collect the rows first:
-        // a live SELECT statement can't stay open while UPDATE-ing the same table
-        // on one connection.
-        let specs: Vec<(String, String)> = {
-            let mut stmt = tx.prepare(
-                "SELECT id, spec_json FROM workflows WHERE spec_json IS NOT NULL AND spec_json <> ''",
-            )?;
+        // Scrub secret fields embedded in every workflow config blob. Collect
+        // the rows first: a live SELECT statement can't stay open while
+        // UPDATE-ing the same table on one connection.
+        let rows: Vec<WorkflowSecretRow> = {
+            let mut stmt =
+                tx.prepare("SELECT id, spec_json, trigger_config, queue_config FROM workflows")?;
             let collected = stmt
                 .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             collected
         };
         let mut workflow_specs_scrubbed = 0usize;
-        for (id, spec_json) in specs {
-            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&spec_json) else {
-                continue;
-            };
-            if blank_secret_fields(&mut value) {
-                let scrubbed = serde_json::to_string(&value)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let mut trigger_configs_scrubbed = 0usize;
+        let mut queue_configs_scrubbed = 0usize;
+        for (id, spec_json, trigger_config, queue_config) in rows {
+            if let Some(scrubbed) = blank_secret_json_blob(spec_json.as_deref()) {
                 tx.execute(
                     "UPDATE workflows SET spec_json = ?2, updated_at = datetime('now') WHERE id = ?1",
                     params![id, scrubbed],
                 )?;
                 workflow_specs_scrubbed += 1;
             }
+            if let Some(scrubbed) = blank_secret_json_blob(trigger_config.as_deref()) {
+                tx.execute(
+                    "UPDATE workflows SET trigger_config = ?2, updated_at = datetime('now') WHERE id = ?1",
+                    params![id, scrubbed],
+                )?;
+                trigger_configs_scrubbed += 1;
+            }
+            if let Some(scrubbed) = blank_secret_json_blob(queue_config.as_deref()) {
+                tx.execute(
+                    "UPDATE workflows SET queue_config = ?2, updated_at = datetime('now') WHERE id = ?1",
+                    params![id, scrubbed],
+                )?;
+                queue_configs_scrubbed += 1;
+            }
+        }
+
+        // Clear secret keys stored in the flat `scheduler_config` key/value
+        // table (the global inbound-webhook HMAC secret + defensive matches).
+        // Deleting the row is the cleanest "cleared" state: consumers treat an
+        // absent/empty value as "no secret configured".
+        let secret_config_keys: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT key FROM scheduler_config")?;
+            let all_keys = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            all_keys
+                .into_iter()
+                .filter(|key| is_secret_scheduler_config_key(key))
+                .collect()
+        };
+        let mut scheduler_config_secrets_cleared = 0usize;
+        for key in secret_config_keys {
+            scheduler_config_secrets_cleared +=
+                tx.execute("DELETE FROM scheduler_config WHERE key = ?1", params![key])?;
         }
 
         tx.commit()?;
@@ -3125,6 +3220,9 @@ impl Database {
             keys_revoked,
             smtp_passwords_cleared,
             workflow_specs_scrubbed,
+            trigger_configs_scrubbed,
+            queue_configs_scrubbed,
+            scheduler_config_secrets_cleared,
         })
     }
 
@@ -8232,6 +8330,9 @@ mod tests {
         assert_eq!(report.keys_revoked, 2);
         assert_eq!(report.smtp_passwords_cleared, 2);
         assert_eq!(report.workflow_specs_scrubbed, 1);
+        assert_eq!(report.trigger_configs_scrubbed, 0);
+        assert_eq!(report.queue_configs_scrubbed, 0);
+        assert_eq!(report.scheduler_config_secrets_cleared, 0);
 
         // Keys are revoked: get_api_key only returns non-revoked keys.
         assert!(db.get_api_key(&k1).unwrap().is_none());
@@ -8284,9 +8385,120 @@ mod tests {
             OffboardPurgeReport {
                 keys_revoked: 0,
                 smtp_passwords_cleared: 0,
-                workflow_specs_scrubbed: 0
+                workflow_specs_scrubbed: 0,
+                trigger_configs_scrubbed: 0,
+                queue_configs_scrubbed: 0,
+                scheduler_config_secrets_cleared: 0,
             }
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Fails-first for the incomplete-purge fix: a secret that lives ONLY in a
+    /// workflow's `trigger_config`, ONLY in its `queue_config`, or ONLY in
+    /// `scheduler_config` (`inbound_webhook_secret`) must be cleared by
+    /// offboarding. Against the previous spec_json-only purge each of these
+    /// assertions fails (the secret survives + the count is 0).
+    #[test]
+    fn offboard_purge_secrets_clears_trigger_queue_and_scheduler_config_secrets() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        // Secret ONLY in trigger_config.
+        let wf_trigger = db
+            .create_workflow(
+                "trigger-secret",
+                None,
+                "scripts/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                Some(r#"{"kind":"webhook","signature_secret":"trigger-shhh"}"#),
+                None,
+            )
+            .unwrap();
+
+        // Secret ONLY in queue_config.
+        let wf_queue = db
+            .create_workflow(
+                "queue-secret",
+                None,
+                "scripts/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                None,
+                Some(r#"{"queue":"default","secret":"queue-shhh"}"#),
+            )
+            .unwrap();
+
+        // Secret ONLY in scheduler_config (global inbound webhook HMAC secret).
+        db.set_string_config("inbound_webhook_secret", "inbound-shhh")
+            .unwrap();
+        // A non-secret scheduler_config key must survive the purge untouched.
+        db.set_string_config("global_parallelism_cap", "7").unwrap();
+
+        let report = db.offboard_purge_secrets().unwrap();
+        assert_eq!(report.trigger_configs_scrubbed, 1);
+        assert_eq!(report.queue_configs_scrubbed, 1);
+        assert_eq!(report.scheduler_config_secrets_cleared, 1);
+
+        let conn = db.conn().unwrap();
+        let trigger: String = conn
+            .query_row(
+                "SELECT trigger_config FROM workflows WHERE id = ?1",
+                params![wf_trigger.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !trigger.contains("trigger-shhh"),
+            "trigger_config secret must be purged"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&trigger).unwrap()["signature_secret"],
+            ""
+        );
+
+        let queue: String = conn
+            .query_row(
+                "SELECT queue_config FROM workflows WHERE id = ?1",
+                params![wf_queue.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !queue.contains("queue-shhh"),
+            "queue_config secret must be purged"
+        );
+        // Non-secret structure is preserved.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&queue).unwrap()["queue"],
+            "default"
+        );
+
+        // Secret scheduler_config key is gone; the non-secret one is untouched.
+        assert!(db
+            .get_scheduler_config("inbound_webhook_secret")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            db.get_scheduler_config("global_parallelism_cap").unwrap(),
+            Some("7".to_string())
+        );
+
+        // Idempotent: a second run finds nothing further to clear.
+        let again = db.offboard_purge_secrets().unwrap();
+        assert_eq!(again.trigger_configs_scrubbed, 0);
+        assert_eq!(again.queue_configs_scrubbed, 0);
+        assert_eq!(again.scheduler_config_secrets_cleared, 0);
         let _ = std::fs::remove_dir_all(dir);
     }
 

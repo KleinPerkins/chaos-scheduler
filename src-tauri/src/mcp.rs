@@ -1178,9 +1178,43 @@ pub struct OffboardReport {
     pub smtp_passwords_cleared: usize,
     /// Workflow `spec_json` blobs that had at least one secret field blanked.
     pub workflow_specs_scrubbed: usize,
-    /// Whether the managed MCP integration (token/manifest + Cursor config
-    /// entry) was cleared.
+    /// Workflow `trigger_config` blobs that had at least one secret field blanked.
+    pub trigger_configs_scrubbed: usize,
+    /// Workflow `queue_config` blobs that had at least one secret field blanked.
+    pub queue_configs_scrubbed: usize,
+    /// Secret-bearing `scheduler_config` rows deleted (e.g. the inbound webhook
+    /// HMAC secret).
+    pub scheduler_config_secrets_cleared: usize,
+    /// Whether the managed MCP integration was ACTUALLY cleared — verified from
+    /// the post-state (manifest file absent AND no managed Cursor config entry
+    /// remains), not assumed. The best-effort `remove` swallows filesystem/
+    /// config-write errors, so this must never be a hardcoded `true`.
     pub managed_integration_removed: bool,
+}
+
+/// Whether the Cursor config still contains OUR managed `chaos-scheduler`
+/// entry. Used to verify an offboard actually cleared it before the report
+/// claims `managed_integration_removed`. An unreadable/absent config, absent
+/// entry, or a foreign (unmanaged) entry all mean "our managed entry is gone".
+fn managed_config_entry_present(config_path: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(config_path) else {
+        return false;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    root.get("mcpServers")
+        .and_then(|servers| servers.get("chaos-scheduler"))
+        .is_some_and(is_managed_entry)
+}
+
+/// Whether the managed MCP integration is fully absent on disk + in the Cursor
+/// config — the post-condition [`offboard`] verifies rather than assumes. Both
+/// halves must be gone: the manifest file (holding the managed token) AND our
+/// managed `mcp.json` entry.
+fn managed_integration_fully_removed(app_data_dir: &Path, config_path: &Path) -> bool {
+    !ManagedManifest::manifest_path(app_data_dir).exists()
+        && !managed_config_entry_present(config_path)
 }
 
 /// One-action offboarding (credential-security PR-D): revoke EVERY API key,
@@ -1204,11 +1238,19 @@ pub fn offboard(
     // the audited `remove` path. `remove` also revokes the managed key, which the
     // bulk purge above already covered — a harmless idempotent repeat.
     remove(app_data_dir, service, config_path, false)?;
+    // `remove` is best-effort (it swallows filesystem/config-write errors and
+    // still returns Ok), so VERIFY the post-state rather than claim success: the
+    // report must never tell the confirmation UI a removal happened when it
+    // didn't.
+    let managed_integration_removed = managed_integration_fully_removed(app_data_dir, config_path);
     Ok(OffboardReport {
         keys_revoked: purge.keys_revoked,
         smtp_passwords_cleared: purge.smtp_passwords_cleared,
         workflow_specs_scrubbed: purge.workflow_specs_scrubbed,
-        managed_integration_removed: true,
+        trigger_configs_scrubbed: purge.trigger_configs_scrubbed,
+        queue_configs_scrubbed: purge.queue_configs_scrubbed,
+        scheduler_config_secrets_cleared: purge.scheduler_config_secrets_cleared,
+        managed_integration_removed,
     })
 }
 
@@ -2572,5 +2614,66 @@ exit 0
         assert_eq!(db.get_email_profile(&profile.id).unwrap().smtp_password, "");
         let stored = db.get_workflow(&wf.id).unwrap().spec_json.unwrap();
         assert!(!stored.contains("hmac-shhh"), "webhook secret purged");
+    }
+
+    /// ISSUE 2 (report-accuracy): `managed_integration_removed` must be DERIVED
+    /// from the real post-state, never hardcoded. This exercises the exact
+    /// predicate `offboard` uses: it reports `false` while a managed manifest +
+    /// managed Cursor entry are still present, and `true` only once both are
+    /// actually gone. Against the old hardcoded `true` there was no such
+    /// derivation, so a swallowed removal error would have lied.
+    #[test]
+    fn managed_integration_removed_reflects_actual_post_state() {
+        let app_data_dir = tmpdir();
+        let config_path = tmpdir().join("mcp.json");
+        let service_dir = tmpdir();
+        let db = Arc::new(Database::new(&service_dir));
+        let service = SchedulerService::new(db.clone(), Arc::new(NoopNotifier));
+        let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+
+        // Provision so BOTH halves exist: the manifest file + a managed
+        // `chaos-scheduler` entry in the Cursor config.
+        provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false).unwrap();
+        assert!(ManagedManifest::manifest_path(&app_data_dir).exists());
+        assert!(managed_config_entry_present(&config_path));
+        assert!(
+            !managed_integration_fully_removed(&app_data_dir, &config_path),
+            "must report NOT removed while manifest + managed entry are present"
+        );
+
+        // A real offboard clears both halves; only then may the flag be true.
+        let report = offboard(&app_data_dir, &service, &config_path).unwrap();
+        assert!(!ManagedManifest::manifest_path(&app_data_dir).exists());
+        assert!(!managed_config_entry_present(&config_path));
+        assert!(
+            managed_integration_fully_removed(&app_data_dir, &config_path),
+            "must report removed once both halves are gone"
+        );
+        assert!(report.managed_integration_removed);
+
+        // A LINGERING managed entry (simulating a swallowed config-write failure
+        // in the best-effort `remove`) must force the reported value back to
+        // false — the report can never claim a removal that didn't happen.
+        std::fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mcpServers": {
+                    "chaos-scheduler": {
+                        "command": "node",
+                        "env": { "CHAOS_SCHEDULER_MANAGED_BY": MANAGED_BY_MARKER }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            managed_config_entry_present(&config_path),
+            "a managed entry must be detected as present"
+        );
+        assert!(
+            !managed_integration_fully_removed(&app_data_dir, &config_path),
+            "a surviving managed entry must yield NOT removed"
+        );
     }
 }

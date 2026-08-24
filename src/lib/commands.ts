@@ -149,6 +149,9 @@ export interface OffboardReport {
   keys_revoked: number;
   smtp_passwords_cleared: number;
   workflow_specs_scrubbed: number;
+  trigger_configs_scrubbed: number;
+  queue_configs_scrubbed: number;
+  scheduler_config_secrets_cleared: number;
   managed_integration_removed: boolean;
 }
 

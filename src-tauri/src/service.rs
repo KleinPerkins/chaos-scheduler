@@ -2049,20 +2049,24 @@ impl SchedulerService {
         !scopes.iter().any(|s| s == "write" || s == "admin")
     }
 
-    /// Replace secret material inside a workflow's spec/trigger JSON with the
-    /// sentinel. Applied in the service layer so REST, MCP tools, and the
-    /// `chaos://workflows/{id}` resource all inherit identical redaction.
+    /// Replace secret material inside a workflow's `spec_json`, `trigger_config`,
+    /// and `queue_config` JSON with the sentinel. Applied in the service layer so
+    /// REST, MCP tools, and the `chaos://workflows/{id}` resource all inherit
+    /// identical redaction. `queue_config` is included so the Rust read path
+    /// matches the MCP resource projection (which already redacts it) and the
+    /// offboarding purge — a single secret-bearing field set across all three.
     pub fn redact_workflow_secrets(mut wf: Workflow) -> Workflow {
-        if let Some(spec) = wf.spec_json.as_mut() {
-            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(spec) {
+        for blob in [
+            wf.spec_json.as_mut(),
+            wf.trigger_config.as_mut(),
+            wf.queue_config.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(blob) {
                 redact_secret_fields(&mut value);
-                *spec = value.to_string();
-            }
-        }
-        if let Some(trigger) = wf.trigger_config.as_mut() {
-            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(trigger) {
-                redact_secret_fields(&mut value);
-                *trigger = value.to_string();
+                *blob = value.to_string();
             }
         }
         wf

@@ -203,6 +203,9 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
       keys_revoked: 0,
       smtp_passwords_cleared: 0,
       workflow_specs_scrubbed: 0,
+      trigger_configs_scrubbed: 0,
+      queue_configs_scrubbed: 0,
+      scheduler_config_secrets_cleared: 0,
       managed_integration_removed: true,
     }),
     check_for_update: () => ({
