@@ -16,8 +16,9 @@ The secret-bearing at-rest fields are now **AEAD envelope-encrypted by default**
   [ADR 0010](0010-keychain-managed-mcp-key.md) (`src-tauri/src/keychain.rs`) — real
   `SecurityFrameworkKeyStore` on macOS, `UnavailableKeyStore` off it, and an in-memory `FakeKeyStore`
   so **every** test injects a fake and never touches the real Keychain. Later KEK generations occupy
-  distinct **generation-addressed** accounts (`db-envelope-kek-v1-gen{N}`) so a rotation can stage a
-  new KEK without overwriting the old one (see Rotation). A 256-bit **DEK** (data key) encrypts the
+  distinct **generation-addressed** accounts (`db-envelope-kek-v{N}` for generation `N`; generation 1
+  is the historical `db-envelope-kek-v1`, so a fresh provision is byte-for-byte unchanged) so a
+  rotation can stage a new KEK without overwriting the old one (see Rotation). A 256-bit **DEK** (data key) encrypts the
   field values; the DEK is AEAD-wrapped by the KEK (wrap-AAD `chaos-scheduler:envelope:dek-wrap:v1`)
   and the wrapped DEK is stored in a new
   `envelope_keys(id, version, algo, wrapped_dek, wrap_nonce, kek_generation, created_at)` table —
