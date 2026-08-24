@@ -47,41 +47,92 @@ fn restrict_dir_permissions(path: &std::path::Path) {
     let _ = path;
 }
 
-/// Marks a file as excluded from Time Machine and cloud-sync backups by setting
-/// the `com.apple.metadata:com_apple_backup_excludeItem` extended attribute.
-/// No-op on non-macOS.  Best-effort: failures are logged, never fatal.
+// ─── CoreFoundation FFI for backup exclusion (macOS only) ────────────────────
+// CFURLSetResourcePropertyForKey / kCFURLIsExcludedFromBackupKey is the
+// Apple-sanctioned mechanism.  It writes the correct binary-plist xattr that
+// Time Machine and cloud-sync daemons honour — unlike a raw bundle-id string.
+// CoreFoundation is already linked by the Tauri runtime on macOS, so no new
+// Cargo dependency is required.
+#[cfg(target_os = "macos")]
+mod cf_backup {
+    pub type CFTypeRef = *const libc::c_void;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        /// Shared boolean-true singleton (kCFBooleanTrue).
+        pub static kCFBooleanTrue: CFTypeRef;
+        /// Resource-property key that excludes a URL from Time Machine / iCloud.
+        pub static kCFURLIsExcludedFromBackupKey: CFTypeRef;
+        /// Create a CFURL from a POSIX filesystem path (UTF-8 bytes, not NUL-terminated).
+        pub fn CFURLCreateFromFileSystemRepresentation(
+            allocator: CFTypeRef,
+            buffer: *const u8,
+            buf_len: isize,
+            is_directory: u8,
+        ) -> CFTypeRef;
+        /// Set a resource property on a CFURL.  Returns non-zero on success.
+        pub fn CFURLSetResourcePropertyForKey(
+            url: CFTypeRef,
+            key: CFTypeRef,
+            property_value: CFTypeRef,
+            error: *mut CFTypeRef,
+        ) -> u8;
+        /// Read back a resource property (used in tests to prove correctness).
+        #[cfg(test)]
+        pub fn CFURLCopyResourcePropertyForKey(
+            url: CFTypeRef,
+            key: CFTypeRef,
+            property_value_ptr: *mut CFTypeRef,
+            error: *mut CFTypeRef,
+        ) -> u8;
+        /// Decode a CFBoolean to a C boolean byte.
+        #[cfg(test)]
+        pub fn CFBooleanGetValue(boolean: CFTypeRef) -> u8;
+        /// Release a CF object.
+        pub fn CFRelease(cf: CFTypeRef);
+    }
+}
+
+/// Marks a file as excluded from Time Machine and cloud-sync backups using the
+/// Apple-sanctioned `CFURLSetResourcePropertyForKey` /
+/// `kCFURLIsExcludedFromBackupKey` mechanism.  This correctly writes the
+/// binary-plist xattr that backup daemons recognise (a raw bundle-id string is
+/// NOT a valid value and is silently ignored).  No-op on non-macOS.
+/// Best-effort: failures are logged, never fatal.
 fn exclude_from_backup(path: &std::path::Path) {
     #[cfg(target_os = "macos")]
     {
-        use std::ffi::CString;
         if !path.exists() {
             return;
         }
         let Some(path_str) = path.to_str() else {
             return;
         };
-        let Ok(path_cstr) = CString::new(path_str) else {
-            return;
-        };
-        // Value is the app bundle identifier; Time Machine checks attribute presence.
-        const BUNDLE_ID: &[u8] = b"com.chaosscheduler.app";
-        // Attribute name as a NUL-terminated C string.
-        const ATTR: &[u8] = b"com.apple.metadata:com_apple_backup_excludeItem\0";
-        let rc = unsafe {
-            libc::setxattr(
-                path_cstr.as_ptr(),
-                ATTR.as_ptr() as *const libc::c_char,
-                BUNDLE_ID.as_ptr() as *const libc::c_void,
-                BUNDLE_ID.len(),
-                0, // position — always 0 for non-resource-fork attributes
-                0, // options — 0 = follow symlinks, overwrite if already set
+        let path_bytes = path_str.as_bytes();
+        let url = unsafe {
+            cf_backup::CFURLCreateFromFileSystemRepresentation(
+                std::ptr::null(), // kCFAllocatorDefault
+                path_bytes.as_ptr(),
+                path_bytes.len() as isize,
+                0, // not a directory
             )
         };
-        if rc != 0 {
-            log::warn!(
-                "db-harden: backup-exclusion xattr failed on {path:?}: {}",
-                std::io::Error::last_os_error()
+        if url.is_null() {
+            log::warn!("db-harden: CFURLCreate failed for {path:?}");
+            return;
+        }
+        let ok = unsafe {
+            let result = cf_backup::CFURLSetResourcePropertyForKey(
+                url,
+                cf_backup::kCFURLIsExcludedFromBackupKey,
+                cf_backup::kCFBooleanTrue,
+                std::ptr::null_mut(),
             );
+            cf_backup::CFRelease(url);
+            result
+        };
+        if ok == 0 {
+            log::warn!("db-harden: CFURLSetResourcePropertyForKey failed for {path:?}");
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -13168,30 +13219,70 @@ SUMMARY_JSON:{\"title\":\"current\"}
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Reads back `kCFURLIsExcludedFromBackupKey` via the same CoreFoundation API
+    /// used to set it.  This is the canonical correctness probe: a file whose xattr
+    /// was written as a raw bundle-id string (the old bug) returns `false` here
+    /// because macOS cannot parse that as a valid binary-plist value; a file
+    /// correctly set via `CFURLSetResourcePropertyForKey` returns `true`.
+    #[cfg(target_os = "macos")]
+    fn is_excluded_from_backup(path: &std::path::Path) -> bool {
+        let Some(path_str) = path.to_str() else {
+            return false;
+        };
+        let path_bytes = path_str.as_bytes();
+        unsafe {
+            let url = cf_backup::CFURLCreateFromFileSystemRepresentation(
+                std::ptr::null(),
+                path_bytes.as_ptr(),
+                path_bytes.len() as isize,
+                0,
+            );
+            if url.is_null() {
+                return false;
+            }
+            let mut value: cf_backup::CFTypeRef = std::ptr::null();
+            let ok = cf_backup::CFURLCopyResourcePropertyForKey(
+                url,
+                cf_backup::kCFURLIsExcludedFromBackupKey,
+                &mut value,
+                std::ptr::null_mut(),
+            );
+            cf_backup::CFRelease(url);
+            if ok == 0 || value.is_null() {
+                return false;
+            }
+            let result = cf_backup::CFBooleanGetValue(value) != 0;
+            cf_backup::CFRelease(value);
+            result
+        }
+    }
+
+    /// Non-vacuous, fails-first backup-exclusion test.
+    ///
+    /// Fails-first: BEFORE calling `exclude_from_backup` the file is NOT
+    /// excluded (first assert).  With the OLD raw-bundle-id-string xattr
+    /// implementation the SECOND assert would also fail because macOS does not
+    /// parse a plain string as a valid backup-exclusion value — the test
+    /// therefore fails against the buggy code and passes only after the
+    /// `CFURLSetResourcePropertyForKey` fix.
     #[test]
     #[cfg(target_os = "macos")]
-    fn at_rest_hardening_backup_exclusion_xattr_is_set_on_db() {
-        use std::ffi::CString;
+    fn at_rest_hardening_backup_exclusion_is_effective() {
         let dir = std::env::temp_dir().join(format!("chaos-harden-xattr-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let _db = Database::new(&dir);
-        let db_path = dir.join("scheduler.db");
-        let path_cstr = CString::new(db_path.to_str().unwrap()).unwrap();
-        const ATTR: &[u8] = b"com.apple.metadata:com_apple_backup_excludeItem\0";
-        let mut buf = [0u8; 256];
-        let rc = unsafe {
-            libc::getxattr(
-                path_cstr.as_ptr(),
-                ATTR.as_ptr() as *const libc::c_char,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-                0,
-                0,
-            )
-        };
+        let target = dir.join("scheduler.db");
+        std::fs::write(&target, b"").unwrap();
+        // Fails-first: a brand-new file has no exclusion set.
         assert!(
-            rc > 0,
-            "backup-exclusion xattr should be set on scheduler.db (getxattr returned {rc})"
+            !is_excluded_from_backup(&target),
+            "newly created file should NOT be excluded from backup before hardening"
+        );
+        // Apply the correct CFURLSetResourcePropertyForKey-based exclusion.
+        exclude_from_backup(&target);
+        // CFURLCopyResourcePropertyForKey must now return kCFBooleanTrue.
+        assert!(
+            is_excluded_from_backup(&target),
+            "file must be excluded from backup after exclude_from_backup (CFURLSetResourcePropertyForKey)"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
