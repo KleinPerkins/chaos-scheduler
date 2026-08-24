@@ -1,0 +1,45 @@
+title = "Chaos Scheduler — gitleaks secret-scanning configuration"
+
+[extend]
+# Inherit gitleaks' built-in ruleset: entropy heuristics + known secret signatures
+# (generic API keys, GitHub tokens, AWS credentials, etc.).
+useDefault = true
+
+[allowlist]
+description = "Repository-level false-positive exclusions"
+# NOTE: gitleaks reports findings against full absolute paths (e.g.
+# /tmp/gitleaks-src/...) so path regexes use suffix matching (no ^ anchor).
+
+paths = [
+  # data-guard test: contains path strings like ".env" and "id_rsa" as test
+  # input data for the check-no-committed-data rules. File-path strings only,
+  # not actual secrets.
+  '''scripts/check-no-committed-data\.test\.mjs$''',
+
+  # Figma snapshot export: "fileKey" field holds the public Figma design-file
+  # identifier (e.g. "twQmWC8dWT4tqeqIigNsRy"), visible in any Figma URL.
+  # Not an authentication credential — a public file reference.
+  '''design/figma/mission-control\.snapshot\.json$''',
+
+  # Figma token registry: "fileKeyHint" field holds the same public Figma
+  # file identifier for the design-token sync pipeline. Not a credential.
+  '''figma-tokens\.json$''',
+
+  # Redaction-coverage test: contains the deliberately fake value
+  # "cursor-api-key-SECRET-c3" as a cursorApiKey fixture to assert that MCP
+  # tool responses redact API keys. Explicitly a test fixture, not a real
+  # credential.
+  '''packages/mcp-server/test/redaction-coverage\.test\.ts$''',
+
+  # Figma snapshot helper: FILE_KEY constant holds the public Figma design-file
+  # identifier. Not an authentication credential.
+  '''scripts/figma-snapshot\.mjs$''',
+
+  # Figma variables sync: DEFAULT_FILE_KEY constant holds the public Figma
+  # design-file identifier for variable-sync tooling. Not a credential.
+  '''scripts/figma-variables-sync\.mjs$''',
+
+  # Style Dictionary config: FIGMA_FILE_KEY_HINT constant holds the public
+  # Figma file identifier used by the token-sync pipeline. Not a credential.
+  '''style-dictionary\.config\.mjs$''',
+]
