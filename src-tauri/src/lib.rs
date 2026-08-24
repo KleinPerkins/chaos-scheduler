@@ -7,6 +7,7 @@ mod email;
 mod fix_cloud;
 mod fix_local;
 mod fix_worktree;
+mod keychain;
 mod mcp;
 mod operators;
 mod scheduler;

@@ -14,7 +14,7 @@ use crate::scheduler::{dispatch_non_cron_workflow, DispatchOutcome, NonCronDispa
 use crate::workflow_spec::{WorkflowKind, WorkflowSpec};
 use chrono::{DateTime, Utc};
 use std::process::Output;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Sentinel that replaces a stored SMTP password whenever a profile leaves the
@@ -1141,23 +1141,33 @@ pub struct SchedulerService {
     clock: Arc<dyn Clock>,
     protected_environments: Vec<String>,
     allow_protected_writes: bool,
-    /// Set for the duration of an offboarding purge so all key-mint paths
-    /// (`create_api_key`, incl. the managed-MCP mint) reject new keys — a
-    /// concurrent mint must not reintroduce a live credential after revoke-all.
-    offboarding: Arc<AtomicBool>,
+    /// In-flight offboard REFCOUNT. Held > 0 for the duration of any offboarding
+    /// purge so all key-mint paths (`create_api_key`, incl. the managed-MCP mint)
+    /// reject new keys — a concurrent mint must not reintroduce a live credential
+    /// after revoke-all. A refcount (not a boolean) is required so that when two
+    /// offboards overlap, the earlier guard dropping doesn't prematurely re-enable
+    /// minting while the other is still purging: minting only resumes once EVERY
+    /// in-flight offboard has completed and the count returns to zero.
+    offboarding: Arc<AtomicUsize>,
 }
 
-/// RAII gate returned by [`SchedulerService::begin_offboarding`]. While held,
-/// every key-mint path is rejected; the flag resets on drop so minting resumes
-/// once offboarding completes. Hold it across the WHOLE offboard operation.
-#[must_use = "hold the guard for the whole offboard; dropping it re-enables minting"]
+/// RAII gate returned by [`SchedulerService::begin_offboarding`]. While ANY
+/// guard is held, every key-mint path is rejected; each guard decrements the
+/// shared refcount on drop, so minting resumes only once the LAST outstanding
+/// offboard completes (count returns to zero). Hold it across the WHOLE offboard
+/// operation.
+#[must_use = "hold the guard for the whole offboard; dropping it decrements the offboard refcount"]
 pub struct OffboardingGuard {
-    flag: Arc<AtomicBool>,
+    counter: Arc<AtomicUsize>,
 }
 
 impl Drop for OffboardingGuard {
     fn drop(&mut self) {
-        self.flag.store(false, Ordering::Release);
+        // Decrement; minting stays disabled until the count reaches zero (all
+        // overlapping offboards complete). `saturating`-style guard via `max` is
+        // unnecessary because guards are only ever created by `begin_offboarding`,
+        // which incremented exactly once per guard.
+        self.counter.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -1183,7 +1193,7 @@ impl SchedulerService {
             clock: Arc::new(SystemClock),
             protected_environments: normalize_environment_names(protected_environments),
             allow_protected_writes,
-            offboarding: Arc::new(AtomicBool::new(false)),
+            offboarding: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -1200,7 +1210,7 @@ impl SchedulerService {
             clock,
             protected_environments: protected_environments_from_env(),
             allow_protected_writes: protected_writes_allowed_from_env(),
-            offboarding: Arc::new(AtomicBool::new(false)),
+            offboarding: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -1788,11 +1798,13 @@ impl SchedulerService {
     /// Mint a new API key. The plaintext token is returned exactly once (never
     /// stored); only a salted SHA-256 hash is persisted.
     pub fn create_api_key(&self, name: Option<&str>, scopes: &[&str]) -> ServiceResult<NewApiKey> {
-        // Reject minting while an offboard is purging/revoking: otherwise a
+        // Reject minting while ANY offboard is purging/revoking: otherwise a
         // concurrent mint could leave a live credential after revoke-all,
         // silently defeating the decommission. Applies to every mint path
         // (this IPC command and the managed-MCP mint, which both route here).
-        if self.offboarding.load(Ordering::Acquire) {
+        // The refcount (not a bool) keeps minting disabled until EVERY
+        // overlapping offboard has completed.
+        if self.offboarding.load(Ordering::Acquire) > 0 {
             return Err(ServiceError::Conflict(
                 "offboarding in progress; API key minting is temporarily disabled".into(),
             ));
@@ -1885,21 +1897,25 @@ impl SchedulerService {
             .map_err(|e| ServiceError::Internal(e.to_string()))
     }
 
-    /// Begin an offboard: mark minting disabled and return an RAII guard that
-    /// re-enables it on drop. All key-mint paths ([`create_api_key`]) reject
-    /// while the guard is held, so a concurrent mint can't reintroduce a live
-    /// credential after revoke-all. Hold it across the entire offboard.
+    /// Begin an offboard: INCREMENT the in-flight offboard refcount and return an
+    /// RAII guard that decrements it on drop. All key-mint paths
+    /// ([`create_api_key`]) reject while the count is > 0, so a concurrent mint
+    /// can't reintroduce a live credential after revoke-all. Because the count is
+    /// a refcount rather than a boolean, two overlapping offboards each hold their
+    /// own increment: the first guard dropping leaves minting disabled until the
+    /// second (and every other) completes. Hold it across the entire offboard.
     pub fn begin_offboarding(&self) -> OffboardingGuard {
-        self.offboarding.store(true, Ordering::Release);
+        self.offboarding.fetch_add(1, Ordering::Release);
         OffboardingGuard {
-            flag: self.offboarding.clone(),
+            counter: self.offboarding.clone(),
         }
     }
 
-    /// Whether an offboard is currently in progress (minting disabled).
+    /// Whether an offboard is currently in progress (minting disabled) — i.e. at
+    /// least one [`OffboardingGuard`] is still held (refcount > 0).
     #[allow(dead_code)] // Diagnostic accessor (used in tests).
     pub fn offboarding_in_progress(&self) -> bool {
-        self.offboarding.load(Ordering::Acquire)
+        self.offboarding.load(Ordering::Acquire) > 0
     }
 
     /// Revoke every currently-live API key; returns how many were flipped.
@@ -2610,6 +2626,64 @@ mod tests {
         assert_eq!(db.get_email_profile(&saved.id).unwrap().smtp_password, "");
         let stored = db.get_workflow(&wf.id).unwrap().spec_json.unwrap();
         assert!(!stored.contains("hmac-shhh"), "webhook secret purged");
+    }
+
+    /// PR-D(a) fails-first: overlapping offboards must keep API-key minting
+    /// disabled until EVERY in-flight offboard completes. With the previous
+    /// `AtomicBool` gate, the inner guard's drop unconditionally stored `false`,
+    /// re-enabling minting while the outer offboard was still purging — so the
+    /// mid-test assertions below (minting still blocked after the inner guard
+    /// drops) FAIL against the boolean and PASS with the `AtomicUsize` refcount.
+    #[test]
+    fn overlapping_offboards_keep_minting_disabled_until_all_complete() {
+        let dir = tmpdir();
+        let svc = service(&dir);
+
+        // No offboard in progress: minting is allowed.
+        assert!(!svc.offboarding_in_progress());
+        assert!(svc.create_api_key(Some("pre"), &["read"]).is_ok());
+
+        let outer = svc.begin_offboarding();
+        assert!(svc.offboarding_in_progress());
+        assert!(
+            matches!(
+                svc.create_api_key(Some("blocked-1"), &["read"]),
+                Err(ServiceError::Conflict(_))
+            ),
+            "minting must be rejected while an offboard is in progress"
+        );
+
+        {
+            let inner = svc.begin_offboarding();
+            assert!(svc.offboarding_in_progress());
+            assert!(matches!(
+                svc.create_api_key(Some("blocked-2"), &["read"]),
+                Err(ServiceError::Conflict(_))
+            ));
+            drop(inner);
+
+            // THE fails-first assertion: the OUTER offboard is still in progress,
+            // so minting MUST remain disabled even though the inner guard dropped.
+            assert!(
+                svc.offboarding_in_progress(),
+                "minting must stay disabled while another offboard is still in progress"
+            );
+            assert!(
+                matches!(
+                    svc.create_api_key(Some("blocked-3"), &["read"]),
+                    Err(ServiceError::Conflict(_))
+                ),
+                "an inner offboard completing must NOT prematurely re-enable minting"
+            );
+        }
+
+        // Only once the LAST guard drops does minting resume.
+        drop(outer);
+        assert!(!svc.offboarding_in_progress());
+        assert!(
+            svc.create_api_key(Some("post"), &["read"]).is_ok(),
+            "minting must resume once every offboard has completed"
+        );
     }
 
     #[test]

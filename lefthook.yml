@@ -26,6 +26,13 @@ pre-commit:
       # Apple .p12, ssh private keys). Local, bypassable defense; the `data-guard`
       # CI job is the authoritative gate and also covers the git-data-API PR flow.
       run: node scripts/check-no-committed-data.mjs {staged_files}
+    mcp-config-secret-free:
+      # Refuse a tracked Cursor MCP config carrying a real managed scheduler key
+      # (#292): the managed key lives in the macOS Keychain, never in a tracked
+      # `.cursor/**/mcp*.json`. Local, bypassable defense; the
+      # `mcp-config-secret-free` CI job is the authoritative gate and also covers
+      # the git-data-API single-commit PR flow this repo uses.
+      run: node scripts/check-mcp-config-secret-free.mjs {staged_files}
     secret-scan:
       # Scan staged content for committed secrets (high-entropy strings, known API
       # key patterns). Requires `brew install gitleaks` (or equivalent).

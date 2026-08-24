@@ -57,14 +57,20 @@ compare API endpoints may return their text, and Git history retains every
 committed blob.
 
 The authoritative MCP credential controls are therefore independent of those
-attributes:
+attributes, and as of #292 they are enforced in the repository:
 
 - no live credential may remain in a tracked blob;
-- the final security follow-up must stop tracking project-local
-  `.cursor/mcp.json` and keep the app-managed user config at
-  `~/.cursor/mcp.json` outside Git;
-- a focused credential guard must prevent tracked MCP configs from reintroducing
-  scheduler API-key or bearer material; and
+- this security follow-up (#292) landed the requirement to stop tracking project-local
+  `.cursor/mcp.json`: it is removed from the Git index and git-ignored, while the
+  app-managed user config at `~/.cursor/mcp.json` stays outside Git. The managed
+  scheduler key now lives in the macOS Keychain (never in either file) and is
+  resolved at spawn time by an app-owned launcher script — see
+  [ADR 0010](docs/adr/0010-keychain-managed-mcp-key.md);
+- a focused credential guard (`scripts/check-mcp-config-secret-free.mjs`, wired into
+  the `ci-required` aggregation and the lefthook pre-commit hook) now prevents tracked
+  MCP configs from reintroducing scheduler API-key or bearer material. The committed
+  example configs (`.cursor/mcp.example.json`, `.cursor/mcp.remote.example.json`) carry
+  placeholders only and are excluded from the guard; and
 - credential revocation plus GitHub Support cleanup/history handling remain
   separate incident-response work. Attributes do not remove existing history or
   prevent all disclosure.
@@ -127,11 +133,12 @@ Outbound completion webhooks use a **different** scheme: HMAC-SHA256 over the
 
 ## Secrets storage & read redaction
 
-| Material                                    | At rest                                             | Over REST (read scope)                |
-| ------------------------------------------- | --------------------------------------------------- | ------------------------------------- |
-| API key secrets                             | Salted hash in SQLite; plaintext shown once at mint | Keys are not listable over REST       |
-| Webhook / operator secrets in workflow JSON | Stored in `spec_json` / `trigger_config`            | Replaced with `__redacted__` sentinel |
-| Cursor / SMTP settings                      | Local SQLite settings                               | Desktop IPC only (not REST)           |
+| Material                                    | At rest                                                                                                              | Over REST (read scope)                |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| API key secrets                             | Salted hash in SQLite; plaintext shown once at mint                                                                  | Keys are not listable over REST       |
+| Managed MCP scheduler key (#292)            | macOS Keychain (service `chaos-scheduler-managed-mcp`, account `managed-mcp-api-key`); never in `~/.cursor/mcp.json` | Not exposed over REST                 |
+| Webhook / operator secrets in workflow JSON | Stored in `spec_json` / `trigger_config`                                                                             | Replaced with `__redacted__` sentinel |
+| Cursor / SMTP settings                      | Local SQLite settings                                                                                                | Desktop IPC only (not REST)           |
 
 **Service-layer read-scope redaction** (REST/SDK): at `read` scope, nested
 fields named `secret`, `signature_secret`, `cursor_api_key`, or `smtp_password`

@@ -332,6 +332,28 @@ jobs:
       - name: Unit tests (data-guard rules)
         run: node --test scripts/check-no-committed-data.test.mjs
 
+  # Credential guard (#292): fail if a TRACKED Cursor MCP config carries a real
+  # managed scheduler credential. The managed key must live in the macOS Keychain
+  # (see ADR 0010 / SECURITY.md), never in a tracked `.cursor/**/mcp*.json` blob;
+  # the project-local `.cursor/mcp.json` is git-ignored and example files carry
+  # placeholders only. Complementary to the path-based data-guard and the
+  # content-based gitleaks scan: this is structural + field-aware. The lefthook
+  # pre-commit hook is a local, bypassable first line of defense; this required,
+  # credential-free check scans the whole tracked tree and is the authoritative
+  # gate (it also covers the git-data-API single-commit PR flow this repo uses).
+  mcp-config-secret-free:
+    name: MCP config secret-free (#292 credential guard)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+      - name: Scan tracked Cursor MCP configs for managed credentials
+        run: node scripts/check-mcp-config-secret-free.mjs
+      - name: Unit tests (credential-guard rules)
+        run: node --test scripts/check-mcp-config-secret-free.test.mjs
+
   # Secret-scan gate: scan the tracked source tree and the built frontend dist
   # artifact for committed secrets using gitleaks (OSS, Apache-2.0, v8.18.4).
   # Complementary to data-guard (path-based): gitleaks adds content-based pattern
@@ -397,6 +419,7 @@ jobs:
         a11y,
         visual,
         data-guard,
+        mcp-config-secret-free,
         secret-scan,
       ]
     runs-on: ubuntu-latest

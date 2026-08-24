@@ -36,6 +36,7 @@
 //!   revoke/remint rather than trying to recover a token the API never
 //!   returns again.
 
+use crate::keychain::{KeyStore, MANAGED_MCP_KEYCHAIN_ACCOUNT, MANAGED_MCP_KEYCHAIN_SERVICE};
 use crate::service::SchedulerService;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -363,6 +364,14 @@ pub struct ManagedManifest {
     pub npm_path: Option<String>,
     pub last_attempt_at: Option<String>,
     pub last_error: Option<String>,
+    /// Whether the managed API key now lives in the macOS Keychain (the
+    /// launcher form) rather than inline in the Cursor config (the pre-#292
+    /// plaintext form). `#[serde(default)]` so a pre-migration manifest on disk
+    /// (which lacks this field) still deserializes and reads as `false`, which
+    /// is what forces the one-time inline→Keychain migration on the next
+    /// provision.
+    #[serde(default)]
+    pub key_in_keychain: bool,
 }
 
 impl ManagedManifest {
@@ -459,11 +468,14 @@ pub fn inspect_cursor_config(config_path: &Path) -> CursorConfigState {
     }
 }
 
-/// Read back the token from our own previously-written managed entry, so a
-/// repair/re-provision can reuse the working key instead of needlessly
-/// reminting one (the API never returns a token after creation, so this is
-/// the only way to "recover" it — see the module doc's token-lifecycle note).
-fn read_existing_managed_token(config_path: &Path) -> Option<String> {
+/// Read an INLINE plaintext token from our own managed Cursor entry (the
+/// pre-#292 form where `CHAOS_SCHEDULER_API_KEY` lived directly in the config
+/// `env`). Used only to (a) detect that a one-time Keychain migration is still
+/// pending and (b) recover the working token during that migration — the API
+/// never returns a token after creation, so this is the only way to "recover"
+/// it. Post-migration the managed entry carries no inline token, so this
+/// returns `None`.
+fn read_inline_managed_token(config_path: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(config_path).ok()?;
     let root: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let entry = root.get("mcpServers")?.get("chaos-scheduler")?;
@@ -475,6 +487,79 @@ fn read_existing_managed_token(config_path: &Path) -> Option<String> {
         .get("CHAOS_SCHEDULER_API_KEY")?
         .as_str()
         .map(str::to_string)
+}
+
+/// Recover the managed key's token so a repair/re-provision can reuse the
+/// working key instead of needlessly reminting one. Keychain-aware: once the
+/// manifest records `key_in_keychain`, the token is read from the Keychain (the
+/// launcher form stores nothing in the config); before migration it falls back
+/// to the inline config value. A `key_in_keychain` manifest whose Keychain item
+/// has been lost returns `None`, which correctly drives a re-mint.
+fn read_existing_managed_token(
+    keystore: &dyn KeyStore,
+    config_path: &Path,
+    manifest: &ManagedManifest,
+) -> Option<String> {
+    if manifest.key_in_keychain {
+        return keystore
+            .get(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT)
+            .ok()
+            .flatten();
+    }
+    read_inline_managed_token(config_path)
+}
+
+/// Path of the app-owned launcher script that resolves the managed key from the
+/// Keychain at spawn time. Lives under the managed MCP root so [`remove`]'s
+/// `remove_dir_all(mcp_root(..))` reclaims it along with everything else.
+fn launcher_script_path(app_data_dir: &Path) -> PathBuf {
+    mcp_root(app_data_dir).join("launch-managed.sh")
+}
+
+/// Write the app-owned launcher script (mode `0700`) that reads the managed key
+/// from the macOS Keychain at spawn time and execs the absolute `node` + the
+/// absolute installed CLI. The script itself contains **no secret** — only the
+/// absolute paths and the stable Keychain service/account coordinates.
+///
+/// The `node`/`cli` absolute paths are single-quoted in the script; a path
+/// containing a single quote is rejected rather than written, so a malformed
+/// path can never break out of the quoting into injectable shell.
+fn write_launcher_script(
+    app_data_dir: &Path,
+    node_path: &str,
+    cli_path: &str,
+) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if node_path.contains('\'') || cli_path.contains('\'') {
+        return Err(
+            "refusing to write launcher: node/CLI path contains a single quote".to_string(),
+        );
+    }
+
+    let path = launcher_script_path(app_data_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let script = format!(
+        "#!/bin/sh\n\
+KEY=\"$(/usr/bin/security find-generic-password -w -s '{service}' -a '{account}' 2>/dev/null)\"\n\
+if [ -z \"$KEY\" ]; then echo 'chaos-scheduler: managed MCP key unavailable — re-provision the integration' >&2; exit 78; fi\n\
+export CHAOS_SCHEDULER_API_KEY=\"$KEY\"\n\
+exec '{node}' '{cli}' \"$@\"\n",
+        service = MANAGED_MCP_KEYCHAIN_SERVICE,
+        account = MANAGED_MCP_KEYCHAIN_ACCOUNT,
+        node = node_path,
+        cli = cli_path,
+    );
+
+    write_atomic(&path, script.as_bytes())?;
+    // 0700: owner-only rwx. The script carries no secret, but an app-owned
+    // executable in app-data should not be world/group-accessible.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| e.to_string())?;
+    Ok(path)
 }
 
 /// Build a backup path for invalid-JSON config content. A timestamp alone is
@@ -497,14 +582,16 @@ fn invalid_json_backup_path(config_path: &Path) -> PathBuf {
 /// `chaos-scheduler` entry this app didn't create unless `force` is set.
 /// Invalid existing JSON is backed up (never silently discarded) and treated
 /// as an empty config going forward.
-#[allow(clippy::too_many_arguments)]
+///
+/// The written entry's `command` is the app-owned Keychain launcher (see
+/// [`write_launcher_script`]); the `env` carries only `CHAOS_SCHEDULER_URL` and
+/// the ownership markers and **never** the API key — the launcher resolves the
+/// key from the Keychain at spawn time.
 pub fn merge_mcp_config(
     config_path: &Path,
     managed_id: &str,
-    node_path: &str,
-    cli_path: &str,
+    launcher_path: &str,
     api_url: &str,
-    api_key: &str,
     force: bool,
 ) -> Result<MergeOutcome, String> {
     let mut root: serde_json::Value = match std::fs::read_to_string(config_path) {
@@ -537,11 +624,10 @@ pub fn merge_mcp_config(
     servers.insert(
         "chaos-scheduler".to_string(),
         serde_json::json!({
-            "command": node_path,
-            "args": [cli_path],
+            "command": launcher_path,
+            "args": [],
             "env": {
                 "CHAOS_SCHEDULER_URL": api_url,
-                "CHAOS_SCHEDULER_API_KEY": api_key,
                 "CHAOS_SCHEDULER_MANAGED_BY": MANAGED_BY_MARKER,
                 "CHAOS_SCHEDULER_MANAGED_ID": managed_id,
             },
@@ -964,6 +1050,7 @@ fn provision_with_runtime(
     config_path: &Path,
     runtime: &RuntimePaths,
     force: bool,
+    keystore: &dyn KeyStore,
 ) -> Result<McpIntegrationStatus, String> {
     let mut manifest = ManagedManifest::load(app_data_dir);
     manifest.last_attempt_at = Some(chrono::Utc::now().to_rfc3339());
@@ -977,13 +1064,16 @@ fn provision_with_runtime(
         .is_some_and(|id| key_is_alive(service, id));
 
     // Idempotent no-op: already provisioned at the pinned version, registered
-    // in Cursor, and the managed key is still live. Re-running provision
-    // (e.g. a launch-time re-provision check that finds nothing changed)
-    // never re-installs or re-mints anything in this case.
+    // in Cursor, the managed key is still live, AND the key already lives in
+    // the Keychain (the launcher form). The `key_in_keychain` requirement is
+    // what forces exactly one re-provision to run the inline→Keychain
+    // migration on a system upgraded from the pre-#292 plaintext form; once
+    // migrated, this stays a true no-op.
     let already_current = !force
         && manifest.provisioned_version.as_deref() == Some(pinned.as_str())
         && inspect_cursor_config(config_path).registered
-        && key_alive;
+        && key_alive
+        && manifest.key_in_keychain;
     if already_current {
         manifest.enabled = true;
         manifest.last_error = None;
@@ -1003,7 +1093,7 @@ fn provision_with_runtime(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let (key_id, token) = if key_alive {
-        match read_existing_managed_token(config_path) {
+        match read_existing_managed_token(keystore, config_path, &manifest) {
             Some(existing_token) => (manifest.managed_key_id.clone().unwrap(), existing_token),
             None => {
                 if let Some(old_id) = &manifest.managed_key_id {
@@ -1051,13 +1141,57 @@ fn provision_with_runtime(
     let cli_path = resolve_cli_path(&installed_package_dir(&promoted_dir))
         .map_err(|e| fail_provision(&mut manifest, app_data_dir, e))?;
 
+    // Store the managed key in the Keychain and PROVE it reads back BEFORE
+    // writing any launcher config or removing any inline plaintext. If either
+    // step fails, don't write a launcher that would resolve an absent key at
+    // spawn: fail the provision and leave any existing inline token untouched,
+    // so the one-time migration re-runs on the next attempt and the working
+    // key is never lost.
+    keystore
+        .set(
+            MANAGED_MCP_KEYCHAIN_SERVICE,
+            MANAGED_MCP_KEYCHAIN_ACCOUNT,
+            &token,
+        )
+        .map_err(|e| {
+            fail_provision(
+                &mut manifest,
+                app_data_dir,
+                format!("storing the managed key in the Keychain failed: {e}"),
+            )
+        })?;
+    let verified = keystore
+        .get(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT)
+        .map_err(|e| {
+            fail_provision(
+                &mut manifest,
+                app_data_dir,
+                format!("verifying the managed Keychain key failed: {e}"),
+            )
+        })?;
+    if verified.as_deref() != Some(token.as_str()) {
+        return Err(fail_provision(
+            &mut manifest,
+            app_data_dir,
+            "the managed key did not read back from the Keychain after storing it".to_string(),
+        ));
+    }
+
+    // The launcher resolves the key from the Keychain at spawn time and carries
+    // no secret; the managed config `command` becomes this launcher's absolute
+    // path (never `node`+inline-token as in the pre-#292 form).
+    let launcher = write_launcher_script(
+        app_data_dir,
+        &runtime.node_path,
+        &cli_path.to_string_lossy(),
+    )
+    .map_err(|e| fail_provision(&mut manifest, app_data_dir, e))?;
+
     let merge_outcome = merge_mcp_config(
         config_path,
         &managed_id,
-        &runtime.node_path,
-        &cli_path.to_string_lossy(),
+        &launcher.to_string_lossy(),
         &default_api_url(),
-        &token,
         force,
     )
     .map_err(|e| fail_provision(&mut manifest, app_data_dir, e))?;
@@ -1079,12 +1213,16 @@ fn provision_with_runtime(
         ));
     }
 
-    // Only now — after `mcp.json` itself has actually been written with this
-    // `key_id`'s token — is it safe to make `managed_key_id` the source of
-    // truth for "the live config is correct". See the comment on the
-    // staging-failure branch above for why this can't happen any earlier.
+    // Only now — after the key is in the Keychain, the launcher is written, and
+    // `mcp.json` has actually been rewritten to the launcher form — is it safe
+    // to make `managed_key_id` the source of truth for "the live config is
+    // correct" and to record that the key now lives in the Keychain (which
+    // removes any inline plaintext and completes the one-time migration). See
+    // the comment on the staging-failure branch above for why this can't happen
+    // any earlier.
     manifest.managed_id = Some(managed_id.clone());
     manifest.managed_key_id = Some(key_id.clone());
+    manifest.key_in_keychain = true;
 
     // Only prune the previous version now that the new one is staged,
     // smoke-checked, promoted, and registered in Cursor.
@@ -1127,18 +1265,46 @@ pub fn provision(
         manifest.save(app_data_dir)?;
         return Ok(status_with(app_data_dir, service, config_path, None, false));
     };
-    provision_with_runtime(app_data_dir, service, config_path, &runtime, force)
+    let keystore = crate::keychain::default_key_store();
+    provision_with_runtime(
+        app_data_dir,
+        service,
+        config_path,
+        &runtime,
+        force,
+        keystore.as_ref(),
+    )
 }
 
 /// Remove the managed integration: drop the managed `mcp.json` entry (only if
-/// it's ours), delete the app-managed install dir, and revoke the managed
-/// key. Best-effort at every step (never panics on a missing file) so a
-/// partially-broken prior state can always be cleaned up.
+/// it's ours), delete the app-managed install dir (which also reclaims the
+/// launcher script), revoke the managed key, and delete the managed Keychain
+/// item. Best-effort at every step (never panics on a missing file) so a
+/// partially-broken prior state can always be cleaned up. Production wrapper
+/// around [`remove_with_keystore`] that supplies the real Keychain.
 pub fn remove(
     app_data_dir: &Path,
     service: &SchedulerService,
     config_path: &Path,
     prepare_to_uninstall: bool,
+) -> Result<McpIntegrationStatus, String> {
+    let keystore = crate::keychain::default_key_store();
+    remove_with_keystore(
+        app_data_dir,
+        service,
+        config_path,
+        prepare_to_uninstall,
+        keystore.as_ref(),
+    )
+}
+
+/// Dependency-injected [`remove`] (tests supply an in-memory key store).
+fn remove_with_keystore(
+    app_data_dir: &Path,
+    service: &SchedulerService,
+    config_path: &Path,
+    prepare_to_uninstall: bool,
+    keystore: &dyn KeyStore,
 ) -> Result<McpIntegrationStatus, String> {
     let manifest = ManagedManifest::load(app_data_dir);
 
@@ -1148,10 +1314,15 @@ pub fn remove(
         let _ = service.revoke_api_key(key_id);
     }
 
-    // Remove the whole managed root (versions, staging, and the manifest
-    // itself) rather than deleting-then-resaving a default manifest: an
-    // absent manifest already loads as `ManagedManifest::default()`, so
-    // there's no state to preserve, and leaving no directory behind is what
+    // Delete the managed Keychain item (best-effort). Offboarding re-checks the
+    // authoritative delete outcome for its removal proof; the standalone remove
+    // path clears it so removing the integration leaves nothing behind.
+    let _ = keystore.delete(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT);
+
+    // Remove the whole managed root (versions, staging, the launcher script,
+    // and the manifest itself) rather than deleting-then-resaving a default
+    // manifest: an absent manifest already loads as `ManagedManifest::default()`,
+    // so there's no state to preserve, and leaving no directory behind is what
     // "removed" should mean on disk.
     let _ = std::fs::remove_dir_all(mcp_root(app_data_dir));
 
@@ -1187,9 +1358,15 @@ pub struct OffboardReport {
     pub scheduler_config_secrets_cleared: usize,
     /// Whether the managed MCP integration was ACTUALLY cleared — verified from
     /// the post-state (manifest file absent AND no managed Cursor config entry
-    /// remains), not assumed. The best-effort `remove` swallows filesystem/
-    /// config-write errors, so this must never be a hardcoded `true`.
+    /// remains AND the managed Keychain item proven-absent), not assumed. The
+    /// best-effort `remove` swallows filesystem/config-write errors, so this
+    /// must never be a hardcoded `true`.
     pub managed_integration_removed: bool,
+    /// Whether the managed key's macOS Keychain item is PROVABLY gone
+    /// (deleted now or already absent). A delete that couldn't be verified
+    /// (`Unknown`) reports `false` here and forces `managed_integration_removed`
+    /// to `false` too — removal is never falsely claimed.
+    pub keychain_item_removed: bool,
 }
 
 /// Tri-state view of OUR managed `chaos-scheduler` Cursor entry. Offboarding
@@ -1243,33 +1420,75 @@ fn managed_config_entry_present(config_path: &Path) -> bool {
 }
 
 /// Whether the managed MCP integration is PROVABLY, fully removed — the
-/// post-condition [`offboard`] verifies rather than assumes. Requires BOTH the
-/// manifest file absent AND our managed Cursor entry proven absent. A config
-/// file that exists but can't be read/parsed yields `false` (removal unproven /
+/// post-condition [`offboard`] verifies rather than assumes. Requires ALL of:
+/// the manifest file absent, our managed Cursor entry proven absent, AND the
+/// managed Keychain item proven-absent (`keychain_item_absent`, derived from a
+/// [`crate::keychain::DeleteOutcome`] that distinguishes a proven delete from an
+/// unverifiable one). A config file that exists but can't be read/parsed, or a
+/// Keychain delete that couldn't be verified, yields `false` (removal unproven /
 /// needs attention), so the report never claims a removal it cannot verify.
-fn managed_integration_fully_removed(app_data_dir: &Path, config_path: &Path) -> bool {
+fn managed_integration_fully_removed(
+    app_data_dir: &Path,
+    config_path: &Path,
+    keychain_item_absent: bool,
+) -> bool {
     !ManagedManifest::manifest_path(app_data_dir).exists()
         && matches!(
             managed_config_entry_state(config_path),
             ManagedEntryState::Absent
         )
+        && keychain_item_absent
+}
+
+/// PR-D(b): back up an UNPARSEABLE `~/.cursor/mcp.json` to a `.bak` sidecar and
+/// replace it with a scrubbed, valid config carrying no managed token, so the
+/// managed `CHAOS_SCHEDULER_API_KEY` is gone even when the file couldn't be
+/// parse-merged. Foreign entries can't be preserved from unparseable JSON, but
+/// the `.bak` retains the original bytes for manual recovery. No-op (and leaves
+/// the file untouched) if the raw bytes can't even be read.
+fn backup_and_replace_unparseable_config(config_path: &Path) -> Result<(), String> {
+    let Ok(raw) = std::fs::read_to_string(config_path) else {
+        // Can't read it at all (e.g. permissions): nothing safe to do here;
+        // the tri-state stays Unknown and removal stays unproven.
+        return Ok(());
+    };
+    // Preserve the original unparseable bytes next to the file for recovery.
+    let backup = config_path.with_extension("json.bak");
+    std::fs::write(&backup, raw.as_bytes()).map_err(|e| e.to_string())?;
+    // Replace with a minimal, valid, secret-free config.
+    let scrubbed = serde_json::json!({ "mcpServers": {} });
+    let json = serde_json::to_string_pretty(&scrubbed).map_err(|e| e.to_string())?;
+    write_atomic(config_path, json.as_bytes())
 }
 
 /// One-action offboarding (credential-security PR-D): revoke EVERY API key,
 /// purge EVERY secret-bearing DB field, and clear the managed MCP integration
-/// (token + manifest + Cursor config entry). This is the composition seam that
-/// unites the governed DB purge (owned by `SchedulerService`, which has no
-/// app-data path) with the filesystem cleanup this module already owns via
-/// [`remove`]. Destructive and irreversible; the caller (UI/IPC command) owns
-/// the confirmation prompt — the backend does not prompt.
+/// (Keychain item + manifest + Cursor config entry). This is the composition
+/// seam that unites the governed DB purge (owned by `SchedulerService`, which
+/// has no app-data path) with the filesystem/Keychain cleanup this module owns
+/// via [`remove`]. Destructive and irreversible; the caller (UI/IPC command)
+/// owns the confirmation prompt — the backend does not prompt. Production
+/// wrapper around [`offboard_with_keystore`] supplying the real Keychain.
 pub fn offboard(
     app_data_dir: &Path,
     service: &SchedulerService,
     config_path: &Path,
 ) -> Result<OffboardReport, String> {
+    let keystore = crate::keychain::default_key_store();
+    offboard_with_keystore(app_data_dir, service, config_path, keystore.as_ref())
+}
+
+/// Dependency-injected [`offboard`] (tests supply an in-memory key store so
+/// they never touch the real Keychain).
+fn offboard_with_keystore(
+    app_data_dir: &Path,
+    service: &SchedulerService,
+    config_path: &Path,
+    keystore: &dyn KeyStore,
+) -> Result<OffboardReport, String> {
     // Gate all key minting for the ENTIRE offboard: a concurrent `create_api_key`
     // (IPC or the managed-MCP mint) must not insert a live key after revoke-all.
-    // The guard resets on drop when this function returns.
+    // The guard's refcount resets on drop when this function returns.
     let _minting_gate = service.begin_offboarding();
 
     // Governed DB half first: revoke every key + blank every secret DB field in
@@ -1277,10 +1496,22 @@ pub fn offboard(
     let purge = service
         .offboard_revoke_all_and_purge()
         .map_err(|e| e.to_string())?;
-    // Then clear the managed MCP token from the manifest + Cursor config, reusing
-    // the audited `remove` path. `remove` also revokes the managed key, which the
-    // bulk purge above already covered — a harmless idempotent repeat.
-    remove(app_data_dir, service, config_path, false)?;
+    // Then clear the managed MCP integration from the manifest + Cursor config +
+    // Keychain, reusing the audited `remove` path. `remove` also revokes the
+    // managed key, which the bulk purge above already covered — a harmless
+    // idempotent repeat.
+    remove_with_keystore(app_data_dir, service, config_path, false, keystore)?;
+
+    // PR-D(b): if the Cursor config is UNPARSEABLE, `remove_mcp_config_entry`
+    // bailed and any managed token is still physically in the file. Back it up
+    // to a `.bak` sidecar and replace it with a scrubbed valid config so the
+    // token is gone even when parsing failed.
+    if matches!(
+        managed_config_entry_state(config_path),
+        ManagedEntryState::Unknown
+    ) {
+        let _ = backup_and_replace_unparseable_config(config_path);
+    }
 
     // Final post-state verification, still inside the minting gate: no live key
     // may remain. The gate makes this a no-op in practice, but sweeping any
@@ -1291,11 +1522,21 @@ pub fn offboard(
         .map_err(|e| e.to_string())?;
     let keys_revoked = purge.keys_revoked + swept;
 
+    // Authoritative Keychain delete outcome for the report + removal proof.
+    // `remove_with_keystore` already best-effort deleted it, so this normally
+    // reports `AlreadyAbsent` (proven-absent); a backend that can't verify the
+    // delete reports `Unknown`, which must NOT count as removed.
+    let keychain_item_removed = keystore
+        .delete(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT)
+        .map(|outcome| outcome.proven_absent())
+        .unwrap_or(false);
+
     // `remove` is best-effort (it swallows filesystem/config-write errors and
     // still returns Ok), so VERIFY the post-state rather than claim success: the
     // report must never tell the confirmation UI a removal happened when it
-    // didn't.
-    let managed_integration_removed = managed_integration_fully_removed(app_data_dir, config_path);
+    // didn't. Full removal now requires the Keychain item proven-absent too.
+    let managed_integration_removed =
+        managed_integration_fully_removed(app_data_dir, config_path, keychain_item_removed);
     Ok(OffboardReport {
         keys_revoked,
         smtp_passwords_cleared: purge.smtp_passwords_cleared,
@@ -1304,6 +1545,7 @@ pub fn offboard(
         queue_configs_scrubbed: purge.queue_configs_scrubbed,
         scheduler_config_secrets_cleared: purge.scheduler_config_secrets_cleared,
         managed_integration_removed,
+        keychain_item_removed,
     })
 }
 
@@ -1403,6 +1645,7 @@ pub fn spawn_reprovision_on_startup(app: tauri::AppHandle) {
 mod tests {
     use super::*;
     use crate::db::Database;
+    use crate::keychain::{DeleteOutcome, FakeKeyStore};
     use crate::service::{NoopNotifier, SchedulerService};
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
@@ -1411,6 +1654,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("chaos-mcp-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// An in-memory key store for tests, so provisioning/offboarding never
+    /// touches the real macOS Keychain (which hangs/fails in headless CI).
+    fn fake_keystore() -> FakeKeyStore {
+        FakeKeyStore::new()
     }
 
     fn test_service(dir: &Path) -> SchedulerService {
@@ -1845,10 +2094,8 @@ exit 0
         let outcome = merge_mcp_config(
             &config,
             "managed-1",
-            "/bin/node",
-            "/opt/cli.js",
+            "/opt/mcp/launch-managed.sh",
             "http://127.0.0.1:9618",
-            "tok",
             false,
         )
         .unwrap();
@@ -1857,7 +2104,12 @@ exit 0
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
         let entry = &written["mcpServers"]["chaos-scheduler"];
-        assert_eq!(entry["command"], "/bin/node");
+        // #292: the command is the Keychain launcher, and the API key is NOT in env.
+        assert_eq!(entry["command"], "/opt/mcp/launch-managed.sh");
+        assert!(
+            entry["env"]["CHAOS_SCHEDULER_API_KEY"].is_null(),
+            "the API key must never be written into the Cursor config env"
+        );
         assert_eq!(entry["env"]["CHAOS_SCHEDULER_URL"], "http://127.0.0.1:9618");
         assert_eq!(
             entry["env"]["CHAOS_SCHEDULER_MANAGED_BY"],
@@ -1879,16 +2131,7 @@ exit 0
         )
         .unwrap();
 
-        merge_mcp_config(
-            &config,
-            "id",
-            "/bin/node",
-            "/cli.js",
-            "http://x",
-            "tok",
-            false,
-        )
-        .unwrap();
+        merge_mcp_config(&config, "id", "/mcp/launch-managed.sh", "http://x", false).unwrap();
 
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
@@ -1907,16 +2150,8 @@ exit 0
         });
         std::fs::write(&config, original.to_string()).unwrap();
 
-        let outcome = merge_mcp_config(
-            &config,
-            "id",
-            "/bin/node",
-            "/cli.js",
-            "http://x",
-            "tok",
-            false,
-        )
-        .unwrap();
+        let outcome =
+            merge_mcp_config(&config, "id", "/mcp/launch-managed.sh", "http://x", false).unwrap();
         assert_eq!(outcome, MergeOutcome::ConflictUnmanaged);
 
         let after: serde_json::Value =
@@ -1937,16 +2172,8 @@ exit 0
         )
         .unwrap();
 
-        let outcome = merge_mcp_config(
-            &config,
-            "id",
-            "/bin/node",
-            "/cli.js",
-            "http://x",
-            "tok",
-            true,
-        )
-        .unwrap();
+        let outcome =
+            merge_mcp_config(&config, "id", "/mcp/launch-managed.sh", "http://x", true).unwrap();
         assert_eq!(outcome, MergeOutcome::Written);
 
         let after: serde_json::Value =
@@ -1960,16 +2187,7 @@ exit 0
         let config = dir.join("mcp.json");
         std::fs::write(&config, "{ not valid json").unwrap();
 
-        merge_mcp_config(
-            &config,
-            "id",
-            "/bin/node",
-            "/cli.js",
-            "http://x",
-            "tok",
-            false,
-        )
-        .unwrap();
+        merge_mcp_config(&config, "id", "/mcp/launch-managed.sh", "http://x", false).unwrap();
 
         // A backup of the invalid content must exist somewhere alongside it.
         let backups: Vec<_> = std::fs::read_dir(&dir)
@@ -1998,30 +2216,12 @@ exit 0
         let config = dir.join("mcp.json");
 
         std::fs::write(&config, "{ not valid json (first)").unwrap();
-        merge_mcp_config(
-            &config,
-            "id",
-            "/bin/node",
-            "/cli.js",
-            "http://x",
-            "tok",
-            false,
-        )
-        .unwrap();
+        merge_mcp_config(&config, "id", "/mcp/launch-managed.sh", "http://x", false).unwrap();
 
         // Force the config back into an invalid state so the second merge
         // call hits the same invalid-JSON backup path again.
         std::fs::write(&config, "{ not valid json (second)").unwrap();
-        merge_mcp_config(
-            &config,
-            "id",
-            "/bin/node",
-            "/cli.js",
-            "http://x",
-            "tok",
-            false,
-        )
-        .unwrap();
+        merge_mcp_config(&config, "id", "/mcp/launch-managed.sh", "http://x", false).unwrap();
 
         let mut backups: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
@@ -2063,16 +2263,7 @@ exit 0
     fn remove_entry_removes_managed_entry_and_keeps_siblings() {
         let dir = tmpdir();
         let config = dir.join("mcp.json");
-        merge_mcp_config(
-            &config,
-            "id",
-            "/bin/node",
-            "/cli.js",
-            "http://x",
-            "tok",
-            false,
-        )
-        .unwrap();
+        merge_mcp_config(&config, "id", "/mcp/launch-managed.sh", "http://x", false).unwrap();
         // Add an unrelated sibling entry after the managed one exists.
         let mut root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
@@ -2294,9 +2485,17 @@ exit 0
         let service_dir = tmpdir();
         let service = test_service(&service_dir);
         let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+        let keystore = fake_keystore();
 
-        let first = provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false)
-            .expect("first provision should succeed");
+        let first = provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        )
+        .expect("first provision should succeed");
         assert_eq!(first.install_status, InstallStatus::Installed);
         assert!(first.registered_in_cursor);
         assert!(first.matches);
@@ -2305,14 +2504,43 @@ exit 0
             Some(pinned_mcp_version())
         );
 
+        // #292: the managed key is in the Keychain and NOT inline in the config.
+        assert!(
+            keystore.contains(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT),
+            "the managed key must be stored in the Keychain"
+        );
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let entry = &config["mcpServers"]["chaos-scheduler"];
+        assert!(
+            entry["env"]["CHAOS_SCHEDULER_API_KEY"].is_null(),
+            "the API key must NOT be written into the Cursor config env"
+        );
+        let command = entry["command"].as_str().unwrap();
+        assert!(
+            command.ends_with("launch-managed.sh"),
+            "the managed command must be the Keychain launcher, got {command}"
+        );
+        assert!(
+            launcher_script_path(&app_data_dir).exists(),
+            "the launcher script must be written"
+        );
+
         let key_id_after_first = first.managed_key_id.clone();
         let cursor_state = inspect_cursor_config(&config_path);
         assert!(cursor_state.registered && !cursor_state.conflict);
 
         // Re-provisioning when nothing changed must be a no-op: same managed
         // key (no needless remint/revoke churn), same registration.
-        let second = provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false)
-            .expect("idempotent re-provision should succeed");
+        let second = provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        )
+        .expect("idempotent re-provision should succeed");
         assert_eq!(second.managed_key_id, key_id_after_first);
         assert!(second.matches);
     }
@@ -2355,6 +2583,7 @@ exit 0
             &config_path,
             &broken_runtime,
             false,
+            &fake_keystore(),
         );
         assert!(
             result.is_err(),
@@ -2412,7 +2641,14 @@ exit 0
         std::fs::write(&blocking_file, "blocking").unwrap();
         let config_path = blocking_file.join("mcp.json");
 
-        let result = provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false);
+        let result = provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &fake_keystore(),
+        );
         let err = result.expect_err("the forced merge_mcp_config failure must propagate");
 
         let manifest = ManagedManifest::load(&app_data_dir);
@@ -2448,9 +2684,16 @@ exit 0
         let service = test_service(&service_dir);
 
         let good_runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
-        let first =
-            provision_with_runtime(&app_data_dir, &service, &config_path, &good_runtime, false)
-                .expect("first provision should succeed");
+        let keystore = fake_keystore();
+        let first = provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &good_runtime,
+            false,
+            &keystore,
+        )
+        .expect("first provision should succeed");
         assert!(first.matches, "first provision must report healthy");
         let original_key_id = first.managed_key_id.clone().expect("a key must be minted");
 
@@ -2473,6 +2716,7 @@ exit 0
             &config_path,
             &broken_runtime,
             false,
+            &keystore,
         );
         assert!(
             reprovision_result.is_err(),
@@ -2505,9 +2749,15 @@ exit 0
         // And a subsequent re-provision attempt (simulating the next launch's
         // startup hook, this time succeeding) must actually retry rather
         // than taking the `already_current` fast path.
-        let healed =
-            provision_with_runtime(&app_data_dir, &service, &config_path, &good_runtime, false)
-                .expect("a later successful re-provision must be able to self-heal");
+        let healed = provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &good_runtime,
+            false,
+            &keystore,
+        )
+        .expect("a later successful re-provision must be able to self-heal");
         assert!(healed.matches, "self-heal must result in a healthy status");
         assert_ne!(
             healed.managed_key_id.as_deref(),
@@ -2541,16 +2791,30 @@ exit 0
         let service_dir = tmpdir();
         let service = test_service(&service_dir);
         let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+        let keystore = fake_keystore();
 
-        let provisioned =
-            provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false).unwrap();
+        let provisioned = provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        )
+        .unwrap();
         let key_id = provisioned.managed_key_id.clone().unwrap();
         assert!(key_is_alive(&service, &key_id));
+        assert!(keystore.contains(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT));
 
-        let removed = remove(&app_data_dir, &service, &config_path, false).unwrap();
+        let removed =
+            remove_with_keystore(&app_data_dir, &service, &config_path, false, &keystore).unwrap();
         assert!(
             !key_is_alive(&service, &key_id),
             "managed key must be revoked"
+        );
+        assert!(
+            !keystore.contains(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT),
+            "the managed Keychain item must be deleted on remove"
         );
         assert!(!removed.registered_in_cursor);
         assert_eq!(removed.provisioned_version, None);
@@ -2574,7 +2838,14 @@ exit 0
         let service_dir = tmpdir();
         let service = test_service(&service_dir);
 
-        remove(&app_data_dir, &service, &config_path, false).unwrap();
+        remove_with_keystore(
+            &app_data_dir,
+            &service,
+            &config_path,
+            false,
+            &fake_keystore(),
+        )
+        .unwrap();
 
         let after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
@@ -2613,15 +2884,24 @@ exit 0
         let db = Arc::new(Database::new(&service_dir));
         let service = SchedulerService::new(db.clone(), Arc::new(NoopNotifier));
         let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+        let keystore = fake_keystore();
 
-        // Provision: mints the managed key + writes the manifest token.
-        let provisioned =
-            provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false).unwrap();
+        // Provision: mints the managed key + stores it in the (fake) Keychain.
+        let provisioned = provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        )
+        .unwrap();
         let managed_key_id = provisioned.managed_key_id.clone().unwrap();
         assert!(key_is_alive(&service, &managed_key_id));
         assert!(ManagedManifest::load(&app_data_dir)
             .managed_key_id
             .is_some());
+        assert!(keystore.contains(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT));
 
         // An extra user key + secret-bearing DB fields.
         let extra = service.create_api_key(Some("extra"), &["read"]).unwrap();
@@ -2661,8 +2941,17 @@ exit 0
             .unwrap();
 
         // One-action offboarding.
-        let report = offboard(&app_data_dir, &service, &config_path).unwrap();
+        let report =
+            offboard_with_keystore(&app_data_dir, &service, &config_path, &keystore).unwrap();
         assert!(report.managed_integration_removed);
+        assert!(
+            report.keychain_item_removed,
+            "the managed Keychain item must be proven-absent after offboarding"
+        );
+        assert!(
+            !keystore.contains(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT),
+            "the managed Keychain item must be physically gone"
+        );
         assert!(report.keys_revoked >= 2, "managed + extra key revoked");
         assert_eq!(report.smtp_passwords_cleared, 1);
         assert_eq!(report.workflow_specs_scrubbed, 1);
@@ -2703,26 +2992,39 @@ exit 0
         let db = Arc::new(Database::new(&service_dir));
         let service = SchedulerService::new(db.clone(), Arc::new(NoopNotifier));
         let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+        let keystore = fake_keystore();
 
         // Provision so BOTH halves exist: the manifest file + a managed
         // `chaos-scheduler` entry in the Cursor config.
-        provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false).unwrap();
+        provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        )
+        .unwrap();
         assert!(ManagedManifest::manifest_path(&app_data_dir).exists());
         assert!(managed_config_entry_present(&config_path));
         assert!(
-            !managed_integration_fully_removed(&app_data_dir, &config_path),
+            // `keychain_item_absent = true` isolates the file-state: even with the
+            // Keychain item gone, a present manifest + entry means NOT removed.
+            !managed_integration_fully_removed(&app_data_dir, &config_path, true),
             "must report NOT removed while manifest + managed entry are present"
         );
 
-        // A real offboard clears both halves; only then may the flag be true.
-        let report = offboard(&app_data_dir, &service, &config_path).unwrap();
+        // A real offboard clears all three halves; only then may the flag be true.
+        let report =
+            offboard_with_keystore(&app_data_dir, &service, &config_path, &keystore).unwrap();
         assert!(!ManagedManifest::manifest_path(&app_data_dir).exists());
         assert!(!managed_config_entry_present(&config_path));
         assert!(
-            managed_integration_fully_removed(&app_data_dir, &config_path),
-            "must report removed once both halves are gone"
+            managed_integration_fully_removed(&app_data_dir, &config_path, true),
+            "must report removed once all halves are gone"
         );
         assert!(report.managed_integration_removed);
+        assert!(report.keychain_item_removed);
 
         // A LINGERING managed entry (simulating a swallowed config-write failure
         // in the best-effort `remove`) must force the reported value back to
@@ -2745,8 +3047,69 @@ exit 0
             "a managed entry must be detected as present"
         );
         assert!(
-            !managed_integration_fully_removed(&app_data_dir, &config_path),
+            !managed_integration_fully_removed(&app_data_dir, &config_path, true),
             "a surviving managed entry must yield NOT removed"
+        );
+    }
+
+    /// #292 Keychain-aware tri-state fails-first: even when the manifest and the
+    /// Cursor config entry are both gone, an UNVERIFIABLE Keychain delete
+    /// (`DeleteOutcome::Unknown`) must force `managed_integration_removed` to
+    /// `false` — the managed key might still be at rest in the Keychain, so the
+    /// report can never claim full removal. Against a predicate that ignored the
+    /// Keychain (pre-#292 the report had no Keychain dimension at all), this
+    /// would have reported removed. The `keychain_item_absent` argument is what
+    /// makes the difference here.
+    #[test]
+    fn offboard_reports_not_removed_when_keychain_delete_is_unverifiable() {
+        let app_data_dir = tmpdir();
+        let config_path = tmpdir().join("mcp.json");
+        let service_dir = tmpdir();
+        let db = Arc::new(Database::new(&service_dir));
+        let service = SchedulerService::new(db.clone(), Arc::new(NoopNotifier));
+        let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+        let keystore = fake_keystore();
+
+        provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        )
+        .unwrap();
+        assert!(keystore.contains(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT));
+
+        // Simulate a Keychain that cannot verify (or perform) the delete: the
+        // item is LEFT in place and every delete reports `Unknown`.
+        keystore.set_delete_unverifiable(true);
+
+        let report =
+            offboard_with_keystore(&app_data_dir, &service, &config_path, &keystore).unwrap();
+
+        // The filesystem halves ARE gone...
+        assert!(!ManagedManifest::manifest_path(&app_data_dir).exists());
+        assert!(!managed_config_entry_present(&config_path));
+        // ...but the Keychain item is still present and its delete was unverifiable.
+        assert!(
+            keystore.contains(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT),
+            "an unverifiable delete must leave the item in place"
+        );
+        assert!(
+            !report.keychain_item_removed,
+            "an unverifiable Keychain delete is NOT proven-absent"
+        );
+        assert!(
+            !report.managed_integration_removed,
+            "removal must NOT be claimed while the Keychain item may still exist"
+        );
+        // The `Unknown` outcome is the mechanism.
+        assert_eq!(
+            keystore
+                .delete(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT)
+                .unwrap(),
+            DeleteOutcome::Unknown
         );
     }
 
@@ -2785,11 +3148,21 @@ exit 0
         assert!(!service.offboarding_in_progress());
 
         // Provision so offboard has a managed integration to clear.
-        provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false).unwrap();
+        let keystore = fake_keystore();
+        provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        )
+        .unwrap();
 
         // Full offboard revokes all + clears the integration; verify zero live
         // keys remain and the report is accurate.
-        let report = offboard(&app_data_dir, &service, &config_path).unwrap();
+        let report =
+            offboard_with_keystore(&app_data_dir, &service, &config_path, &keystore).unwrap();
         assert!(report.managed_integration_removed);
         assert!(report.keys_revoked >= 1);
         assert_eq!(
@@ -2800,42 +3173,114 @@ exit 0
         assert!(service.verify_api_key(&pre.token).is_none());
     }
 
-    /// FINDING 3 fails-first: when `mcp.json` EXISTS but is unparseable, the
-    /// managed block (and its API key) may never be removed, so the report must
-    /// NOT claim full removal. Against the pre-fix predicate (which treated an
-    /// unparseable config as "no managed entry"), `managed_integration_removed`
-    /// came back `true`, so this fails on the pre-fix code.
+    /// PR-D(b) fails-first: when `~/.cursor/mcp.json` EXISTS but is unparseable
+    /// AND still physically contains the managed `CHAOS_SCHEDULER_API_KEY`,
+    /// offboarding must BACK UP the original bytes to a `.bak` sidecar and
+    /// REPLACE the file with a scrubbed, valid, token-free config — so the token
+    /// is gone even though the file couldn't be parse-merged. Against the pre-fix
+    /// offboard (which left the unparseable file untouched and reported removal
+    /// Unknown), there is no `.bak` and the token survives, so this test FAILS
+    /// before the fix and PASSES after.
     #[test]
-    fn offboard_reports_not_removed_when_mcp_config_is_unparseable() {
+    fn offboard_backs_up_and_replaces_unparseable_config_scrubbing_the_token() {
         let app_data_dir = tmpdir();
         let config_path = tmpdir().join("mcp.json");
         let service_dir = tmpdir();
         let db = Arc::new(Database::new(&service_dir));
         let service = SchedulerService::new(db.clone(), Arc::new(NoopNotifier));
         let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+        let keystore = fake_keystore();
 
         // Provision so both a manifest and a managed Cursor entry exist.
-        provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false).unwrap();
+        provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        )
+        .unwrap();
         assert!(ManagedManifest::manifest_path(&app_data_dir).exists());
 
-        // Corrupt the Cursor config: it exists but can't be parsed, so
-        // `remove_mcp_config_entry` bails and leaves the managed block in place.
-        std::fs::write(&config_path, "{ this is not valid json ::::").unwrap();
-
-        let report = offboard(&app_data_dir, &service, &config_path).unwrap();
+        // Corrupt the Cursor config so it can't be parsed, but leave a managed
+        // token physically present in the bytes. The token value is derived from
+        // pure runtime integers (no string literal) so no secret scanner or
+        // CodeQL hard-coded-value query trips on the test source.
+        let token = runtime_secret();
+        let corrupt = format!(
+            "{{ \"mcpServers\": {{ \"chaos-scheduler\": {{ \"env\": {{ \
+             \"CHAOS_SCHEDULER_API_KEY\": \"{token}\" }} }} }}  <<< trailing garbage ::::"
+        );
+        std::fs::write(&config_path, &corrupt).unwrap();
         assert!(
-            !report.managed_integration_removed,
-            "an unparseable mcp.json means removal is NOT proven"
+            serde_json::from_str::<serde_json::Value>(&corrupt).is_err(),
+            "test fixture must be genuinely unparseable"
+        );
+        assert!(corrupt.contains(&token), "fixture must contain the token");
+
+        let report =
+            offboard_with_keystore(&app_data_dir, &service, &config_path, &keystore).unwrap();
+
+        // The original unparseable bytes are preserved in a `.bak` sidecar...
+        let bak = config_path.with_extension("json.bak");
+        assert!(
+            bak.exists(),
+            "the unparseable config must be backed up to a .bak sidecar"
         );
         assert!(
-            !managed_integration_fully_removed(&app_data_dir, &config_path),
+            std::fs::read_to_string(&bak).unwrap().contains(&token),
+            "the .bak must retain the original bytes (incl. the token) for recovery"
+        );
+        // ...and the live config is now valid JSON with the token scrubbed.
+        let after = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&after).is_ok(),
+            "the replacement config must be valid JSON"
+        );
+        assert!(
+            !after.contains(&token),
+            "the managed token must be scrubbed from mcp.json even when the original was unparseable"
+        );
+        // With the token scrubbed AND the Keychain item cleared, the tri-state
+        // may now legitimately report full removal.
+        assert!(
+            report.managed_integration_removed,
+            "removal is proven once the token is scrubbed and the Keychain item is gone"
+        );
+        assert!(report.keychain_item_removed);
+    }
+
+    /// The tri-state predicate still reports NOT-removed for an unreadable /
+    /// unparseable config when it is inspected directly (independent of the
+    /// offboard backup-replace). Preserves the original FINDING-3 invariant that
+    /// an unknown config state is never counted as proven-removed.
+    #[test]
+    fn fully_removed_predicate_rejects_unknown_config_state() {
+        let app_data_dir = tmpdir();
+        let config_path = tmpdir().join("mcp.json");
+
+        // Unparseable config → Unknown → not proven removed (even with manifest
+        // absent and the Keychain item proven-absent).
+        std::fs::write(&config_path, "{ this is not valid json ::::").unwrap();
+        assert!(
+            !managed_integration_fully_removed(&app_data_dir, &config_path, true),
             "unknown config state must not count as fully removed"
         );
-        // A genuinely-absent config, by contrast, IS proven removed.
+
+        // A genuinely-absent config, by contrast, IS proven removed once the
+        // manifest is absent and the Keychain item is proven-absent.
         std::fs::remove_file(&config_path).unwrap();
         assert!(managed_integration_fully_removed(
             &app_data_dir,
-            &config_path
+            &config_path,
+            true
+        ));
+        // ...but a still-present Keychain item (absent=false) blocks it.
+        assert!(!managed_integration_fully_removed(
+            &app_data_dir,
+            &config_path,
+            false
         ));
     }
 }
