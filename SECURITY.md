@@ -137,8 +137,15 @@ Outbound completion webhooks use a **different** scheme: HMAC-SHA256 over the
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
 | API key secrets                             | Salted hash in SQLite; plaintext shown once at mint                                                                  | Keys are not listable over REST       |
 | Managed MCP scheduler key (#292)            | macOS Keychain (service `chaos-scheduler-managed-mcp`, account `managed-mcp-api-key`); never in `~/.cursor/mcp.json` | Not exposed over REST                 |
-| Webhook / operator secrets in workflow JSON | Stored in `spec_json` / `trigger_config`                                                                             | Replaced with `__redacted__` sentinel |
-| Cursor / SMTP settings                      | Local SQLite settings                                                                                                | Desktop IPC only (not REST)           |
+| Webhook / operator secrets in workflow JSON | **AEAD envelope-encrypted** (`enc:v1:` tokens) inside `spec_json` / `trigger_config` / `queue_config`                | Replaced with `__redacted__` sentinel |
+| `inbound_webhook_secret` (scheduler config) | **AEAD envelope-encrypted** (`enc:v1:` token) in the `scheduler_config` value column                                 | Not exposed over REST                 |
+| SMTP password (global + per-profile)        | **AEAD envelope-encrypted** (`enc:v1:` token) in the `email_config` / `email_profiles` column                        | Desktop IPC only (not REST); masked   |
+| Cursor / other local settings               | Local SQLite settings                                                                                                | Desktop IPC only (not REST)           |
+
+**At rest, secret-bearing fields are AEAD envelope-encrypted by default** (see the
+envelope-encryption section below and [ADR 0011](docs/adr/0011-envelope-encryption-secrets-at-rest.md)).
+Decryption happens at the `db.rs` read boundary, so the service and every adapter see plaintext and
+the read-scope / MCP redaction below still applies unchanged above the decrypt.
 
 **Service-layer read-scope redaction** (REST/SDK): at `read` scope, nested
 fields named `secret`, `signature_secret`, `cursor_api_key`, or `smtp_password`
@@ -173,6 +180,54 @@ contains secrets, `patch_workflow_spec` re-fetches the stored value
 real secret is never returned to the MCP caller. A `write`/`admin` REST/SDK
 caller that needs the raw values for a round-trip must read them directly over
 REST, never through an MCP tool or resource.
+
+## Envelope encryption of secrets at rest (on by default)
+
+As of [ADR 0011](docs/adr/0011-envelope-encryption-secrets-at-rest.md), the
+secret-bearing at-rest fields are **AEAD envelope-encrypted by default** — a
+layer above the FileVault-stack file hardening (`0600` / `secure_delete` /
+Time-Machine exclusion), not a replacement for it.
+
+**Scheme.** A 256-bit **KEK** (master key) lives in the macOS Keychain (service
+`chaos-scheduler-master-kek`, account `db-envelope-kek-v1`), minted once if
+absent, behind the same `KeyStore` trait as the managed MCP key. A 256-bit
+**DEK** (data key) encrypts the field values; the DEK is AEAD-wrapped by the KEK
+and the wrapped DEK is stored in the `envelope_keys` table. At startup the KEK
+is fetched once and the DEK unwrapped once, then held in memory — the KEK is
+never re-fetched per operation.
+
+**Cipher.** Field values are sealed with **XChaCha20-Poly1305** (random 24-byte
+nonces) and bound to their storage location via **AAD** (a `table:column`-style
+context) so a ciphertext cannot be relocated or swapped between fields. The
+stored token is `enc:v1:` + base64(nonce ‖ ciphertext ‖ tag); the `enc:v1:`
+prefix keeps writes and the migration idempotent.
+
+**Scope.** SMTP password (global + per-profile), `inbound_webhook_secret`, and
+the workflow `spec_json` / `trigger_config` / `queue_config` secret fields.
+API-key hashes/salts are already one-way hashed and are **not** encrypted.
+
+**Encrypt-on-write / decrypt-on-read** happens at the `db.rs` boundary, so all
+adapters transparently receive plaintext from the service and the read-scope /
+MCP redaction above still replaces secrets with `__redacted__`. The offboarding
+purge blanks the (now ciphertext) fields exactly as before.
+
+**Rotation.** The KEK can be rotated (mint a new KEK, re-wrap the DEK; field
+data untouched) and the DEK can be rotated (mint a new DEK, decrypt-all +
+re-encrypt, bump the key version). Both are available as IPC commands
+(`rotate_master_key`, `rotate_data_key`).
+
+**Lost / unavailable master key.** If the KEK is missing or unreadable at
+startup the app runs in a **secrets-locked** state rather than crashing:
+encrypted fields read back as the distinct `__secret_unavailable__` sentinel
+(**not** `__redacted__`), new secret **writes** are rejected with a clear error,
+and all non-secret operation proceeds. A re-provision action
+(`reprovision_secrets`) mints a fresh KEK/DEK so the operator can re-enter
+secrets without destroying the existing ciphertext blindly.
+
+> **A lost KEK means the existing encrypted secrets are unrecoverable.** This is
+> inherent to encrypting at rest and is accepted by design: there is no in-app
+> KEK escrow. The mitigation is the explicit secrets-locked state plus the
+> re-enter/re-provision path — you re-enter secrets, you do not recover them.
 
 ## Child-process environment scrubbing
 

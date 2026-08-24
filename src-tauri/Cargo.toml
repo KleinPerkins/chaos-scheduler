@@ -39,11 +39,14 @@ hmac = "0.13.0"
 sha2 = "0.11.0"
 hex = "0.4.3"
 rand = "0.10.2"
+# Envelope encryption of secret-bearing at-rest fields (ADR 0011). XChaCha20-Poly1305
+# gives safe 24-byte random nonces; base64 encodes the `enc:v1:` ciphertext token.
+chacha20poly1305 = "0.10"
+base64 = "0.23.0"
 reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "json", "blocking"] }
 tauri-plugin-updater = "2.10.1"
 
 [dev-dependencies]
-base64 = "0.23.0"
 minisign-verify = "0.2.5"
 tauri = { version = "2", features = ["tray-icon", "test"] }
 

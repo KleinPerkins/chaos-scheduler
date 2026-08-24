@@ -4,6 +4,7 @@ mod branding;
 mod commands;
 mod db;
 mod email;
+mod envelope;
 mod fix_cloud;
 mod fix_local;
 mod fix_worktree;
@@ -419,6 +420,10 @@ pub fn run() {
             commands::revoke_api_key,
             commands::list_api_audit_log,
             commands::offboard_and_purge_secrets,
+            commands::secrets_locked,
+            commands::rotate_master_key,
+            commands::rotate_data_key,
+            commands::reprovision_secrets,
             commands::check_for_update,
             commands::apply_update,
             commands::get_app_update_status,

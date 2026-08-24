@@ -129,6 +129,10 @@ describe("ipc fixture registry", () => {
       "delete_email_profile",
       "test_email_profile",
       "set_workflow_email_profile",
+      "secrets_locked",
+      "rotate_master_key",
+      "rotate_data_key",
+      "reprovision_secrets",
     ];
 
     const registry = createDefaultIpcRegistry();
