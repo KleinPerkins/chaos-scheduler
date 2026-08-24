@@ -1,7 +1,7 @@
 # Credential-Security Hardening — Chaos Scheduler
 
 **Version:** v1
-**Status:** DRAFT — 2026-08-23
+**Status:** ACCEPTED — 2026-08-24
 **Date:** 2026-08-23
 **Owning repository:** `KleinPerkins/chaos-scheduler` (`~/dev/personal/chaos-scheduler`)
 **Plan-type:** standard
