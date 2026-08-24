@@ -1,4 +1,5 @@
 import type {
+  ApiAuditLogEntry,
   ApiKey,
   DashboardBlastRadius,
   DashboardBlockTaxonomy,
@@ -741,6 +742,8 @@ export const defaultQueues: QueueInfo[] = [
 ];
 
 export const emptyApiKeys: ApiKey[] = [];
+
+export const emptyApiAuditLog: ApiAuditLogEntry[] = [];
 
 export const idleUpdateSnapshot: UpdateSnapshot = {
   updater_available: true,

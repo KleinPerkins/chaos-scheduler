@@ -10,6 +10,7 @@ import {
   defaultMcpIntegrationStatus,
   defaultMissionControlPreferences,
   defaultQueues,
+  emptyApiAuditLog,
   emptyApiKeys,
   emptySchedulerStatus,
   idleUpdateSnapshot,
@@ -46,6 +47,8 @@ export type IpcCommand =
   | "create_api_key"
   | "list_api_keys"
   | "revoke_api_key"
+  | "list_api_audit_log"
+  | "offboard_and_purge_secrets"
   | "check_for_update"
   | "apply_update"
   | "get_app_update_status"
@@ -195,6 +198,13 @@ export function createDefaultIpcRegistry(): IpcFixtureRegistry {
     }),
     list_api_keys: () => emptyApiKeys,
     revoke_api_key: () => undefined,
+    list_api_audit_log: () => emptyApiAuditLog,
+    offboard_and_purge_secrets: () => ({
+      keys_revoked: 0,
+      smtp_passwords_cleared: 0,
+      workflow_specs_scrubbed: 0,
+      managed_integration_removed: true,
+    }),
     check_for_update: () => ({
       available: false,
       current_version: "0.1.0",
