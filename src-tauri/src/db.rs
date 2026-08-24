@@ -109,12 +109,13 @@ fn exclude_from_backup(path: &std::path::Path) {
             return;
         };
         let path_bytes = path_str.as_bytes();
+        let is_directory: u8 = if path.is_dir() { 1 } else { 0 };
         let url = unsafe {
             cf_backup::CFURLCreateFromFileSystemRepresentation(
                 std::ptr::null(), // kCFAllocatorDefault
                 path_bytes.as_ptr(),
                 path_bytes.len() as isize,
-                0, // not a directory
+                is_directory,
             )
         };
         if url.is_null() {
@@ -171,6 +172,12 @@ fn secure_remove(path: &std::path::Path) {
 /// 0600 file permissions, backup-exclusion xattr (macOS), and 0700 on the
 /// parent directory.  Called at every startup so newly-created files are
 /// protected even if a prior run exited before hardening could apply.
+///
+/// The parent directory is also excluded from Time Machine / cloud-sync
+/// backups so that WAL/SHM sidecars recreated at runtime (SQLite deletes and
+/// recreates them across connection open/close cycles) are always protected
+/// without any timing window.  macOS propagates `kCFURLIsExcludedFromBackupKey`
+/// to every file in the subtree, current and future.
 fn harden_db_files(db_path: &std::path::Path) {
     restrict_file_permissions(db_path);
     exclude_from_backup(db_path);
@@ -185,6 +192,11 @@ fn harden_db_files(db_path: &std::path::Path) {
     if let Some(dir) = db_path.parent() {
         if !dir.as_os_str().is_empty() {
             restrict_dir_permissions(dir);
+            // Exclude the entire app-data directory from backup.  Setting
+            // kCFURLIsExcludedFromBackupKey on a directory covers all current
+            // and future children, so runtime-recreated WAL/SHM sidecars are
+            // always excluded with no timing window.
+            exclude_from_backup(dir);
         }
     }
 }
@@ -1392,6 +1404,14 @@ impl Database {
         // Overwrite freed SQLite pages with zeros so deleted content does
         // not linger in the DB file at rest (PR-C FileVault-stack hardening).
         conn.pragma_update(None, "secure_delete", "ON")?;
+        // Defense-in-depth: best-effort 0600 on WAL/SHM sidecars after WAL
+        // mode is re-asserted.  SQLite may have recreated them since startup
+        // hardening ran.  The 0700 parent dir already blocks cross-user
+        // traversal; this closes the per-file mode gap.
+        let wal = format!("{}-wal", self.path);
+        let shm = format!("{}-shm", self.path);
+        restrict_file_permissions(std::path::Path::new(&wal));
+        restrict_file_permissions(std::path::Path::new(&shm));
         Ok(conn)
     }
 
@@ -13230,12 +13250,13 @@ SUMMARY_JSON:{\"title\":\"current\"}
             return false;
         };
         let path_bytes = path_str.as_bytes();
+        let is_directory: u8 = if path.is_dir() { 1 } else { 0 };
         unsafe {
             let url = cf_backup::CFURLCreateFromFileSystemRepresentation(
                 std::ptr::null(),
                 path_bytes.as_ptr(),
                 path_bytes.len() as isize,
-                0,
+                is_directory,
             );
             if url.is_null() {
                 return false;
@@ -13285,6 +13306,67 @@ SUMMARY_JSON:{\"title\":\"current\"}
             "file must be excluded from backup after exclude_from_backup (CFURLSetResourcePropertyForKey)"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Non-vacuous, fails-first test that the parent-directory backup exclusion
+    /// covers runtime-recreated WAL/SHM sidecars.
+    ///
+    /// Fails-first rationale: the current code (before this fix) never calls
+    /// `exclude_from_backup` on the parent directory, so
+    /// `is_excluded_from_backup(&dir)` returns `false` after `Database::new` —
+    /// the second `assert!` panics.  After the fix `harden_db_files` sets
+    /// `kCFURLIsExcludedFromBackupKey` on the directory, the key reads back
+    /// `true`, and the test passes.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn at_rest_hardening_parent_dir_exclusion_covers_runtime_wal() {
+        let dir =
+            std::env::temp_dir().join(format!("chaos-harden-waldir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Fails-first: a freshly created temp dir has no exclusion set.
+        assert!(
+            !is_excluded_from_backup(&dir),
+            "fresh temp dir must NOT be excluded from backup before Database::new"
+        );
+
+        let db = Database::new(&dir);
+
+        // After init the PARENT DIRECTORY must be marked excluded.  macOS
+        // propagates this to every child — current and future — so any
+        // WAL/SHM SQLite recreates at runtime are always covered without a
+        // timing window.
+        assert!(
+            is_excluded_from_backup(&dir),
+            "app-data dir must be excluded from backup after Database::new \
+             (kCFURLIsExcludedFromBackupKey subtree coverage protects WAL/SHM)"
+        );
+
+        // Keep a live connection in WAL mode and do a tiny write so SQLite
+        // materialises the -wal and -shm sidecars.
+        let conn = db.conn().unwrap();
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO scheduler_config (key, value) VALUES ('_bk_test', '1')",
+            [],
+        );
+
+        // Assert the sidecars actually exist — confirming they were recreated
+        // by the runtime conn() call and are inside the excluded directory.
+        let wal = dir.join("scheduler.db-wal");
+        let shm = dir.join("scheduler.db-shm");
+        assert!(
+            wal.exists() || shm.exists(),
+            "-wal or -shm should exist while a live WAL-mode connection is open"
+        );
+
+        // The parent dir exclusion still holds while the sidecars are live.
+        assert!(
+            is_excluded_from_backup(&dir),
+            "parent dir backup exclusion must hold with live WAL connection"
+        );
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
