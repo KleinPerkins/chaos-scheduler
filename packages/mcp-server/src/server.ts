@@ -33,6 +33,7 @@ import {
   registerAuthoringResources,
   resourceIdentifier,
   workflowDefinition,
+  workflowResourceTemplate,
 } from "./resources.js";
 
 export const SERVER_NAME = "chaos-scheduler";
@@ -215,7 +216,13 @@ export function buildServer(deps: ServerDeps): McpServer {
       description: "List all registered workflows across environments.",
       readOnly: true,
     },
-    async () => jsonResult(await client.listWorkflows()),
+    // Redact known secret fields before results reach agent/LLM context. The
+    // managed integration key is write-scoped, so the backend's scope-based
+    // redaction is bypassed; this projection (the same one the chaos://
+    // resources use) is applied unconditionally so tool reads are never a
+    // secret-leaking path regardless of key scope.
+    async () =>
+      jsonResult(projectWorkflowsForResource(await client.listWorkflows())),
   );
 
   tool(
@@ -226,7 +233,10 @@ export function buildServer(deps: ServerDeps): McpServer {
       inputSchema: { id: z.string().describe("Workflow id") },
       readOnly: true,
     },
-    async (args) => jsonResult(await client.getWorkflow(args.id)),
+    // See list_workflows: redact unconditionally so a write-scoped key cannot
+    // surface raw workflow secrets through this read tool.
+    async (args) =>
+      jsonResult(projectWorkflowForResource(await client.getWorkflow(args.id))),
   );
 
   tool(
@@ -261,11 +271,17 @@ export function buildServer(deps: ServerDeps): McpServer {
     async (args) => {
       const environment = args.environment ?? config.defaultEnvironment;
       assertEnvironmentWritable(environment, config);
+      // The create response echoes the full stored Workflow. Because the
+      // managed integration key is write-scoped, an unredacted echo would be a
+      // secret side-door equivalent to the read-tool leak. Redact with the same
+      // projection so redaction is a uniform invariant across read AND write.
       return jsonResult(
-        await client.registerWorkflow({
-          ...(args as Parameters<typeof client.registerWorkflow>[0]),
-          environment,
-        }),
+        projectWorkflowForResource(
+          await client.registerWorkflow({
+            ...(args as Parameters<typeof client.registerWorkflow>[0]),
+            environment,
+          }),
+        ),
       );
     },
   );
@@ -283,10 +299,14 @@ export function buildServer(deps: ServerDeps): McpServer {
     },
     async (args) => {
       await assertWorkflowWritable(args.id);
+      // See register_workflow: the write response echoes the full Workflow;
+      // redact it so a write-scoped key cannot read raw secrets back out.
       return jsonResult(
-        await client.setWorkflowSpec(
-          args.id,
-          args.spec as Parameters<typeof client.setWorkflowSpec>[1],
+        projectWorkflowForResource(
+          await client.setWorkflowSpec(
+            args.id,
+            args.spec as Parameters<typeof client.setWorkflowSpec>[1],
+          ),
         ),
       );
     },
@@ -362,7 +382,11 @@ export function buildServer(deps: ServerDeps): McpServer {
       if (patch.environment) {
         assertEnvironmentWritable(patch.environment, config);
       }
-      return jsonResult(await client.updateWorkflow(id, patch));
+      // See register_workflow: even a no-op update (e.g. a rename) echoes the
+      // full stored Workflow; redact so this cannot be a secret side-door.
+      return jsonResult(
+        projectWorkflowForResource(await client.updateWorkflow(id, patch)),
+      );
     },
   );
 
@@ -735,7 +759,7 @@ export function buildServer(deps: ServerDeps): McpServer {
 
   server.registerResource(
     "workflow",
-    new ResourceTemplate("chaos://workflows/{id}", { list: undefined }),
+    workflowResourceTemplate("chaos://workflows/{id}", client),
     {
       title: "Workflow",
       description: "A single workflow by id",
@@ -753,7 +777,7 @@ export function buildServer(deps: ServerDeps): McpServer {
 
   server.registerResource(
     "workflow-runs",
-    new ResourceTemplate("chaos://workflows/{id}/runs", { list: undefined }),
+    workflowResourceTemplate("chaos://workflows/{id}/runs", client),
     {
       title: "Workflow runs",
       description: "Recent runs for a workflow",
@@ -790,6 +814,34 @@ export function buildServer(deps: ServerDeps): McpServer {
     async (uri, variables) => {
       const id = resourceIdentifier(uri, variables.id);
       return readJsonResource(uri, () => client.getRunLogs(id));
+    },
+  );
+
+  server.registerResource(
+    "run-tasks",
+    new ResourceTemplate("chaos://runs/{id}/tasks", { list: undefined }),
+    {
+      title: "Run tasks",
+      description: "Per-step task rows and retry attempts for a run",
+      mimeType: "application/json",
+    },
+    async (uri, variables) => {
+      const id = resourceIdentifier(uri, variables.id);
+      return readJsonResource(uri, () => client.getRunTasks(id));
+    },
+  );
+
+  server.registerResource(
+    "run-metrics",
+    new ResourceTemplate("chaos://runs/{id}/metrics", { list: undefined }),
+    {
+      title: "Run metrics",
+      description: "Metric samples emitted during a run",
+      mimeType: "application/json",
+    },
+    async (uri, variables) => {
+      const id = resourceIdentifier(uri, variables.id);
+      return readJsonResource(uri, () => client.getRunMetrics(id));
     },
   );
 
@@ -834,9 +886,10 @@ export function buildServer(deps: ServerDeps): McpServer {
               `Investigate Chaos Scheduler run \`${run_id}\`.\n\n` +
               `1. Read the run via the \`get_run\` tool (or the \`chaos://runs/${run_id}\` resource).\n` +
               `2. Summarize why it failed (exit code, stderr tail). Use \`get_run_logs\` when you only need stdout/stderr.\n` +
-              `3. Inspect the owning workflow with \`get_workflow\`.\n` +
-              `4. Propose a concrete fix, and if it is a transient failure, offer to re-run it ` +
-              `with \`enqueue_workflow\` using a fresh idempotency key.`,
+              `3. Use \`get_run_tasks\` only for step/retry detail and \`get_run_metrics\` only when emitted measurements can explain the failure.\n` +
+              `4. Inspect the owning workflow with \`get_workflow\`.\n` +
+              `5. Propose a concrete fix. If the failure looks transient, ask the operator for explicit confirmation before any retry.\n` +
+              `6. Only after confirmation, call \`rerun_workflow\` with \`source_run_id: ${run_id}\` and a fresh \`idempotency_key\` for a faithful retry.`,
           },
         },
       ],

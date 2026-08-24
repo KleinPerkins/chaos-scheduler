@@ -73,7 +73,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
       - name: Re-pin "Latest" to the last asset-bearing desktop release
@@ -102,7 +102,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.sdk_tag }}
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           registry-url: https://registry.npmjs.org
@@ -138,7 +138,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.mcp_tag }}
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           registry-url: https://registry.npmjs.org
@@ -201,7 +201,7 @@ jobs:
       # Test against the package's documented floor (engines.node >=18), not
       # whatever newer version .nvmrc pins for everyday dev/CI — that's the
       # actual compatibility claim this gate is verifying.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "18"
       - name: npm-consumer install + CLI smoke
@@ -227,7 +227,7 @@ jobs:
         with:
           ref: ${{ inputs.desktop_tag }}
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -340,7 +340,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
       - name: Re-pin "Latest" to the most recent asset-bearing desktop release if it drifted

@@ -110,6 +110,18 @@ Write: `create_environment`, `register_workflow`, `update_workflow`,
 Email-profile `smtp_password` values are masked (`••••••••`) on read; echo the
 mask back on update to keep the stored secret.
 
+Every MCP tool whose response embeds a workflow applies the same secret
+projection as the `chaos://` workflow resources — on both the read and write
+paths. The read tools `list_workflows` / `get_workflow` **and** the write tools
+`register_workflow` / `set_workflow_spec` / `update_workflow` (each echoes the
+full stored workflow) all replace known nested secret fields (`secret`,
+`signature_secret`, `cursor_api_key`, `smtp_password`) inside `spec_json` /
+`trigger_config` / `queue_config` with `__redacted__`, **regardless of API-key
+scope** — the managed integration key is write-scoped, so no tool, not even a
+no-op update, surfaces raw workflow secrets into agent context. Secret-preserving
+spec edits still round-trip because `patch_workflow_spec` restores the stored
+secret server-side (see below), not via the caller.
+
 Workflow/environment-scoped write tools pass through the
 protected-environment guardrail; workflow email-profile assignment is included.
 Global email-profile CRUD has no environment target and relies on API scope/auth.
@@ -142,8 +154,12 @@ Workflow state: `chaos://workflows/index`, `chaos://workflows/{id}/definition`,
 `chaos://workflows/{id}/runs`.
 
 Other state: `chaos://version`, `chaos://environments`, `chaos://runs/{id}`,
-`chaos://runs/{id}/logs`, `chaos://queues`, `chaos://queued-runs`, and
-`chaos://email-profiles`.
+`chaos://runs/{id}/logs`, `chaos://runs/{id}/tasks`,
+`chaos://runs/{id}/metrics`, `chaos://queues`, `chaos://queued-runs`, and
+`chaos://email-profiles`. Workflow-ID resource templates offer prefix-filtered,
+deterministic completions using MCP's native 100-value response cap and truthful
+`total` / `hasMore` metadata; template listing stays static and does not fetch
+backend records.
 Freshness is pull-based (Cursor does not document resource subscriptions).
 
 Workflow resources are safe context projections, not write round-trip payloads.
@@ -164,6 +180,11 @@ through MCP.
 `triage_failed_run(run_id)`, `summarize_workflow_health(environment)`,
 `register_workflow_for_repo(repo_path[, environment])`, and
 `safely_update_workflow(workflow_id)`.
+
+Failure triage starts with the run summary/logs, reads task or metric detail only
+when needed, and asks for explicit operator confirmation before any retry. After
+confirmation, use `rerun_workflow` with the failed source run for a faithful
+retry.
 
 ## Guardrails
 

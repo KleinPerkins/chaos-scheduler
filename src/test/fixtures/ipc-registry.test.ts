@@ -53,6 +53,8 @@ describe("ipc fixture registry", () => {
       "create_api_key",
       "list_api_keys",
       "revoke_api_key",
+      "list_api_audit_log",
+      "offboard_and_purge_secrets",
       "check_for_update",
       "apply_update",
       "get_app_update_status",

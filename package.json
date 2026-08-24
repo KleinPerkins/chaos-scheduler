@@ -1,7 +1,7 @@
 {
   "name": "app",
   "private": true,
-  "version": "1.5.0",
+  "version": "1.6.0",
   "type": "module",
   "scripts": {
     "dev": "npm run tokens && vite",
@@ -14,6 +14,10 @@
     "code-connect:check": "node scripts/check-code-connect.mjs",
     "test:code-connect": "node --test scripts/check-code-connect.test.mjs",
     "test:figma-snapshot": "node --test scripts/figma-snapshot.test.mjs",
+    "check:mcp-diff-attribute": "node scripts/check-mcp-diff-attribute.mjs",
+    "test:mcp-diff-attribute": "node --test scripts/check-mcp-diff-attribute.test.mjs",
+    "check:no-committed-data": "node scripts/check-no-committed-data.mjs",
+    "test:no-committed-data": "node --test scripts/check-no-committed-data.test.mjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc -b --noEmit",
@@ -34,52 +38,63 @@
     "prepare": "lefthook install"
   },
   "dependencies": {
-    "@fontsource/inter": "^5.2.8",
+    "@fontsource/inter": "^5.3.0",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-notification": "^2.3.3",
-    "@tauri-apps/plugin-positioner": "^2.3.2",
+    "@tauri-apps/plugin-positioner": "^2.3.3",
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@tauri-apps/plugin-sql": "^2.4.0",
     "d3-array": "^3.2.4",
     "d3-scale": "^4.0.2",
     "d3-shape": "^3.2.0",
     "d3-time": "^3.1.0",
-    "lucide-react": "^1.24.0",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "lucide-react": "^1.32.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   },
   "devDependencies": {
-    "@axe-core/playwright": "^4.10.2",
-    "@commitlint/cli": "21.2.1",
-    "@commitlint/config-conventional": "21.2.0",
+    "@axe-core/playwright": "^4.13.0",
+    "@commitlint/cli": "21.2.2",
+    "@commitlint/config-conventional": "21.2.2",
     "@eslint/js": "^10.0.1",
-    "@figma/code-connect": "^1.4.9",
-    "@playwright/test": "^1.55.0",
+    "@figma/code-connect": "^1.5.2",
+    "@playwright/test": "1.61.1",
     "@tauri-apps/cli": "^2.11.4",
     "@testing-library/dom": "^10.4.1",
-    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.0",
     "@types/d3-array": "^3.2.2",
     "@types/d3-scale": "^4.0.9",
     "@types/d3-shape": "^3.1.8",
     "@types/d3-time": "^3.0.4",
-    "@types/node": "^26.1.1",
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.3",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
     "ajv": "^8.20.0",
-    "eslint": "^10.7.0",
+    "eslint": "^10.8.1",
     "eslint-plugin-jsx-a11y": "^6.10.2",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "eslint-plugin-react-refresh": "^0.5.3",
-    "globals": "^17.7.0",
-    "jsdom": "^29.1.1",
+    "eslint-plugin-react-refresh": "^0.5.4",
+    "globals": "^17.11.0",
+    "jsdom": "^30.0.1",
     "lefthook": "2.1.10",
-    "prettier": "3.9.5",
-    "style-dictionary": "^5.5.0",
+    "prettier": "3.9.6",
+    "style-dictionary": "^5.5.1",
     "typescript": "~6.0.3",
-    "typescript-eslint": "^8.63.0",
-    "vite": "^8.1.4",
-    "vitest": "^4.1.10"
+    "typescript-eslint": "^8.67.0",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "minimatch@3": {
+      "brace-expansion": "^1.1.17"
+    },
+    "minimatch@9": {
+      "brace-expansion": "^2.1.3"
+    },
+    "minimatch@10": {
+      "brace-expansion": "^5.0.8"
+    }
   }
 }

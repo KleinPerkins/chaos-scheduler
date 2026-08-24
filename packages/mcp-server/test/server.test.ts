@@ -393,6 +393,8 @@ describe("Chaos MCP server", () => {
       [
         "chaos://runs/{id}",
         "chaos://runs/{id}/logs",
+        "chaos://runs/{id}/metrics",
+        "chaos://runs/{id}/tasks",
         "chaos://workflows/{id}",
         "chaos://workflows/{id}/definition",
         "chaos://workflows/{id}/runs",
@@ -408,6 +410,49 @@ describe("Chaos MCP server", () => {
         "triage_failed_run",
       ].sort(),
     );
+  });
+
+  it("completes workflow ids by bounded prefix without listing templates", async () => {
+    const matching = Array.from({ length: 125 }, (_, index) => ({
+      id: `wf-match-${String(index).padStart(3, "0")}`,
+      name: `Match ${index}`,
+      environment: "sandbox",
+    }));
+    const { client } = await connectedPair(
+      {},
+      {
+        ...ROUTES,
+        "GET /api/v1/workflows": {
+          workflows: [
+            ...matching.reverse(),
+            { id: "other-workflow", name: "Other", environment: "sandbox" },
+          ],
+        },
+      },
+    );
+
+    for (const uri of [
+      "chaos://workflows/{id}",
+      "chaos://workflows/{id}/definition",
+      "chaos://workflows/{id}/runs",
+    ]) {
+      const result = await client.complete({
+        ref: { type: "ref/resource", uri },
+        argument: { name: "id", value: "WF-MATCH-" },
+      });
+
+      expect(result.completion.values).toHaveLength(100);
+      expect(result.completion.total).toBe(125);
+      expect(result.completion.hasMore).toBe(true);
+      expect(result.completion.values).toEqual(
+        [...result.completion.values].sort(),
+      );
+      expect(
+        result.completion.values.every((value) =>
+          value.startsWith("wf-match-"),
+        ),
+      ).toBe(true);
+    }
   });
 
   it("get_version tool proxies the backend", async () => {
@@ -671,6 +716,36 @@ describe("Chaos MCP server", () => {
     expect(updateText).toMatch(/redacted/i);
   });
 
+  it("steers failure triage to selective detail and faithful reruns", async () => {
+    const { client } = await connectedPair();
+    const prompt = await client.getPrompt({
+      name: "triage_failed_run",
+      arguments: { run_id: "r1" },
+    });
+    const text = JSON.stringify(prompt.messages);
+
+    expect(text.indexOf("get_run`")).toBeLessThan(text.indexOf("get_run_logs"));
+    expect(text.indexOf("get_run_logs")).toBeLessThan(
+      text.indexOf("get_run_tasks"),
+    );
+    expect(text).toMatch(/get_run_tasks.*only/i);
+    expect(text).toMatch(/get_run_metrics.*only/i);
+    expect(text).toMatch(/explicit confirmation/i);
+    expect(text.indexOf("get_run_tasks")).toBeLessThan(
+      text.indexOf("explicit confirmation"),
+    );
+    expect(text.indexOf("get_run_metrics")).toBeLessThan(
+      text.indexOf("explicit confirmation"),
+    );
+    expect(text).toContain("rerun_workflow");
+    expect(text).toContain("source_run_id: r1");
+    expect(text).toMatch(/fresh.*idempotency_key/i);
+    expect(text.indexOf("explicit confirmation")).toBeLessThan(
+      text.indexOf("rerun_workflow"),
+    );
+    expect(text).not.toContain("enqueue_workflow");
+  });
+
   it("redacts nested secrets and allowlists workflow resource fields", async () => {
     const { client } = await connectedPair();
 
@@ -759,6 +834,23 @@ describe("Chaos MCP server", () => {
     const res = await client.readResource({ uri: "chaos://runs/r1" });
     const text = (res.contents[0] as { text: string }).text;
     expect(JSON.parse(text).status).toBe("success");
+  });
+
+  it("reads run task and metric resources independently", async () => {
+    const { client } = await connectedPair();
+    const tasks = await client.readResource({
+      uri: "chaos://runs/r1/tasks",
+    });
+    const metrics = await client.readResource({
+      uri: "chaos://runs/r1/metrics",
+    });
+
+    expect(
+      JSON.parse((tasks.contents[0] as { text: string }).text).tasks[0].task_id,
+    ).toBe("step1");
+    expect(
+      JSON.parse((metrics.contents[0] as { text: string }).text)[0].metric_name,
+    ).toBe("duration_ms");
   });
 
   it("get_run_logs tool proxies the backend", async () => {

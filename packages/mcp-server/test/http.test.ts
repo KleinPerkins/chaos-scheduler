@@ -1,4 +1,7 @@
 import http from "node:http";
+import type { FetchLike } from "@chaos-scheduler/sdk";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { configFromEnv } from "../src/config.js";
 import { createHttpServer, runHttp } from "../src/http.js";
@@ -18,13 +21,14 @@ afterEach(async () => {
 
 async function startServer(
   overrides: Partial<ReturnType<typeof configFromEnv>> = {},
+  backendFetch?: FetchLike,
 ): Promise<{ baseUrl: string; config: ReturnType<typeof configFromEnv> }> {
   const config = {
     ...configFromEnv({ CHAOS_SCHEDULER_API_KEY: "server.fallback" }),
     httpPort: 0,
     ...overrides,
   };
-  const server = createHttpServer(config);
+  const server = createHttpServer(config, undefined, backendFetch);
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", resolve);
   });
@@ -53,6 +57,8 @@ async function request(
       {
         method: options.method ?? "POST",
         headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
           ...(options.authorization
             ? { authorization: options.authorization }
             : {}),
@@ -219,5 +225,99 @@ describe("HTTP MCP transport guardrails", () => {
         httpPort: 0,
       }),
     ).rejects.toThrow(/allow-remote-http/);
+  });
+
+  it("runs an authenticated initialize-to-completion-to-resource-read flow", async () => {
+    const fetchedPaths: string[] = [];
+    const backendAuthorizations: Array<string | null> = [];
+    const fetch: FetchLike = async (url, init) => {
+      const path = url.replace("http://127.0.0.1:9618", "");
+      fetchedPaths.push(path);
+      backendAuthorizations.push(
+        new Headers(init?.headers).get("authorization"),
+      );
+      const body =
+        path === "/api/v1/workflows"
+          ? {
+              workflows: [
+                { id: "wf-alpha", name: "Alpha", environment: "sandbox" },
+                { id: "wf-beta", name: "Beta", environment: "sandbox" },
+              ],
+            }
+          : path === "/api/v1/runs/run-1/tasks"
+            ? {
+                tasks: [
+                  {
+                    id: "task-row-1",
+                    run_id: "run-1",
+                    task_id: "build",
+                    status: "success",
+                  },
+                ],
+                attempts: [],
+              }
+            : {};
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(body),
+      };
+    };
+    const { baseUrl } = await startServer({}, fetch);
+    const transport = new StreamableHTTPClientTransport(
+      new URL("/mcp", baseUrl),
+      {
+        requestInit: {
+          headers: { authorization: "Bearer user.scoped-key" },
+        },
+      },
+    );
+    const client = new Client({
+      name: "http-contract-test",
+      version: "0.0.0",
+    });
+    await client.connect(transport);
+
+    const { resourceTemplates } = await client.listResourceTemplates();
+    const listedTemplates = resourceTemplates.map(
+      (template) => template.uriTemplate,
+    );
+    expect(listedTemplates.sort()).toEqual(
+      [
+        "chaos://runs/{id}",
+        "chaos://runs/{id}/logs",
+        "chaos://runs/{id}/metrics",
+        "chaos://runs/{id}/tasks",
+        "chaos://workflows/{id}",
+        "chaos://workflows/{id}/definition",
+        "chaos://workflows/{id}/runs",
+      ].sort(),
+    );
+    expect(fetchedPaths).toEqual([]);
+
+    const completed = await client.complete({
+      ref: {
+        type: "ref/resource",
+        uri: "chaos://workflows/{id}/definition",
+      },
+      argument: { name: "id", value: "wf-a" },
+    });
+    expect(completed.completion.values).toEqual(["wf-alpha"]);
+    expect(fetchedPaths).toEqual(["/api/v1/workflows"]);
+
+    const resource = await client.readResource({
+      uri: "chaos://runs/run-1/tasks",
+    });
+    const resourceText = (resource.contents[0] as { text: string }).text;
+    expect(JSON.parse(resourceText).tasks[0].task_id).toBe("build");
+    expect(fetchedPaths).toEqual([
+      "/api/v1/workflows",
+      "/api/v1/runs/run-1/tasks",
+    ]);
+    expect(backendAuthorizations).toEqual([
+      "Bearer user.scoped-key",
+      "Bearer user.scoped-key",
+    ]);
+    await client.close();
   });
 });

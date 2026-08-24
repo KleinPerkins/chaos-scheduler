@@ -1,0 +1,4 @@
+# Presentation hints only: GitHub collapses linguist-generated files by default,
+# and binary suppresses local CLI text diffs. Neither is redaction; reviewers,
+# patch/compare APIs, and Git history can still expose the tracked blob.
+.cursor/mcp.json binary linguist-generated

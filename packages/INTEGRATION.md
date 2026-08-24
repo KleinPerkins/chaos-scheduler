@@ -194,9 +194,19 @@ the current backend may drop unsupported fields.
 
 The agent then uses tools like `register_workflow`, `patch_workflow_spec`,
 `update_workflow`, `enqueue_workflow`, `rerun_workflow`, `get_run`,
-`get_run_logs`, `list_queues`, `list_email_profiles` /
+`get_run_logs`, `get_run_tasks`, `get_run_metrics`, `list_queues`,
+`list_email_profiles` /
 `create_email_profile` / `set_workflow_email_profile`, and `chaos://` resources
 — the same operations as above, but conversational.
+
+Run detail is also available selectively through `chaos://runs/{id}/tasks` and
+`chaos://runs/{id}/metrics`. Workflow-ID resource templates provide
+prefix-filtered deterministic completions with MCP's native 100-value response
+cap and truthful pagination metadata, while listing templates remains a static,
+backend-free operation. For failure triage, start with the run summary/logs,
+load tasks or metrics only when they can explain the failure, and use
+`rerun_workflow` with the failed source run for a faithful retry only after
+explicit operator confirmation.
 
 MCP workflow/environment writes are **fail-closed** on protected environments
 (lookup errors block writes; `update_workflow` checks `patch.environment`;

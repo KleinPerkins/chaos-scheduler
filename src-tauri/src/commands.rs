@@ -230,6 +230,23 @@ pub fn list_api_keys(state: State<AppState>) -> Result<Vec<crate::db::ApiKeyInfo
     state.service.list_api_keys().map_err(|e| e.to_string())
 }
 
+/// Read the append-only API audit log (credential-security PR-D) through the
+/// read-only `api_audit_log_view`, newest-first. Like API-key management, the
+/// audit log is a security-admin read surfaced ONLY to the desktop owner over
+/// IPC (never REST/MCP), so it does not widen the API/agent attack surface.
+/// `limit`/`offset` are clamped on the service; defaults 100/0.
+#[tauri::command]
+pub fn list_api_audit_log(
+    state: State<AppState>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<Vec<crate::db::ApiAuditLogEntry>, String> {
+    state
+        .service
+        .list_api_audit_log(limit.unwrap_or(100), offset.unwrap_or(0))
+        .map_err(|e| e.to_string())
+}
+
 /// Check the configured updater endpoint for a newer release, routed through
 /// the shared background-check path (`update::run_check`) so the manual
 /// Settings button and the launch/6h timer are one code path (updater UX
@@ -411,6 +428,30 @@ pub fn remove_mcp_integration(
 #[tauri::command]
 pub fn revoke_api_key(state: State<AppState>, id: String) -> Result<(), String> {
     state.service.revoke_api_key(&id).map_err(|e| e.to_string())
+}
+
+/// One-action offboarding (credential-security PR-D): revoke EVERY API key,
+/// purge EVERY secret-bearing DB field (SMTP passwords + workflow-spec
+/// secrets), and clear the managed MCP integration (token/manifest + Cursor
+/// config entry). Destructive and irreversible — the UI owns the confirmation
+/// prompt; the backend does not re-prompt. Shares the single-flight MCP lock
+/// with provision/remove so it never races the managed-integration lifecycle.
+#[tauri::command]
+pub fn offboard_and_purge_secrets(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    mcp_state: State<crate::mcp::McpState>,
+) -> Result<crate::mcp::OffboardReport, String> {
+    use tauri::Manager;
+    let _guard = crate::mcp::try_lock_recovering(&mcp_state).map_err(|e| e.to_string())?;
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let config_path = crate::mcp::cursor_mcp_config_path()?;
+    let report = crate::mcp::offboard(&app_data_dir, &state.service, &config_path)?;
+    // Refresh the Integrations card so the UI reflects the now-cleared managed
+    // integration (best-effort; the purge already succeeded).
+    let status = crate::mcp::status(&app_data_dir, &state.service, &config_path);
+    crate::mcp::emit_status_changed(&app, &status);
+    Ok(report)
 }
 
 /// Mint a new HTTP API key. Returns the plaintext token exactly once.

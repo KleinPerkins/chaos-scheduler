@@ -42,11 +42,22 @@ jobs:
               - 'tsconfig.figma.json'
               - 'scripts/check-code-connect.mjs'
               - 'scripts/check-code-connect.test.mjs'
+              # A dependency bump (e.g. Dependabot moving @figma/code-connect across a
+              # major) can break `figma connect parse`; watch the manifests so that
+              # re-validates Code Connect instead of landing latently-red on main.
+              - 'package.json'
+              - 'package-lock.json'
               - '.github/workflows/ci.yml'
             visual:
               - 'src/**'
               - 'e2e/visual/**'
               - 'playwright.visual.config.ts'
+              # The visual job renders inside a pinned Playwright container, so a
+              # @playwright/test bump that drifts from the container tag breaks it
+              # (browser revision mismatch). Watch the manifests so a dep bump
+              # re-validates instead of landing latently-red on main.
+              - 'package.json'
+              - 'package-lock.json'
               - '.github/workflows/ci.yml'
             a11y:
               - 'src/**'
@@ -60,11 +71,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      - name: MCP diff presentation contract
+        run: |
+          npm run test:mcp-diff-attribute
+          npm run check:mcp-diff-attribute
       - name: Lint (eslint)
         run: npm run lint
       - name: Typecheck (tsc)
@@ -87,7 +102,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -107,7 +122,7 @@ jobs:
         working-directory: src-tauri
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -136,7 +151,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
       # sdk-ts first: mcp-server consumes it via `file:../sdk-ts` and needs its
@@ -162,7 +177,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -180,7 +195,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -208,7 +223,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -234,7 +249,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -268,7 +283,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Trust workspace (container runs as root)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
       - run: npm ci
@@ -292,11 +307,70 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
       - name: Check Rust crate vs @tauri-apps/* parity
         run: node scripts/check-tauri-versions.mjs
+
+  # Data-guard: fail if the tracked tree contains a database snapshot (scheduler.db,
+  # *.sqlite, WAL/SHM sidecars) or a secret file (.env, Apple .p12, ssh private key).
+  # The lefthook pre-commit hook is a local, bypassable first line of defense and is
+  # skipped entirely by the git-data-API single-commit PR flow this repo uses — so
+  # this required, credential-free check that scans the whole tracked tree is the
+  # authoritative gate. Path-based, high-confidence matches only.
+  data-guard:
+    name: Data-guard (no committed db/secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+      - name: Scan tracked tree for db/secret files
+        run: node scripts/check-no-committed-data.mjs
+      - name: Unit tests (data-guard rules)
+        run: node --test scripts/check-no-committed-data.test.mjs
+
+  # Secret-scan gate: scan the tracked source tree and the built frontend dist
+  # artifact for committed secrets using gitleaks (OSS, Apache-2.0, v8.18.4).
+  # Complementary to data-guard (path-based): gitleaks adds content-based pattern
+  # detection — high-entropy strings, known API-key signatures, GitHub tokens, AWS
+  # credentials, etc. Runs on ALL PRs and pushes with no path filter — this is a
+  # security gate, not a functional gate, and must cover every merge. The lefthook
+  # pre-commit hook provides a local, bypassable first line of defense; this CI job
+  # is the authoritative gate and also covers the git-data-API single-commit PR
+  # flow this repo uses (which bypasses lefthook entirely).
+  secret-scan:
+    name: Secret scan (gitleaks)
+    needs: [frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download frontend dist artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist
+      - name: Install gitleaks v8.18.4
+        run: |
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz" \
+            -o /tmp/gitleaks.tar.gz
+          echo "ba6dbb656933921c775ee5a2d1c13a91046e7952e9d919f9bac4cec61d628e7d  /tmp/gitleaks.tar.gz" | sha256sum -c
+          tar -xz -f /tmp/gitleaks.tar.gz gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      - name: Scan tracked source tree for secrets
+        run: |
+          mkdir /tmp/gitleaks-src
+          git checkout-index -a --prefix=/tmp/gitleaks-src/
+          gitleaks detect --source /tmp/gitleaks-src --no-git \
+            --config .gitleaks.toml --redact --verbose
+      - name: Scan frontend dist artifact for baked-in secrets
+        run: |
+          gitleaks detect --source dist --no-git \
+            --config .gitleaks.toml --redact --verbose
 
   # Single required status check for branch protection on `main`.
   # Configure "ci-required" as the sole required check; it fans in from every
@@ -322,6 +396,8 @@ jobs:
         code-connect,
         a11y,
         visual,
+        data-guard,
+        secret-scan,
       ]
     runs-on: ubuntu-latest
     steps:

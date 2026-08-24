@@ -7,6 +7,7 @@
  * server process key.
  */
 import http from "node:http";
+import type { FetchLike } from "@chaos-scheduler/sdk";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { ChaosMcpConfig } from "./config.js";
 import { makeClient } from "./factory.js";
@@ -123,10 +124,11 @@ function notFound(res: http.ServerResponse): void {
 export function createHttpServer(
   config: ChaosMcpConfig,
   sharedBudget?: ToolBudget,
+  backendFetch?: FetchLike,
 ): http.Server {
   const budget = sharedBudget ?? new ToolBudget(config.maxToolCalls);
   return http.createServer((req, res) => {
-    void handle(req, res, config, budget);
+    void handle(req, res, config, budget, backendFetch);
   });
 }
 
@@ -135,6 +137,7 @@ async function handle(
   res: http.ServerResponse,
   config: ChaosMcpConfig,
   sharedBudget: ToolBudget,
+  backendFetch?: FetchLike,
 ): Promise<void> {
   const url = new URL(
     req.url ?? "/",
@@ -174,7 +177,7 @@ async function handle(
 
   try {
     const parsedBody = await readBody(req, config.httpMaxBodyBytes);
-    const client = makeClient(config, apiKey);
+    const client = makeClient(config, apiKey, backendFetch);
     const server = buildServer({ client, config, budget: sharedBudget });
     // Stateless: a new transport per request (sessionIdGenerator: undefined).
     const transport = new StreamableHTTPServerTransport({
