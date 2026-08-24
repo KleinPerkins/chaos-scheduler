@@ -179,6 +179,11 @@ pub struct FakeKeyStore {
     /// the item — simulates a real Keychain hiccup where removal can't be
     /// verified, so offboarding must report removal-unproven.
     delete_unverifiable: std::sync::atomic::AtomicBool,
+    /// When set, `get` returns a backend error — simulates a locked Keychain or
+    /// a denied access prompt so provisioning can prove it treats an
+    /// unreadable Keychain as "unavailable" (leave the key intact) rather than
+    /// "absent" (revoke + remint). See issue #292 review Finding 3.
+    get_unavailable: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(test)]
@@ -190,6 +195,14 @@ impl FakeKeyStore {
     /// Force the next `delete` calls to report `Unknown` (unverifiable).
     pub fn set_delete_unverifiable(&self, on: bool) {
         self.delete_unverifiable
+            .store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Force the next `get` calls to fail with a backend error, simulating a
+    /// Keychain that is locked or whose access was denied (the item may still
+    /// be present — the read simply could not be completed).
+    pub fn set_get_unavailable(&self, on: bool) {
+        self.get_unavailable
             .store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -213,6 +226,14 @@ impl KeyStore for FakeKeyStore {
     }
 
     fn get(&self, service: &str, account: &str) -> KeyStoreResult<Option<String>> {
+        if self
+            .get_unavailable
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(KeyStoreError::Backend(
+                "simulated unreadable Keychain (locked or access denied)".to_string(),
+            ));
+        }
         Ok(self
             .items
             .lock()

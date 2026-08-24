@@ -45,8 +45,10 @@ test("FAILS a config carrying a real inline CHAOS_SCHEDULER_API_KEY", () => {
     },
   });
   const reasons = findSecretsInConfig(text);
-  assert.equal(reasons.length, 1);
-  assert.match(reasons[0], /CHAOS_SCHEDULER_API_KEY/);
+  // The always-on raw scan (Finding 4) means multiple detectors may fire for the
+  // same key; assert it is flagged rather than pinning an exact reason count.
+  assert.ok(reasons.length >= 1);
+  assert.ok(reasons.some((r) => /CHAOS_SCHEDULER_API_KEY/.test(r)));
 });
 
 test("FAILS a config carrying a real Authorization: Bearer token", () => {
@@ -68,6 +70,84 @@ test("FAILS even when the JSON is unparseable (raw fallback)", () => {
   const text = `{ "mcpServers": { "chaos-scheduler": { "env": { "CHAOS_SCHEDULER_API_KEY": "${token}" }  <<< broken ::::`;
   const reasons = findSecretsInConfig(text);
   assert.ok(reasons.some((r) => /CHAOS_SCHEDULER_API_KEY/.test(r)));
+});
+
+test("FINDING 4: FAILS a live key under an ALTERNATE env name in parseable JSON", () => {
+  // A secret-shaped key that is NOT the exact managed key. Pre-fix, the
+  // structural walk only checked `CHAOS_SCHEDULER_API_KEY` and the raw scan
+  // never ran on parseable JSON, so this slipped through.
+  const token = runtimeToken();
+  const text = JSON.stringify({
+    mcpServers: {
+      "chaos-scheduler": {
+        command: "node",
+        env: {
+          CHAOS_SCHEDULER_URL: "http://127.0.0.1:9618",
+          SCHEDULER_API_KEY: token,
+        },
+      },
+    },
+  });
+  const reasons = findSecretsInConfig(text);
+  assert.ok(
+    reasons.some((r) => /secret-shaped field/.test(r)),
+    `alternate secret key name must be flagged, got ${JSON.stringify(reasons)}`,
+  );
+});
+
+test("FINDING 4: FAILS a Bearer token in a FREE-TEXT field of parseable JSON", () => {
+  // The bearer token is in a plain `note` field, not an `authorization` header,
+  // and the JSON parses fine — so only the always-on raw scan can catch it.
+  const token = runtimeToken();
+  const text = JSON.stringify({
+    mcpServers: {
+      "chaos-scheduler": {
+        command: "node",
+        env: { CHAOS_SCHEDULER_URL: "http://127.0.0.1:9618" },
+        note: `remember to send Bearer ${token} upstream`,
+      },
+    },
+  });
+  const reasons = findSecretsInConfig(text);
+  assert.ok(
+    reasons.some((r) => /Bearer/.test(r)),
+    `bearer-in-free-text must be flagged, got ${JSON.stringify(reasons)}`,
+  );
+});
+
+test("FINDING 4: FAILS a base64-wrapped value under a secret-shaped key", () => {
+  // A base64 blob is still a non-placeholder secret; a secret-shaped key name
+  // (SESSION_TOKEN) under any prefix must be flagged.
+  const b64 = Buffer.from(`session-${runtimeToken()}`).toString("base64");
+  const text = JSON.stringify({
+    mcpServers: {
+      "chaos-scheduler": { credentials: { SESSION_TOKEN: b64 } },
+    },
+  });
+  const reasons = findSecretsInConfig(text);
+  assert.ok(
+    reasons.some((r) => /secret-shaped field/.test(r)),
+    `base64 value under a secret-shaped key must be flagged, got ${JSON.stringify(reasons)}`,
+  );
+});
+
+test("FINDING 4: non-secret managed keys and URLs still PASS", () => {
+  // The always-on raw scan and the secret-shaped-key heuristic must not
+  // false-positive on config-only managed keys with real values.
+  const text = JSON.stringify({
+    mcpServers: {
+      "chaos-scheduler": {
+        command: "/Users/x/Library/Application Support/mcp/launch-managed.sh",
+        env: {
+          CHAOS_SCHEDULER_URL: "https://scheduler.internal.example.com/api",
+          CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS: "production,staging",
+          CHAOS_SCHEDULER_MANAGED_BY: "Chaos Scheduler",
+          CHAOS_SCHEDULER_MANAGED_ID: "b1c2d3e4-managed-id",
+        },
+      },
+    },
+  });
+  assert.deepEqual(findSecretsInConfig(text), []);
 });
 
 test("PASSES placeholders and empty values (onboarding examples)", () => {

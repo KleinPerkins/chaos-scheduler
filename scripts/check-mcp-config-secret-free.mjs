@@ -51,6 +51,26 @@ function authTokenPart(value) {
   return (bearer ? bearer[1] : v).trim();
 }
 
+// Managed keys that are NOT secrets — their values are config, not credentials,
+// so a real value in these keys must never be flagged (they'd otherwise trip the
+// secret-shaped-key heuristic on `*_URL`/marker-adjacent names). Exact match.
+const NON_SECRET_MANAGED_KEYS = new Set([
+  "CHAOS_SCHEDULER_URL",
+  "CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS",
+  "CHAOS_SCHEDULER_MANAGED_BY",
+  "CHAOS_SCHEDULER_MANAGED_ID",
+]);
+
+// A key whose NAME implies it carries credential material (api key / token /
+// secret / bearer), under ANY prefix — so an alternate name like
+// `SCHEDULER_API_KEY` or `SESSION_TOKEN` is caught, not just the exact managed
+// key. `authorization` is handled by its own bearer-aware branch.
+const SECRETISH_KEY = /(?:^|_)(?:api[_-]?key|token|secret|bearer)$/i;
+
+function isSecretishKey(key) {
+  return SECRETISH_KEY.test(String(key));
+}
+
 // Recursively walk parsed JSON, collecting a human reason for each violation.
 function walk(node, reasons) {
   if (Array.isArray(node)) {
@@ -69,22 +89,51 @@ function walk(node, reasons) {
         if (token !== "" && !isPlaceholder(token)) {
           reasons.push("an Authorization/Bearer token");
         }
+      } else if (
+        isString &&
+        isSecretishKey(key) &&
+        !NON_SECRET_MANAGED_KEYS.has(key)
+      ) {
+        // A live value under a secret-shaped key name (e.g. an alternate env
+        // name that isn't the exact managed key). The KEY name is safe to print;
+        // the value never is.
+        if (value.trim() !== "" && !isPlaceholder(value)) {
+          reasons.push(`a non-empty secret-shaped field (${key})`);
+        }
       }
       walk(value, reasons);
     }
   }
 }
 
-// Raw-text fallback: catch a live secret even when the JSON won't parse (a
-// mangled file could otherwise slip a key past the structural walk).
+// Raw-text scan: catch a live secret the structural walk can miss — a mangled
+// (unparseable) file, a `Bearer …` token buried in a free-text field, or a
+// secret-shaped key under a name the walk didn't special-case. Runs on EVERY
+// file (parseable or not), so parseable JSON can't smuggle a secret past the
+// gate via a free-text field.
 function rawScan(text, reasons) {
-  const apiKey = /"CHAOS_SCHEDULER_API_KEY"\s*:\s*"([^"]*)"/g;
   let m;
+  const apiKey = /"CHAOS_SCHEDULER_API_KEY"\s*:\s*"([^"]*)"/g;
   while ((m = apiKey.exec(text)) !== null) {
     if (m[1].trim() !== "" && !isPlaceholder(m[1])) {
       reasons.push("a non-empty CHAOS_SCHEDULER_API_KEY (raw)");
     }
   }
+  // Any secret-shaped JSON key ("...API_KEY"/"...TOKEN"/"...SECRET") with a live
+  // string value, even when the surrounding JSON is broken.
+  const secretishKv =
+    /"([A-Za-z0-9_.\-]*(?:api[_-]?key|token|secret))"\s*:\s*"([^"]*)"/gi;
+  while ((m = secretishKv.exec(text)) !== null) {
+    const key = m[1];
+    if (
+      !NON_SECRET_MANAGED_KEYS.has(key) &&
+      m[2].trim() !== "" &&
+      !isPlaceholder(m[2])
+    ) {
+      reasons.push("a non-empty secret-shaped field (raw)");
+    }
+  }
+  // A `Bearer <token>` anywhere (headers, or a free-text field).
   const bearer = /Bearer\s+([A-Za-z0-9._\-]+)/g;
   while ((m = bearer.exec(text)) !== null) {
     if (!isPlaceholder(m[1]))
@@ -93,6 +142,9 @@ function rawScan(text, reasons) {
 }
 
 // Returns the deduped list of violation reasons for a single file's contents.
+// ALWAYS runs the raw scan in addition to the structural walk (Finding 4): a
+// parseable file can still hide a live secret under an alternate key name or in
+// a free-text field, which the structural walk alone would miss.
 export function findSecretsInConfig(text) {
   const reasons = [];
   let parsed;
@@ -103,9 +155,8 @@ export function findSecretsInConfig(text) {
   }
   if (parsed !== undefined) {
     walk(parsed, reasons);
-  } else {
-    rawScan(text, reasons);
   }
+  rawScan(text, reasons);
   return [...new Set(reasons)];
 }
 

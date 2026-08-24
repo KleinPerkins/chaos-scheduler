@@ -55,6 +55,14 @@ pub const MCP_PACKAGE_NAME: &str = "@chaos-scheduler/mcp-server";
 /// hand or copied from the manual snippet.
 const MANAGED_BY_MARKER: &str = "Chaos Scheduler";
 
+/// Surfaced (and stored in the manifest `last_error`) when `~/.cursor/mcp.json`
+/// already has a `chaos-scheduler` entry this app did not create. Shared between
+/// the read-only pre-check and the merge-time rollback net (issue #292 review
+/// Finding 5) so the operator sees one consistent message.
+const UNMANAGED_CONFLICT_MESSAGE: &str =
+    "~/.cursor/mcp.json already has an unmanaged \"chaos-scheduler\" entry — re-provision with \
+     force to take it over.";
+
 /// Event emitted whenever the managed integration's status may have changed
 /// (provision, remove, or the background startup re-provision hook
 /// completing) — mirrors the updater's `update-status` event/`emit_snapshot`
@@ -489,24 +497,87 @@ fn read_inline_managed_token(config_path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Three-way result of recovering the managed key's token, so provisioning can
+/// tell a genuinely-absent key (mint a new one) apart from a Keychain we simply
+/// couldn't read right now (issue #292 review Finding 3). A transient/permission
+/// read failure must NEVER be mistaken for "absent" — that would revoke+remint a
+/// still-valid key.
+enum ManagedTokenLookup {
+    /// A working token was recovered (from the Keychain, or a pre-migration
+    /// inline value) — reuse it, no remint.
+    Found(String),
+    /// Proven absent: nothing in the Keychain and nothing inline → mint a new key.
+    Absent,
+    /// The Keychain could not be read (locked / access denied / backend error).
+    /// The key may still be present, so provisioning must leave the existing key
+    /// intact and surface a needs-attention state rather than reminting.
+    Unavailable,
+}
+
 /// Recover the managed key's token so a repair/re-provision can reuse the
 /// working key instead of needlessly reminting one. Keychain-aware: once the
 /// manifest records `key_in_keychain`, the token is read from the Keychain (the
 /// launcher form stores nothing in the config); before migration it falls back
-/// to the inline config value. A `key_in_keychain` manifest whose Keychain item
-/// has been lost returns `None`, which correctly drives a re-mint.
+/// to the inline config value.
+///
+/// Finding 1(b): the Keychain is also consulted when the live managed entry is
+/// already launcher-shaped even if the manifest still says `key_in_keychain =
+/// false`. That closes a migration desync window — a crash between rewriting
+/// `mcp.json` to launcher form (inline token removed) and persisting the
+/// manifest flag would otherwise make the token look "missing" and trigger a
+/// spurious revoke+remint of a still-valid Keychain key.
+///
+/// Finding 3: a Keychain read *error* returns [`ManagedTokenLookup::Unavailable`]
+/// (never `Absent`), so provisioning does not revoke/remint on a transient
+/// failure. A genuinely absent Keychain item returns `Absent`, which correctly
+/// drives a re-mint.
 fn read_existing_managed_token(
     keystore: &dyn KeyStore,
     config_path: &Path,
     manifest: &ManagedManifest,
-) -> Option<String> {
-    if manifest.key_in_keychain {
-        return keystore
-            .get(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT)
-            .ok()
-            .flatten();
+) -> ManagedTokenLookup {
+    if manifest.key_in_keychain || managed_entry_is_launcher_shaped(config_path) {
+        return match keystore.get(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT) {
+            Ok(Some(token)) => ManagedTokenLookup::Found(token),
+            // Not in the Keychain: fall back to any inline token still present
+            // (a partially-completed migration), else proven-absent.
+            Ok(None) => match read_inline_managed_token(config_path) {
+                Some(token) => ManagedTokenLookup::Found(token),
+                None => ManagedTokenLookup::Absent,
+            },
+            // Read failure (locked / denied / backend): key may still exist.
+            Err(_) => ManagedTokenLookup::Unavailable,
+        };
     }
-    read_inline_managed_token(config_path)
+    // Pre-migration: only an inline plaintext token can recover the key.
+    match read_inline_managed_token(config_path) {
+        Some(token) => ManagedTokenLookup::Found(token),
+        None => ManagedTokenLookup::Absent,
+    }
+}
+
+/// Whether OUR managed `chaos-scheduler` Cursor entry exists and is already in
+/// launcher form (managed marker present, no inline `CHAOS_SCHEDULER_API_KEY`),
+/// i.e. a migration already rewrote the config. Used to recover the token from
+/// the Keychain when the manifest flag lags the config write (Finding 1(b)).
+fn managed_entry_is_launcher_shaped(config_path: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(config_path) else {
+        return false;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(entry) = root
+        .get("mcpServers")
+        .and_then(|servers| servers.get("chaos-scheduler"))
+    else {
+        return false;
+    };
+    is_managed_entry(entry)
+        && entry
+            .get("env")
+            .and_then(|env| env.get("CHAOS_SCHEDULER_API_KEY"))
+            .is_none()
 }
 
 /// Path of the app-owned launcher script that resolves the managed key from the
@@ -1087,25 +1158,71 @@ fn provision_with_runtime(
         ));
     }
 
+    // FINDING 5 (read-only conflict pre-check): if `~/.cursor/mcp.json` already
+    // has an UNMANAGED `chaos-scheduler` entry, bail BEFORE minting a key or
+    // writing the Keychain. Otherwise a freshly-minted live secret would be
+    // orphaned in the Keychain while Cursor keeps using the foreign entry.
+    // `force` opts into taking the entry over. This is the primary defense; a
+    // rollback net below handles a TOCTOU race where a foreign entry appears
+    // between here and the merge.
+    if !force && inspect_cursor_config(config_path).conflict {
+        manifest.last_error = Some(UNMANAGED_CONFLICT_MESSAGE.to_string());
+        manifest.enabled = true;
+        manifest.save(app_data_dir)?;
+        return Ok(status_with(
+            app_data_dir,
+            service,
+            config_path,
+            Some(runtime),
+            check_api_reachable(),
+        ));
+    }
+
+    // Snapshot the managed identity so a mid-flight rollback (Finding 5) can
+    // restore it exactly rather than guessing.
+    let prior_managed_key_id = manifest.managed_key_id.clone();
+    let prior_key_in_keychain = manifest.key_in_keychain;
+
     let managed_id = manifest
         .managed_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+    // Track whether we minted a BRAND-NEW key this attempt: only a freshly
+    // minted (otherwise-unreferenced) key is safe to revoke on rollback.
+    let mut minted_new_key = false;
     let (key_id, token) = if key_alive {
         match read_existing_managed_token(keystore, config_path, &manifest) {
-            Some(existing_token) => (manifest.managed_key_id.clone().unwrap(), existing_token),
-            None => {
+            ManagedTokenLookup::Found(existing_token) => {
+                (manifest.managed_key_id.clone().unwrap(), existing_token)
+            }
+            ManagedTokenLookup::Absent => {
                 if let Some(old_id) = &manifest.managed_key_id {
                     let _ = service.revoke_api_key(old_id);
                 }
+                minted_new_key = true;
                 mint_key(service).map_err(|e| fail_provision(&mut manifest, app_data_dir, e))?
+            }
+            ManagedTokenLookup::Unavailable => {
+                // FINDING 3: an unreadable Keychain is NOT an absent key. Leave
+                // the existing (still-live) key untouched and surface a
+                // needs-attention error rather than revoking+reminting a key
+                // that is probably fine.
+                return Err(fail_provision(
+                    &mut manifest,
+                    app_data_dir,
+                    "the managed key could not be read from the macOS Keychain (it may be locked \
+                     or access was denied); leaving the existing key in place — re-provision once \
+                     the Keychain is available"
+                        .to_string(),
+                ));
             }
         }
     } else {
         if let Some(old_id) = &manifest.managed_key_id {
             let _ = service.revoke_api_key(old_id);
         }
+        minted_new_key = true;
         mint_key(service).map_err(|e| fail_provision(&mut manifest, app_data_dir, e))?
     };
 
@@ -1177,6 +1294,22 @@ fn provision_with_runtime(
         ));
     }
 
+    // FINDING 1(a): persist `key_in_keychain = true` (and the managed IDs) NOW —
+    // after the Keychain write is PROVEN, but BEFORE `merge_mcp_config` removes
+    // any inline plaintext token. This ordering is what prevents a
+    // manifest-desync footgun: if the process dies between the config rewrite
+    // (inline token removed) and the final save, the manifest already records
+    // the Keychain as the source of truth, so the next provision recovers the
+    // token from the Keychain instead of seeing "missing" and revoking a
+    // still-valid key. The inline token remains a working backup until the merge
+    // below makes its removal durable. `provisioned_version` stays UNSET until
+    // the very end, so this intermediate state can never satisfy the
+    // `already_current` no-op check and be mistaken for "healthy".
+    manifest.managed_id = Some(managed_id.clone());
+    manifest.managed_key_id = Some(key_id.clone());
+    manifest.key_in_keychain = true;
+    manifest.save(app_data_dir)?;
+
     // The launcher resolves the key from the Keychain at spawn time and carries
     // no secret; the managed config `command` becomes this launcher's absolute
     // path (never `node`+inline-token as in the pre-#292 form).
@@ -1186,6 +1319,13 @@ fn provision_with_runtime(
         &cli_path.to_string_lossy(),
     )
     .map_err(|e| fail_provision(&mut manifest, app_data_dir, e))?;
+
+    // Whether this write completes a one-time inline→Keychain migration: an
+    // inline token is still physically in the config right now, so
+    // `merge_mcp_config`'s backup-before-write will copy those bytes (INCLUDING
+    // the token) into `mcp.json.bak`. We shred that sidecar after the merge
+    // (Finding 2) so no plaintext token is left at rest beside the config.
+    let migrating = read_inline_managed_token(config_path).is_some();
 
     let merge_outcome = merge_mcp_config(
         config_path,
@@ -1197,11 +1337,20 @@ fn provision_with_runtime(
     .map_err(|e| fail_provision(&mut manifest, app_data_dir, e))?;
 
     if merge_outcome == MergeOutcome::ConflictUnmanaged {
-        manifest.last_error = Some(
-            "~/.cursor/mcp.json already has an unmanaged \"chaos-scheduler\" entry — re-provision \
-             with force to take it over."
-                .to_string(),
-        );
+        // FINDING 5 (rollback net): the read-only pre-check above normally
+        // prevents reaching here without `force`, but a concurrent writer could
+        // insert a foreign entry between the pre-check and this merge. Ensure no
+        // freshly-minted live secret is orphaned: if we minted this attempt,
+        // delete the Keychain item we wrote and revoke the key, then restore the
+        // manifest's prior managed identity. A reused (pre-existing) key is left
+        // intact — it is still the working key and is referenced elsewhere.
+        if minted_new_key {
+            let _ = keystore.delete(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT);
+            let _ = service.revoke_api_key(&key_id);
+            manifest.managed_key_id = prior_managed_key_id.clone();
+            manifest.key_in_keychain = prior_key_in_keychain;
+        }
+        manifest.last_error = Some(UNMANAGED_CONFLICT_MESSAGE.to_string());
         manifest.enabled = true;
         manifest.save(app_data_dir)?;
         return Ok(status_with(
@@ -1213,13 +1362,17 @@ fn provision_with_runtime(
         ));
     }
 
-    // Only now — after the key is in the Keychain, the launcher is written, and
-    // `mcp.json` has actually been rewritten to the launcher form — is it safe
-    // to make `managed_key_id` the source of truth for "the live config is
-    // correct" and to record that the key now lives in the Keychain (which
-    // removes any inline plaintext and completes the one-time migration). See
-    // the comment on the staging-failure branch above for why this can't happen
-    // any earlier.
+    // FINDING 2: the merge just rewrote `mcp.json` to launcher form. If this was
+    // a migration, `mcp.json.bak` now holds the pre-migration bytes — including
+    // the inline plaintext token. Securely delete that sidecar so the token is
+    // not left at rest beside the scrubbed config.
+    if migrating {
+        crate::db::secure_remove(&config_path.with_extension("json.bak"));
+    }
+
+    // The managed identity + `key_in_keychain` were already persisted above
+    // (Finding 1(a)); re-affirm them alongside `provisioned_version` for a
+    // single consistent final manifest.
     manifest.managed_id = Some(managed_id.clone());
     manifest.managed_key_id = Some(key_id.clone());
     manifest.key_in_keychain = true;
@@ -1444,8 +1597,13 @@ fn managed_integration_fully_removed(
 /// replace it with a scrubbed, valid config carrying no managed token, so the
 /// managed `CHAOS_SCHEDULER_API_KEY` is gone even when the file couldn't be
 /// parse-merged. Foreign entries can't be preserved from unparseable JSON, but
-/// the `.bak` retains the original bytes for manual recovery. No-op (and leaves
-/// the file untouched) if the raw bytes can't even be read.
+/// the `.bak` retains the original bytes. No-op (and leaves the file untouched)
+/// if the raw bytes can't even be read.
+///
+/// NOTE: during OFFBOARD this `.bak` is subsequently shredded by
+/// [`secure_delete_config_sidecars`] (issue #292 review Finding 2) — a
+/// decommission must never leave the token at rest in a sidecar. This helper
+/// itself only backs up + replaces; the caller decides sidecar retention.
 fn backup_and_replace_unparseable_config(config_path: &Path) -> Result<(), String> {
     let Ok(raw) = std::fs::read_to_string(config_path) else {
         // Can't read it at all (e.g. permissions): nothing safe to do here;
@@ -1459,6 +1617,38 @@ fn backup_and_replace_unparseable_config(config_path: &Path) -> Result<(), Strin
     let scrubbed = serde_json::json!({ "mcpServers": {} });
     let json = serde_json::to_string_pretty(&scrubbed).map_err(|e| e.to_string())?;
     write_atomic(config_path, json.as_bytes())
+}
+
+/// FINDING 2: securely delete (overwrite-then-unlink, via the audited
+/// [`crate::db::secure_remove`]) any credential-bearing sidecars left beside
+/// `~/.cursor/mcp.json` — the `.bak` backup and any `.invalid-<ts>-<uuid>`
+/// copies produced by the backup-before-write / invalid-JSON paths. Those
+/// sidecars can hold a pre-migration inline `CHAOS_SCHEDULER_API_KEY`, so an
+/// OFFBOARD (decommission) must not retain them. Best-effort and self-limiting:
+/// only files whose name is exactly `<config>.bak` or begins with
+/// `<config>.invalid-` are touched, never the live config or unrelated files.
+///
+/// This is offboard-only on purpose: a normal remove/repair may legitimately
+/// keep a `.bak` for recovery; decommission may not.
+fn secure_delete_config_sidecars(config_path: &Path) {
+    let (Some(dir), Some(file_name)) = (
+        config_path.parent(),
+        config_path.file_name().and_then(|n| n.to_str()),
+    ) else {
+        return;
+    };
+    let bak = format!("{file_name}.bak");
+    let invalid_prefix = format!("{file_name}.invalid-");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == bak.as_str() || name.starts_with(invalid_prefix.as_str()) {
+            crate::db::secure_remove(&entry.path());
+        }
+    }
 }
 
 /// One-action offboarding (credential-security PR-D): revoke EVERY API key,
@@ -1512,6 +1702,12 @@ fn offboard_with_keystore(
     ) {
         let _ = backup_and_replace_unparseable_config(config_path);
     }
+
+    // FINDING 2: shred any token-bearing sidecars next to the config (`.bak`
+    // from a backup-before-write or the unparseable-config replace above, and
+    // any `.invalid-*` copies). A decommission must not leave the managed token
+    // at rest in plaintext beside the config.
+    secure_delete_config_sidecars(config_path);
 
     // Final post-state verification, still inside the minting gate: no live key
     // may remain. The gate makes this a no-op in practice, but sweeping any
@@ -3222,17 +3418,7 @@ exit 0
         let report =
             offboard_with_keystore(&app_data_dir, &service, &config_path, &keystore).unwrap();
 
-        // The original unparseable bytes are preserved in a `.bak` sidecar...
-        let bak = config_path.with_extension("json.bak");
-        assert!(
-            bak.exists(),
-            "the unparseable config must be backed up to a .bak sidecar"
-        );
-        assert!(
-            std::fs::read_to_string(&bak).unwrap().contains(&token),
-            "the .bak must retain the original bytes (incl. the token) for recovery"
-        );
-        // ...and the live config is now valid JSON with the token scrubbed.
+        // The live config is now valid JSON with the token scrubbed...
         let after = std::fs::read_to_string(&config_path).unwrap();
         assert!(
             serde_json::from_str::<serde_json::Value>(&after).is_ok(),
@@ -3241,6 +3427,14 @@ exit 0
         assert!(
             !after.contains(&token),
             "the managed token must be scrubbed from mcp.json even when the original was unparseable"
+        );
+        // ...and FINDING 2: the `.bak` sidecar the replace step created (which
+        // held the original token-bearing bytes) must be securely deleted, so an
+        // offboard leaves NO plaintext token at rest beside the config.
+        let bak = config_path.with_extension("json.bak");
+        assert!(
+            !bak.exists(),
+            "offboard must shred the token-bearing .bak sidecar, not retain it"
         );
         // With the token scrubbed AND the Keychain item cleared, the tri-state
         // may now legitimately report full removal.
@@ -3282,5 +3476,264 @@ exit 0
             &config_path,
             false
         ));
+    }
+
+    /// FINDING 3 fails-first: a Keychain that can't be READ (locked / access
+    /// denied) is NOT the same as an absent key. Provisioning must leave the
+    /// existing (still-live) key intact and surface a needs-attention error,
+    /// never revoke+remint. Against the pre-fix code (which mapped any Keychain
+    /// read error to `None` via `.ok().flatten()` and treated it as "absent"),
+    /// this re-provision revoked the old key and minted a new one — so the
+    /// original key id changed and the original key was revoked. This test FAILS
+    /// there and PASSES with the `Unavailable` tri-state.
+    #[test]
+    fn provision_treats_unreadable_keychain_as_unavailable_not_absent() {
+        let app_data_dir = tmpdir();
+        let config_path = tmpdir().join("mcp.json");
+        let service_dir = tmpdir();
+        let service = test_service(&service_dir);
+        let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+        let keystore = fake_keystore();
+
+        let first = provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        )
+        .expect("first provision should succeed");
+        let original_key_id = first.managed_key_id.clone().expect("a managed key id");
+        assert!(key_is_alive(&service, &original_key_id));
+
+        // Drift the provisioned version so the next call is NOT an idempotent
+        // no-op (this is exactly the startup re-provision scenario), forcing the
+        // token-recovery path to actually run.
+        let mut manifest = ManagedManifest::load(&app_data_dir);
+        manifest.provisioned_version = Some("0.0.0-stale".to_string());
+        manifest.save(&app_data_dir).unwrap();
+
+        // The Keychain can't be read this attempt (locked / access denied).
+        keystore.set_get_unavailable(true);
+
+        let result = provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        );
+
+        // The provision surfaces a needs-attention error rather than silently
+        // reminting...
+        assert!(
+            result.is_err(),
+            "an unreadable Keychain must surface as an error, not a silent remint"
+        );
+        // ...and crucially, the original key is UNTOUCHED: not revoked, not
+        // replaced. Exactly one live key remains — the original.
+        assert!(
+            key_is_alive(&service, &original_key_id),
+            "the existing key must NOT be revoked when the Keychain is merely unreadable"
+        );
+        assert_eq!(
+            service.count_live_api_keys().unwrap(),
+            1,
+            "no remint churn: exactly the original key stays live"
+        );
+        assert_eq!(
+            ManagedManifest::load(&app_data_dir)
+                .managed_key_id
+                .as_deref(),
+            Some(original_key_id.as_str()),
+            "the managed key id must be unchanged"
+        );
+        // The Keychain item itself is left in place.
+        keystore.set_get_unavailable(false);
+        assert!(keystore.contains(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT));
+    }
+
+    /// FINDING 1 fails-first: if a crash lands between rewriting `mcp.json` to
+    /// launcher form (inline token removed) and persisting `key_in_keychain =
+    /// true`, the manifest LAGS the config. A re-provision must still recover the
+    /// token from the Keychain (because the live entry is launcher-shaped) and
+    /// REUSE the still-valid key — never treat it as missing and revoke+remint.
+    /// Against the pre-fix lookup (which only consulted the Keychain when
+    /// `manifest.key_in_keychain` was already true), the lagged manifest made the
+    /// token look absent, so the key was revoked and reminted — the original id
+    /// changed and the original key died. FAILS there, PASSES with the
+    /// launcher-shaped Keychain fallback.
+    #[test]
+    fn reprovision_reuses_keychain_key_when_manifest_flag_lags_config_rewrite() {
+        let app_data_dir = tmpdir();
+        let config_path = tmpdir().join("mcp.json");
+        let service_dir = tmpdir();
+        let service = test_service(&service_dir);
+        let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+        let keystore = fake_keystore();
+
+        let first = provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        )
+        .expect("first provision should succeed");
+        let original_key_id = first.managed_key_id.clone().expect("a managed key id");
+        assert!(managed_entry_is_launcher_shaped(&config_path));
+        assert!(keystore.contains(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT));
+
+        // Simulate the desync crash: the config is already launcher-shaped and
+        // the key is in the Keychain, but the manifest flag never got persisted.
+        // Also drift the version so the re-provision isn't a no-op.
+        let mut manifest = ManagedManifest::load(&app_data_dir);
+        assert!(
+            manifest.key_in_keychain,
+            "sanity: normally set after migration"
+        );
+        manifest.key_in_keychain = false;
+        manifest.provisioned_version = Some("0.0.0-stale".to_string());
+        manifest.save(&app_data_dir).unwrap();
+
+        let second = provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        )
+        .expect("re-provision should succeed by reusing the Keychain key");
+
+        assert_eq!(
+            second.managed_key_id.as_deref(),
+            Some(original_key_id.as_str()),
+            "the still-valid Keychain key must be REUSED, not reminted"
+        );
+        assert!(
+            key_is_alive(&service, &original_key_id),
+            "the original key must remain live (no spurious revoke)"
+        );
+        assert_eq!(
+            service.count_live_api_keys().unwrap(),
+            1,
+            "no remint churn from a lagged manifest flag"
+        );
+        // Recovery also re-heals the manifest flag.
+        assert!(ManagedManifest::load(&app_data_dir).key_in_keychain);
+    }
+
+    /// FINDING 5 fails-first: when `~/.cursor/mcp.json` already holds an
+    /// UNMANAGED `chaos-scheduler` entry, a non-force provision must NOT mint a
+    /// key or write the Keychain — otherwise a freshly-minted live secret is
+    /// orphaned in the Keychain while Cursor keeps using the foreign entry.
+    /// Against the pre-fix code (mint + Keychain write happened before the merge,
+    /// and a `ConflictUnmanaged` merge returned Ok with no rollback), a live key
+    /// was minted and left in the Keychain. This test FAILS there (a live key +
+    /// a Keychain item exist) and PASSES with the read-only conflict pre-check.
+    #[test]
+    fn provision_does_not_orphan_a_minted_key_on_unmanaged_conflict() {
+        let app_data_dir = tmpdir();
+        let config_path = tmpdir().join("mcp.json");
+        let service_dir = tmpdir();
+        let service = test_service(&service_dir);
+        let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+        let keystore = fake_keystore();
+
+        // A pre-existing UNMANAGED chaos-scheduler entry (the user's own).
+        let foreign = serde_json::json!({
+            "mcpServers": {
+                "chaos-scheduler": { "command": "npx", "args": ["-y", "foreign"], "env": {} }
+            }
+        });
+        std::fs::write(&config_path, foreign.to_string()).unwrap();
+
+        let status = provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        )
+        .expect("a conflict is reported as status, not an error");
+
+        // No live key was minted, and nothing was written to the Keychain — so
+        // there is no orphaned live secret.
+        assert_eq!(
+            service.count_live_api_keys().unwrap(),
+            0,
+            "no key may be minted when an unmanaged entry blocks provisioning"
+        );
+        assert!(
+            !keystore.contains(MANAGED_MCP_KEYCHAIN_SERVICE, MANAGED_MCP_KEYCHAIN_ACCOUNT),
+            "no Keychain item may be written on an unmanaged conflict"
+        );
+        assert!(
+            ManagedManifest::load(&app_data_dir)
+                .managed_key_id
+                .is_none(),
+            "no managed key id may be recorded on conflict"
+        );
+        // The foreign entry is left untouched, and the conflict is surfaced.
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(after, foreign, "the unmanaged entry must be left untouched");
+        assert!(!status.registered_in_cursor && !status.matches);
+    }
+
+    /// FINDING 2 fails-first: an OFFBOARD (decommission) must not leave the
+    /// managed token at rest in a plaintext sidecar. Token-bearing `.bak` and
+    /// `.invalid-*` copies beside `~/.cursor/mcp.json` (produced by the
+    /// backup-before-write / invalid-JSON paths) must be securely deleted.
+    /// Against the pre-fix offboard (which never touched sidecars), the copies
+    /// survive with the token intact — so this FAILS before and PASSES after.
+    #[test]
+    fn offboard_secure_deletes_token_bearing_config_sidecars() {
+        let app_data_dir = tmpdir();
+        let config_path = tmpdir().join("mcp.json");
+        let service_dir = tmpdir();
+        let service = test_service(&service_dir);
+        let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+        let keystore = fake_keystore();
+
+        provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        )
+        .unwrap();
+
+        // Two token-bearing sidecars, exactly as the backup-before-write and
+        // invalid-JSON backup paths would leave for a pre-migration config. The
+        // token value is derived from runtime integers so no literal secret
+        // lands in the test source.
+        let token = runtime_secret();
+        let sidecar_body = format!("{{ \"env\": {{ \"CHAOS_SCHEDULER_API_KEY\": \"{token}\" }} }}");
+        let bak = config_path.with_extension("json.bak");
+        let invalid = config_path.with_extension(format!(
+            "json.invalid-20240101T000000-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&bak, &sidecar_body).unwrap();
+        std::fs::write(&invalid, &sidecar_body).unwrap();
+
+        offboard_with_keystore(&app_data_dir, &service, &config_path, &keystore).unwrap();
+
+        assert!(
+            !invalid.exists(),
+            "the token-bearing .invalid-* sidecar must be securely deleted on offboard"
+        );
+        assert!(
+            !bak.exists(),
+            "the token-bearing .bak sidecar must be securely deleted on offboard"
+        );
     }
 }
