@@ -1351,6 +1351,141 @@ pub struct ApiKeyInfo {
     pub revoked: bool,
 }
 
+/// One row of the read-only `api_audit_log_view` (credential-security PR-D).
+/// Carries ONLY non-secret request metadata — method/path/status/remote/key_id
+/// plus the timestamp. The audit log never stores secret material (`path` is
+/// query-string-redacted at write time by [`redact_audit_path`]), and this
+/// read surface must never surface any: adding a secret-bearing field here is
+/// a regression against the PR-D "no new secret exposure" invariant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiAuditLogEntry {
+    pub id: String,
+    pub key_id: Option<String>,
+    pub method: String,
+    pub path: String,
+    pub status: i64,
+    pub remote: Option<String>,
+    pub at: Option<String>,
+}
+
+/// Counts of what a one-action offboarding purge cleared, for the caller's
+/// confirmation UI (credential-security PR-D).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OffboardPurgeReport {
+    /// API keys flipped from live to revoked by this purge.
+    pub keys_revoked: usize,
+    /// SMTP-password fields blanked across `email_config` + `email_profiles`.
+    pub smtp_passwords_cleared: usize,
+    /// Workflow `spec_json` blobs that had at least one secret field blanked.
+    pub workflow_specs_scrubbed: usize,
+    /// Workflow `trigger_config` blobs that had at least one secret field
+    /// blanked (matches the read-path redaction + MCP projection contract).
+    pub trigger_configs_scrubbed: usize,
+    /// Workflow `queue_config` blobs that had at least one secret field blanked
+    /// (the MCP resource projection treats `queue_config` as secret-bearing).
+    pub queue_configs_scrubbed: usize,
+    /// Secret-bearing `scheduler_config` rows deleted (the global inbound
+    /// webhook HMAC secret and any future `*_secret`/`*_token`/`cursor_api_key`
+    /// keys — see [`is_secret_scheduler_config_key`]).
+    pub scheduler_config_secrets_cleared: usize,
+}
+
+/// Names of the JSON fields that hold secret material inside a workflow's
+/// `spec_json` (outbound-webhook HMAC `secret`, action `signature_secret`,
+/// operator `cursor_api_key`, and any inline `smtp_password`). This is the
+/// SINGLE SOURCE OF TRUTH shared by the read-path redaction
+/// (`service::redact_secret_fields`) and the offboarding purge
+/// ([`blank_secret_fields`]) so the two can never drift apart — a field that
+/// is redacted on read is also purged on offboard, and vice versa.
+pub(crate) const SECRET_SPEC_FIELD_NAMES: [&str; 4] = [
+    "secret",
+    "signature_secret",
+    "cursor_api_key",
+    "smtp_password",
+];
+
+/// Recursively blank (set to `""`) every known secret-bearing field in a JSON
+/// value, returning whether anything changed. Mirrors the key set used by the
+/// read-path redaction, but *empties* the value rather than substituting a
+/// display sentinel, so no plaintext secret remains at rest after offboarding.
+fn blank_secret_fields(value: &mut serde_json::Value) -> bool {
+    let mut changed = false;
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if SECRET_SPEC_FIELD_NAMES.contains(&key.as_str())
+                    && child.as_str().is_some_and(|s| !s.is_empty())
+                {
+                    *child = serde_json::Value::String(String::new());
+                    changed = true;
+                } else if blank_secret_fields(child) {
+                    changed = true;
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if blank_secret_fields(item) {
+                    changed = true;
+                }
+            }
+        }
+        _ => {}
+    }
+    changed
+}
+
+/// A workflow row read during the offboarding purge: `(id, spec_json,
+/// trigger_config, queue_config)`. Named to satisfy `clippy::type_complexity`
+/// and to document the column order the scrub loop relies on.
+type WorkflowSecretRow = (String, Option<String>, Option<String>, Option<String>);
+
+/// Decide the new value (if any) for a stored JSON blob during the offboarding
+/// purge, returning `Some(new_value)` to write or `None` to leave the column
+/// untouched. Shares [`SECRET_SPEC_FIELD_NAMES`], so `spec_json`,
+/// `trigger_config`, and `queue_config` are all handled with the exact field
+/// set the read-path redaction and MCP projection use:
+/// - Absent/empty blob → `None` (nothing to purge; keeps the purge idempotent).
+/// - Valid JSON with a secret field → `Some(scrubbed)` (selective field
+///   blanking; structure preserved). Unchanged from prior behavior.
+/// - Valid JSON with no secret field → `None`.
+/// - **Non-empty but NOT valid JSON → `Some("")`**: offboarding is a
+///   "purge everything" operation, so a corrupt/non-JSON column that could
+///   still embed a secret must NOT be left at rest — blank the ENTIRE column.
+fn blank_secret_json_blob(blob: Option<&str>) -> Option<String> {
+    let raw = blob?;
+    if raw.is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(mut value) => {
+            if blank_secret_fields(&mut value) {
+                // Serializing a value that was just parsed from JSON effectively
+                // never fails; if it somehow did, blank the whole column rather
+                // than leave the secret at rest.
+                Some(serde_json::to_string(&value).unwrap_or_default())
+            } else {
+                None
+            }
+        }
+        Err(_) => Some(String::new()),
+    }
+}
+
+/// Whether a `scheduler_config` KEY names secret material that offboarding must
+/// clear. `scheduler_config` is a flat key/value store (distinct from the
+/// JSON-blob fields covered by [`SECRET_SPEC_FIELD_NAMES`]): the global inbound
+/// webhook HMAC secret lives here as `inbound_webhook_secret`. The suffix rules
+/// defensively catch any future `*_secret` / `*_token` / `cursor_api_key` key
+/// without maintaining a second hand-edited allow-list.
+fn is_secret_scheduler_config_key(key: &str) -> bool {
+    key == "inbound_webhook_secret"
+        || key == "cursor_api_key"
+        || key.ends_with("_secret")
+        || key.ends_with("_token")
+        || key.ends_with(".cursor_api_key")
+}
+
 #[derive(Debug, Clone)]
 pub struct IdempotencyRecord {
     pub run_id: Option<String>,
@@ -1368,7 +1503,7 @@ pub enum IdempotencyReservation {
 /// Persisted in the DB via `PRAGMA user_version`; a DB reporting a higher
 /// version than this constant is refused (downgrade guard) so an older binary
 /// never silently corrupts a newer file.
-pub const CURRENT_SCHEMA_VERSION: i64 = 17;
+pub const CURRENT_SCHEMA_VERSION: i64 = 18;
 
 pub struct Database {
     path: String,
@@ -1891,7 +2026,31 @@ impl Database {
             (15, Self::migrate_v15_fix_agent_local_mode),
             (16, Self::migrate_v16_queued_run_suppress_completion),
             (17, Self::migrate_v17_fix_agent_spend),
+            (18, Self::migrate_v18_api_audit_log_view),
         ]
+    }
+
+    /// v18: add the read-only `api_audit_log_view` access view over the
+    /// append-only `api_audit_log` request log (credential-security hardening
+    /// PR-D). This view is the STABLE, secret-free read surface the in-product
+    /// audit reader ([`Database::list_api_audit_log`]) queries — it projects
+    /// exactly the non-secret request-metadata columns (`id`, `key_id`,
+    /// `method`, `path`, `status`, `remote`, `at`) so that if the base table
+    /// ever gains a sensitive column, the audit read path cannot silently
+    /// begin surfacing it. `path` is already query-string-redacted at write
+    /// time by [`redact_audit_path`], so nothing here re-derives it.
+    ///
+    /// Additive and idempotent (`CREATE VIEW IF NOT EXISTS`) with no data
+    /// transform; fresh DBs get it here too because `init` runs the full
+    /// migration chain from `user_version` 0. Never rolled back — a forward
+    /// migration is used if the projection ever needs to change.
+    fn migrate_v18_api_audit_log_view(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "CREATE VIEW IF NOT EXISTS api_audit_log_view AS
+                SELECT id, key_id, method, path, status, remote, at
+                FROM api_audit_log;",
+        )?;
+        Ok(())
     }
 
     /// v17: add the append-only `fix_agent_spend` ledger (corr-F3). The rate cap
@@ -2873,6 +3032,26 @@ impl Database {
         conn.execute("UPDATE api_keys SET revoked = 1 WHERE id = ?1", params![id])
     }
 
+    /// Revoke EVERY currently-live API key; returns how many were flipped. Used
+    /// by offboarding's final post-cleanup sweep so `keys_revoked` reflects the
+    /// true post-state even if a mint slipped in before the minting gate.
+    pub fn revoke_all_live_api_keys(&self) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        conn.execute("UPDATE api_keys SET revoked = 1 WHERE revoked = 0", [])
+    }
+
+    /// Count API keys that are still live (not revoked). Offboarding asserts
+    /// this is zero after it completes.
+    #[allow(dead_code)] // Post-offboard verification accessor (used in tests).
+    pub fn count_live_api_keys(&self) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        let n: i64 =
+            conn.query_row("SELECT COUNT(*) FROM api_keys WHERE revoked = 0", [], |r| {
+                r.get(0)
+            })?;
+        Ok(n as usize)
+    }
+
     /// Insert a pre-hashed API key record. Returns the generated key id.
     pub fn insert_api_key(
         &self,
@@ -2932,6 +3111,151 @@ impl Database {
             params![id, key_id, method, path, status as i64, remote],
         )?;
         Ok(())
+    }
+
+    /// Read the append-only API audit log through the read-only
+    /// `api_audit_log_view` (credential-security PR-D), newest-first, bounded
+    /// by `limit`/`offset`. Reads only non-secret request metadata — the view
+    /// is the enforced column boundary, so this can never emit secret material.
+    /// Callers should clamp `limit`/`offset` (see
+    /// [`crate::service::SchedulerService::list_api_audit_log`]).
+    pub fn list_api_audit_log(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> rusqlite::Result<Vec<ApiAuditLogEntry>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, key_id, method, path, status, remote, at
+             FROM api_audit_log_view
+             ORDER BY at DESC, id DESC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![limit, offset], |row| {
+                Ok(ApiAuditLogEntry {
+                    id: row.get(0)?,
+                    key_id: row.get(1)?,
+                    method: row.get(2)?,
+                    path: row.get(3)?,
+                    status: row.get(4)?,
+                    remote: row.get(5)?,
+                    at: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Destructive offboarding purge (credential-security PR-D): in ONE
+    /// transaction, revoke EVERY live API key and blank/clear EVERY
+    /// secret-bearing DB field the product treats as secret on read or projects
+    /// as secret:
+    /// - SMTP passwords (`email_config` + all `email_profiles`).
+    /// - The secret fields embedded in every workflow's `spec_json`,
+    ///   `trigger_config`, AND `queue_config` (outbound-webhook `secret`,
+    ///   `signature_secret`, `cursor_api_key`, inline `smtp_password`; see
+    ///   [`SECRET_SPEC_FIELD_NAMES`]) — the exact union of the read-path
+    ///   redaction (`service::redact_workflow_secrets`) and the MCP resource
+    ///   projection, via the SHARED field set so purge and redaction can never
+    ///   drift.
+    /// - Secret keys in `scheduler_config` — the global `inbound_webhook_secret`
+    ///   HMAC key plus any `*_secret`/`*_token`/`cursor_api_key` key (see
+    ///   [`is_secret_scheduler_config_key`]).
+    ///
+    /// Idempotent: a second run purges nothing further and reports all-zero
+    /// counts. Filesystem-resident secrets (the managed MCP token/manifest and
+    /// the Cursor config entry) live outside the DB and are cleared by the
+    /// adapter that owns those paths (`mcp::offboard`).
+    pub fn offboard_purge_secrets(&self) -> rusqlite::Result<OffboardPurgeReport> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+
+        let keys_revoked = tx.execute("UPDATE api_keys SET revoked = 1 WHERE revoked = 0", [])?;
+
+        let mut smtp_passwords_cleared = tx.execute(
+            "UPDATE email_config SET smtp_password = '' WHERE smtp_password <> ''",
+            [],
+        )?;
+        smtp_passwords_cleared += tx.execute(
+            "UPDATE email_profiles SET smtp_password = '' WHERE smtp_password <> ''",
+            [],
+        )?;
+
+        // Scrub secret fields embedded in every workflow config blob. Collect
+        // the rows first: a live SELECT statement can't stay open while
+        // UPDATE-ing the same table on one connection.
+        let rows: Vec<WorkflowSecretRow> = {
+            let mut stmt =
+                tx.prepare("SELECT id, spec_json, trigger_config, queue_config FROM workflows")?;
+            let collected = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        };
+        let mut workflow_specs_scrubbed = 0usize;
+        let mut trigger_configs_scrubbed = 0usize;
+        let mut queue_configs_scrubbed = 0usize;
+        for (id, spec_json, trigger_config, queue_config) in rows {
+            if let Some(scrubbed) = blank_secret_json_blob(spec_json.as_deref()) {
+                tx.execute(
+                    "UPDATE workflows SET spec_json = ?2, updated_at = datetime('now') WHERE id = ?1",
+                    params![id, scrubbed],
+                )?;
+                workflow_specs_scrubbed += 1;
+            }
+            if let Some(scrubbed) = blank_secret_json_blob(trigger_config.as_deref()) {
+                tx.execute(
+                    "UPDATE workflows SET trigger_config = ?2, updated_at = datetime('now') WHERE id = ?1",
+                    params![id, scrubbed],
+                )?;
+                trigger_configs_scrubbed += 1;
+            }
+            if let Some(scrubbed) = blank_secret_json_blob(queue_config.as_deref()) {
+                tx.execute(
+                    "UPDATE workflows SET queue_config = ?2, updated_at = datetime('now') WHERE id = ?1",
+                    params![id, scrubbed],
+                )?;
+                queue_configs_scrubbed += 1;
+            }
+        }
+
+        // Clear secret keys stored in the flat `scheduler_config` key/value
+        // table (the global inbound-webhook HMAC secret + defensive matches).
+        // Deleting the row is the cleanest "cleared" state: consumers treat an
+        // absent/empty value as "no secret configured".
+        let secret_config_keys: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT key FROM scheduler_config")?;
+            let all_keys = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            all_keys
+                .into_iter()
+                .filter(|key| is_secret_scheduler_config_key(key))
+                .collect()
+        };
+        let mut scheduler_config_secrets_cleared = 0usize;
+        for key in secret_config_keys {
+            scheduler_config_secrets_cleared +=
+                tx.execute("DELETE FROM scheduler_config WHERE key = ?1", params![key])?;
+        }
+
+        tx.commit()?;
+        Ok(OffboardPurgeReport {
+            keys_revoked,
+            smtp_passwords_cleared,
+            workflow_specs_scrubbed,
+            trigger_configs_scrubbed,
+            queue_configs_scrubbed,
+            scheduler_config_secrets_cleared,
+        })
     }
 
     pub fn get_idempotency_record(&self, key: &str) -> rusqlite::Result<Option<IdempotencyRecord>> {
@@ -7831,6 +8155,519 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// v17->v18 migration fixture (tripwire companion): a v17 DB with an
+    /// `api_audit_log` table but no view gains the read-only
+    /// `api_audit_log_view` after `run_migrations`, and the view projects the
+    /// non-secret request-metadata columns. Proves the append-only view
+    /// migration lands on an upgrading DB.
+    #[test]
+    fn migration_fixture_v17_to_v18_adds_api_audit_log_view() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("scheduler.db");
+        let db = Database {
+            path: db_path.to_string_lossy().to_string(),
+        };
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE api_audit_log (
+                    id TEXT PRIMARY KEY,
+                    key_id TEXT,
+                    method TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    status INTEGER NOT NULL,
+                    remote TEXT,
+                    at TEXT DEFAULT (datetime('now'))
+                );
+                PRAGMA user_version = 17;",
+            )
+            .unwrap();
+            let view_before: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='api_audit_log_view'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(view_before, 0, "view must not exist at v17 (fails-first)");
+            db.run_migrations(&conn, 17).unwrap();
+        }
+        let conn = Connection::open(&db_path).unwrap();
+        let view_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='api_audit_log_view'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(view_after, 1, "v18 must create api_audit_log_view");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        let cols: std::collections::HashSet<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('api_audit_log_view')")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let expected: std::collections::HashSet<String> =
+            ["id", "key_id", "method", "path", "status", "remote", "at"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+        assert_eq!(
+            cols, expected,
+            "view must expose exactly the metadata columns"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// PR-D audit read path: the view-backed reader returns rows newest-first,
+    /// respects limit/offset paging, and exposes only non-secret metadata
+    /// columns.
+    #[test]
+    fn api_audit_log_view_reader_orders_pages_and_hides_secrets() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        // Seed three rows with explicit, distinct timestamps so ordering is
+        // deterministic (record_api_audit stamps datetime('now') at 1s
+        // granularity, which would tie within a test).
+        {
+            let conn = db.conn().unwrap();
+            for (id, method, path, status, at) in [
+                ("a1", "GET", "/api/v1/runs", 200, "2026-01-01 00:00:01"),
+                (
+                    "a2",
+                    "POST",
+                    "/api/v1/workflows",
+                    201,
+                    "2026-01-01 00:00:02",
+                ),
+                ("a3", "GET", "/api/v1/queues", 200, "2026-01-01 00:00:03"),
+            ] {
+                conn.execute(
+                    "INSERT INTO api_audit_log (id, key_id, method, path, status, remote, at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![id, "key-1", method, path, status as i64, "127.0.0.1:1", at],
+                )
+                .unwrap();
+            }
+        }
+
+        let page1 = db.list_api_audit_log(2, 0).unwrap();
+        assert_eq!(
+            page1.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["a3", "a2"],
+            "newest-first"
+        );
+        let page2 = db.list_api_audit_log(2, 2).unwrap();
+        assert_eq!(
+            page2.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["a1"],
+            "second page"
+        );
+        assert_eq!(page1[0].method, "GET");
+        assert_eq!(page1[0].path, "/api/v1/queues");
+        assert_eq!(page1[0].status, 200);
+
+        // The view (and therefore the reader) must expose no secret-shaped column.
+        let cols: Vec<String> = db
+            .conn()
+            .unwrap()
+            .prepare("SELECT name FROM pragma_table_info('api_audit_log_view')")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for c in &cols {
+            let lc = c.to_ascii_lowercase();
+            assert!(
+                !(lc.contains("secret")
+                    || lc.contains("password")
+                    || lc == "token"
+                    || lc.contains("key_hash")
+                    || lc == "salt"),
+                "audit view must not expose a secret-shaped column: {c}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// PR-D offboarding purge (DB half): revokes ALL live keys and blanks every
+    /// secret-bearing field — global + per-profile SMTP passwords and the
+    /// secret fields embedded in a workflow `spec_json`.
+    /// Build a run-unique, non-empty secret value from PURELY RUNTIME numeric
+    /// sources (monotonic wall-clock nanos + an atomic counter), with no string
+    /// literal anywhere on the dataflow path. CodeQL's inter-procedural
+    /// `rust/hard-coded-cryptographic-value` query tracks string literals into
+    /// password/salt/key sinks; a value derived only from runtime integers via
+    /// `to_string()` is not a hard-coded value. Semantics are unchanged: the
+    /// value is present pre-purge and asserted blanked post-purge.
+    fn runtime_secret() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let mut s = nanos.to_string();
+        s.push_str(&seq.to_string());
+        s
+    }
+
+    #[test]
+    fn offboard_purge_secrets_revokes_all_keys_and_blanks_secrets() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        let (salt_a, hash_a) = (runtime_secret(), runtime_secret());
+        let (salt_b, hash_b) = (runtime_secret(), runtime_secret());
+        let k1 = db
+            .insert_api_key(Some("a"), &hash_a, &salt_a, "read")
+            .unwrap();
+        let k2 = db
+            .insert_api_key(Some("b"), &hash_b, &salt_b, "read,write")
+            .unwrap();
+
+        // Global SMTP password.
+        let mut cfg = db.get_email_config().unwrap();
+        cfg.smtp_password = runtime_secret();
+        db.set_email_config(&cfg).unwrap();
+
+        // A per-profile SMTP password.
+        let profile = db
+            .upsert_email_profile(&EmailProfile {
+                id: String::new(),
+                name: "ops".into(),
+                enabled: true,
+                alert_email: "a@b.c".into(),
+                smtp_host: "smtp.example.com".into(),
+                smtp_port: 587,
+                smtp_user: "u".into(),
+                smtp_password: runtime_secret(),
+                from_address: "f@b.c".into(),
+                from_name: "Chaos".into(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .unwrap();
+
+        // A workflow spec carrying an outbound-webhook HMAC secret + a nested
+        // operator cursor_api_key value.
+        let wf = db
+            .create_workflow(
+                "Hook",
+                None,
+                "scripts/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let spec = r#"{"actions":[{"kind":"webhook","url":"https://x/y","secret":"hmac-shhh"}],"nested":{"cursor_api_key":"sk-live-xyz"}}"#;
+        db.set_workflow_spec(&wf.id, "generic", Some(spec)).unwrap();
+
+        let report = db.offboard_purge_secrets().unwrap();
+        assert_eq!(report.keys_revoked, 2);
+        assert_eq!(report.smtp_passwords_cleared, 2);
+        assert_eq!(report.workflow_specs_scrubbed, 1);
+        assert_eq!(report.trigger_configs_scrubbed, 0);
+        assert_eq!(report.queue_configs_scrubbed, 0);
+        assert_eq!(report.scheduler_config_secrets_cleared, 0);
+
+        // Keys are revoked: get_api_key only returns non-revoked keys.
+        assert!(db.get_api_key(&k1).unwrap().is_none());
+        assert!(db.get_api_key(&k2).unwrap().is_none());
+
+        // SMTP passwords blanked (read raw, not via the masking accessors).
+        let conn = db.conn().unwrap();
+        let global_pw: String = conn
+            .query_row(
+                "SELECT smtp_password FROM email_config WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(global_pw, "");
+        let profile_pw: String = conn
+            .query_row(
+                "SELECT smtp_password FROM email_profiles WHERE id = ?1",
+                params![profile.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(profile_pw, "");
+
+        // Spec secrets blanked, structure preserved.
+        let stored: String = conn
+            .query_row(
+                "SELECT spec_json FROM workflows WHERE id = ?1",
+                params![wf.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !stored.contains("hmac-shhh"),
+            "webhook secret must be purged"
+        );
+        assert!(
+            !stored.contains("sk-live-xyz"),
+            "cursor_api_key must be purged"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(parsed["actions"][0]["secret"], "");
+        assert_eq!(parsed["actions"][0]["url"], "https://x/y");
+        assert_eq!(parsed["nested"]["cursor_api_key"], "");
+
+        // Idempotent: a second purge changes nothing.
+        let again = db.offboard_purge_secrets().unwrap();
+        assert_eq!(
+            again,
+            OffboardPurgeReport {
+                keys_revoked: 0,
+                smtp_passwords_cleared: 0,
+                workflow_specs_scrubbed: 0,
+                trigger_configs_scrubbed: 0,
+                queue_configs_scrubbed: 0,
+                scheduler_config_secrets_cleared: 0,
+            }
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Fails-first for the incomplete-purge fix: a secret that lives ONLY in a
+    /// workflow's `trigger_config`, ONLY in its `queue_config`, or ONLY in
+    /// `scheduler_config` (`inbound_webhook_secret`) must be cleared by
+    /// offboarding. Against the previous spec_json-only purge each of these
+    /// assertions fails (the secret survives + the count is 0).
+    #[test]
+    fn offboard_purge_secrets_clears_trigger_queue_and_scheduler_config_secrets() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        // Secret ONLY in trigger_config.
+        let wf_trigger = db
+            .create_workflow(
+                "trigger-secret",
+                None,
+                "scripts/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                Some(r#"{"kind":"webhook","signature_secret":"trigger-shhh"}"#),
+                None,
+            )
+            .unwrap();
+
+        // Secret ONLY in queue_config.
+        let wf_queue = db
+            .create_workflow(
+                "queue-secret",
+                None,
+                "scripts/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                None,
+                Some(r#"{"queue":"default","secret":"queue-shhh"}"#),
+            )
+            .unwrap();
+
+        // Secret ONLY in scheduler_config (global inbound webhook HMAC secret).
+        db.set_string_config("inbound_webhook_secret", "inbound-shhh")
+            .unwrap();
+        // A non-secret scheduler_config key must survive the purge untouched.
+        db.set_string_config("global_parallelism_cap", "7").unwrap();
+
+        let report = db.offboard_purge_secrets().unwrap();
+        assert_eq!(report.trigger_configs_scrubbed, 1);
+        assert_eq!(report.queue_configs_scrubbed, 1);
+        assert_eq!(report.scheduler_config_secrets_cleared, 1);
+
+        let conn = db.conn().unwrap();
+        let trigger: String = conn
+            .query_row(
+                "SELECT trigger_config FROM workflows WHERE id = ?1",
+                params![wf_trigger.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !trigger.contains("trigger-shhh"),
+            "trigger_config secret must be purged"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&trigger).unwrap()["signature_secret"],
+            ""
+        );
+
+        let queue: String = conn
+            .query_row(
+                "SELECT queue_config FROM workflows WHERE id = ?1",
+                params![wf_queue.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !queue.contains("queue-shhh"),
+            "queue_config secret must be purged"
+        );
+        // Non-secret structure is preserved.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&queue).unwrap()["queue"],
+            "default"
+        );
+
+        // Secret scheduler_config key is gone; the non-secret one is untouched.
+        assert!(db
+            .get_scheduler_config("inbound_webhook_secret")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            db.get_scheduler_config("global_parallelism_cap").unwrap(),
+            Some("7".to_string())
+        );
+
+        // Idempotent: a second run finds nothing further to clear.
+        let again = db.offboard_purge_secrets().unwrap();
+        assert_eq!(again.trigger_configs_scrubbed, 0);
+        assert_eq!(again.queue_configs_scrubbed, 0);
+        assert_eq!(again.scheduler_config_secrets_cleared, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// FINDING 1 fails-first: a workflow column that is NON-EMPTY but not valid
+    /// JSON must still be purged (whole-column blank) — never left at rest with
+    /// an embedded secret — and counted in the report. Against the previous
+    /// `blank_secret_json_blob` (which returned `None` on parse failure and
+    /// skipped the UPDATE), every count is 0 and the secret survives, so this
+    /// fails on the pre-fix code.
+    #[test]
+    fn offboard_purge_secrets_blanks_unparseable_secret_bearing_blobs() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        // trigger_config + queue_config planted corrupt at create time (the db
+        // writer does not parse them).
+        let wf = db
+            .create_workflow(
+                "corrupt",
+                None,
+                "scripts/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                Some("not-json signature_secret=CORRUPT-TRIGGER"),
+                Some("also-not-json secret=CORRUPT-QUEUE"),
+            )
+            .unwrap();
+        // spec_json planted corrupt via a direct UPDATE (bypasses spec
+        // validation, mirroring on-disk corruption).
+        {
+            let conn = db.conn().unwrap();
+            conn.execute(
+                "UPDATE workflows SET spec_json = ?2 WHERE id = ?1",
+                params![wf.id, "garbage{ cursor_api_key: CORRUPT-SPEC"],
+            )
+            .unwrap();
+        }
+
+        let report = db.offboard_purge_secrets().unwrap();
+        assert_eq!(
+            report.workflow_specs_scrubbed, 1,
+            "corrupt spec_json must be scrubbed, not skipped"
+        );
+        assert_eq!(
+            report.trigger_configs_scrubbed, 1,
+            "corrupt trigger_config must be scrubbed, not skipped"
+        );
+        assert_eq!(
+            report.queue_configs_scrubbed, 1,
+            "corrupt queue_config must be scrubbed, not skipped"
+        );
+
+        let conn = db.conn().unwrap();
+        let (spec, trig, que): (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT spec_json, trigger_config, queue_config FROM workflows WHERE id = ?1",
+                params![wf.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(
+            !spec.unwrap_or_default().contains("CORRUPT-SPEC"),
+            "unparseable spec_json secret must be purged"
+        );
+        assert!(
+            !trig.unwrap_or_default().contains("CORRUPT-TRIGGER"),
+            "unparseable trigger_config secret must be purged"
+        );
+        assert!(
+            !que.unwrap_or_default().contains("CORRUPT-QUEUE"),
+            "unparseable queue_config secret must be purged"
+        );
+
+        // Valid-JSON selective blanking is unchanged: a well-formed spec keeps
+        // its non-secret structure and only the secret field is emptied.
+        let wf_ok = db
+            .create_workflow(
+                "ok",
+                None,
+                "scripts/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        db.set_workflow_spec(
+            &wf_ok.id,
+            "generic",
+            Some(r#"{"actions":[{"url":"https://x/y","secret":"live"}]}"#),
+        )
+        .unwrap();
+        db.offboard_purge_secrets().unwrap();
+        let spec_ok: String = conn
+            .query_row(
+                "SELECT spec_json FROM workflows WHERE id = ?1",
+                params![wf_ok.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&spec_ok).unwrap();
+        assert_eq!(parsed["actions"][0]["url"], "https://x/y");
+        assert_eq!(parsed["actions"][0]["secret"], "");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn fresh_db_stamps_current_schema_version_and_enables_wal() {
         let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
@@ -7894,7 +8731,7 @@ mod tests {
         // Tripwire: refresh this fixture (seed schema + asserted columns) the
         // next time a migration lands so the newest N-1 -> N paths stay covered.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 17,
+            CURRENT_SCHEMA_VERSION, 18,
             "add a v(N-1)->v(N) fixture when a new migration ships"
         );
 

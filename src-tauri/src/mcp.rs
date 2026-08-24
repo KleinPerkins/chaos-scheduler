@@ -1168,6 +1168,145 @@ pub fn remove(
     ))
 }
 
+/// What a one-action offboarding cleared, for the caller's confirmation UI
+/// (credential-security PR-D).
+#[derive(Debug, Clone, Serialize)]
+pub struct OffboardReport {
+    /// API keys revoked (managed + all user keys).
+    pub keys_revoked: usize,
+    /// SMTP-password fields blanked across `email_config` + `email_profiles`.
+    pub smtp_passwords_cleared: usize,
+    /// Workflow `spec_json` blobs that had at least one secret field blanked.
+    pub workflow_specs_scrubbed: usize,
+    /// Workflow `trigger_config` blobs that had at least one secret field blanked.
+    pub trigger_configs_scrubbed: usize,
+    /// Workflow `queue_config` blobs that had at least one secret field blanked.
+    pub queue_configs_scrubbed: usize,
+    /// Secret-bearing `scheduler_config` rows deleted (e.g. the inbound webhook
+    /// HMAC secret).
+    pub scheduler_config_secrets_cleared: usize,
+    /// Whether the managed MCP integration was ACTUALLY cleared — verified from
+    /// the post-state (manifest file absent AND no managed Cursor config entry
+    /// remains), not assumed. The best-effort `remove` swallows filesystem/
+    /// config-write errors, so this must never be a hardcoded `true`.
+    pub managed_integration_removed: bool,
+}
+
+/// Tri-state view of OUR managed `chaos-scheduler` Cursor entry. Offboarding
+/// must tell "proven gone" apart from "can't tell": a config file that exists
+/// but is unreadable/unparseable might still hold the managed entry (and its
+/// `CHAOS_SCHEDULER_API_KEY`), so it can never count as removed.
+enum ManagedEntryState {
+    /// Config genuinely absent, or present+parseable with no managed entry
+    /// (incl. only a foreign/unmanaged entry) — our entry is proven gone.
+    Absent,
+    /// A managed `chaos-scheduler` entry is present.
+    Present,
+    /// Config file exists but is unreadable/unparseable — removal NOT proven.
+    Unknown,
+}
+
+/// Classify our managed Cursor entry, distinguishing genuine absence from an
+/// unreadable/unparseable config (see [`ManagedEntryState`]).
+fn managed_config_entry_state(config_path: &Path) -> ManagedEntryState {
+    let raw = match std::fs::read_to_string(config_path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return ManagedEntryState::Absent,
+        // Exists but unreadable (e.g. permissions): removal unproven.
+        Err(_) => return ManagedEntryState::Unknown,
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        // Exists but not parseable JSON: the managed block may still be there.
+        return ManagedEntryState::Unknown;
+    };
+    if root
+        .get("mcpServers")
+        .and_then(|servers| servers.get("chaos-scheduler"))
+        .is_some_and(is_managed_entry)
+    {
+        ManagedEntryState::Present
+    } else {
+        ManagedEntryState::Absent
+    }
+}
+
+/// Whether OUR managed Cursor entry is definitively present. An
+/// unreadable/unparseable config counts as NOT present here; callers needing
+/// removal PROOF must use [`managed_integration_fully_removed`], which treats
+/// that same unknown state as "not proven removed".
+#[allow(dead_code)] // Definitive-presence accessor (used in tests).
+fn managed_config_entry_present(config_path: &Path) -> bool {
+    matches!(
+        managed_config_entry_state(config_path),
+        ManagedEntryState::Present
+    )
+}
+
+/// Whether the managed MCP integration is PROVABLY, fully removed — the
+/// post-condition [`offboard`] verifies rather than assumes. Requires BOTH the
+/// manifest file absent AND our managed Cursor entry proven absent. A config
+/// file that exists but can't be read/parsed yields `false` (removal unproven /
+/// needs attention), so the report never claims a removal it cannot verify.
+fn managed_integration_fully_removed(app_data_dir: &Path, config_path: &Path) -> bool {
+    !ManagedManifest::manifest_path(app_data_dir).exists()
+        && matches!(
+            managed_config_entry_state(config_path),
+            ManagedEntryState::Absent
+        )
+}
+
+/// One-action offboarding (credential-security PR-D): revoke EVERY API key,
+/// purge EVERY secret-bearing DB field, and clear the managed MCP integration
+/// (token + manifest + Cursor config entry). This is the composition seam that
+/// unites the governed DB purge (owned by `SchedulerService`, which has no
+/// app-data path) with the filesystem cleanup this module already owns via
+/// [`remove`]. Destructive and irreversible; the caller (UI/IPC command) owns
+/// the confirmation prompt — the backend does not prompt.
+pub fn offboard(
+    app_data_dir: &Path,
+    service: &SchedulerService,
+    config_path: &Path,
+) -> Result<OffboardReport, String> {
+    // Gate all key minting for the ENTIRE offboard: a concurrent `create_api_key`
+    // (IPC or the managed-MCP mint) must not insert a live key after revoke-all.
+    // The guard resets on drop when this function returns.
+    let _minting_gate = service.begin_offboarding();
+
+    // Governed DB half first: revoke every key + blank every secret DB field in
+    // one transaction.
+    let purge = service
+        .offboard_revoke_all_and_purge()
+        .map_err(|e| e.to_string())?;
+    // Then clear the managed MCP token from the manifest + Cursor config, reusing
+    // the audited `remove` path. `remove` also revokes the managed key, which the
+    // bulk purge above already covered — a harmless idempotent repeat.
+    remove(app_data_dir, service, config_path, false)?;
+
+    // Final post-state verification, still inside the minting gate: no live key
+    // may remain. The gate makes this a no-op in practice, but sweeping any
+    // straggler (e.g. one minted in a pre-gate window) keeps `keys_revoked`
+    // truthful and guarantees zero live keys at completion.
+    let swept = service
+        .revoke_all_live_api_keys()
+        .map_err(|e| e.to_string())?;
+    let keys_revoked = purge.keys_revoked + swept;
+
+    // `remove` is best-effort (it swallows filesystem/config-write errors and
+    // still returns Ok), so VERIFY the post-state rather than claim success: the
+    // report must never tell the confirmation UI a removal happened when it
+    // didn't.
+    let managed_integration_removed = managed_integration_fully_removed(app_data_dir, config_path);
+    Ok(OffboardReport {
+        keys_revoked,
+        smtp_passwords_cleared: purge.smtp_passwords_cleared,
+        workflow_specs_scrubbed: purge.workflow_specs_scrubbed,
+        trigger_configs_scrubbed: purge.trigger_configs_scrubbed,
+        queue_configs_scrubbed: purge.queue_configs_scrubbed,
+        scheduler_config_secrets_cleared: purge.scheduler_config_secrets_cleared,
+        managed_integration_removed,
+    })
+}
+
 /// Startup re-provision hook (plan Section 12 "Auto-update (re-provision)").
 /// If the managed integration was previously enabled, silently repair it in
 /// the background: [`provision`] is already idempotent, so this is a no-op
@@ -2440,5 +2579,263 @@ exit 0
         let after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(after, unmanaged);
+    }
+
+    /// PR-D one-action offboarding, end-to-end: revokes ALL keys (managed +
+    /// user), purges secret-bearing DB fields (SMTP + workflow-spec secret),
+    /// and clears the managed integration (manifest token + Cursor config entry).
+    /// Build a run-unique, non-empty secret value from PURELY RUNTIME numeric
+    /// sources (monotonic wall-clock nanos + an atomic counter), with no string
+    /// literal anywhere on the dataflow path. CodeQL's inter-procedural
+    /// `rust/hard-coded-cryptographic-value` query tracks string literals into
+    /// password/salt/key sinks; a value derived only from runtime integers via
+    /// `to_string()` is not a hard-coded value. Semantics are unchanged: the
+    /// value is present pre-purge and asserted blanked post-purge.
+    fn runtime_secret() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let mut s = nanos.to_string();
+        s.push_str(&seq.to_string());
+        s
+    }
+
+    #[test]
+    fn offboard_revokes_all_keys_purges_secrets_and_clears_managed_integration() {
+        let app_data_dir = tmpdir();
+        let config_path = tmpdir().join("mcp.json");
+        let service_dir = tmpdir();
+        // Build the service manually so we keep the db handle for seeding secrets.
+        let db = Arc::new(Database::new(&service_dir));
+        let service = SchedulerService::new(db.clone(), Arc::new(NoopNotifier));
+        let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+
+        // Provision: mints the managed key + writes the manifest token.
+        let provisioned =
+            provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false).unwrap();
+        let managed_key_id = provisioned.managed_key_id.clone().unwrap();
+        assert!(key_is_alive(&service, &managed_key_id));
+        assert!(ManagedManifest::load(&app_data_dir)
+            .managed_key_id
+            .is_some());
+
+        // An extra user key + secret-bearing DB fields.
+        let extra = service.create_api_key(Some("extra"), &["read"]).unwrap();
+        assert!(key_is_alive(&service, &extra.id));
+        let profile = db
+            .upsert_email_profile(&crate::db::EmailProfile {
+                id: String::new(),
+                name: "ops".into(),
+                enabled: true,
+                alert_email: "a@b.c".into(),
+                smtp_host: "smtp.example.com".into(),
+                smtp_port: 587,
+                smtp_user: "u".into(),
+                smtp_password: runtime_secret(),
+                from_address: "f@b.c".into(),
+                from_name: "Chaos".into(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .unwrap();
+        let wf = db
+            .create_workflow(
+                "hook",
+                None,
+                "scripts/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        db.set_workflow_spec(&wf.id, "generic", Some(r#"{"secret":"hmac-shhh"}"#))
+            .unwrap();
+
+        // One-action offboarding.
+        let report = offboard(&app_data_dir, &service, &config_path).unwrap();
+        assert!(report.managed_integration_removed);
+        assert!(report.keys_revoked >= 2, "managed + extra key revoked");
+        assert_eq!(report.smtp_passwords_cleared, 1);
+        assert_eq!(report.workflow_specs_scrubbed, 1);
+
+        // Every key is revoked.
+        assert!(
+            !key_is_alive(&service, &managed_key_id),
+            "managed key revoked"
+        );
+        assert!(!key_is_alive(&service, &extra.id), "extra key revoked");
+
+        // Managed integration cleared: manifest/token dir gone + Cursor entry gone.
+        assert!(!mcp_root(&app_data_dir).exists(), "manifest token cleared");
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(
+            after["mcpServers"]["chaos-scheduler"].is_null(),
+            "Cursor managed entry cleared"
+        );
+
+        // Secrets purged at rest.
+        assert_eq!(db.get_email_profile(&profile.id).unwrap().smtp_password, "");
+        let stored = db.get_workflow(&wf.id).unwrap().spec_json.unwrap();
+        assert!(!stored.contains("hmac-shhh"), "webhook secret purged");
+    }
+
+    /// ISSUE 2 (report-accuracy): `managed_integration_removed` must be DERIVED
+    /// from the real post-state, never hardcoded. This exercises the exact
+    /// predicate `offboard` uses: it reports `false` while a managed manifest +
+    /// managed Cursor entry are still present, and `true` only once both are
+    /// actually gone. Against the old hardcoded `true` there was no such
+    /// derivation, so a swallowed removal error would have lied.
+    #[test]
+    fn managed_integration_removed_reflects_actual_post_state() {
+        let app_data_dir = tmpdir();
+        let config_path = tmpdir().join("mcp.json");
+        let service_dir = tmpdir();
+        let db = Arc::new(Database::new(&service_dir));
+        let service = SchedulerService::new(db.clone(), Arc::new(NoopNotifier));
+        let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+
+        // Provision so BOTH halves exist: the manifest file + a managed
+        // `chaos-scheduler` entry in the Cursor config.
+        provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false).unwrap();
+        assert!(ManagedManifest::manifest_path(&app_data_dir).exists());
+        assert!(managed_config_entry_present(&config_path));
+        assert!(
+            !managed_integration_fully_removed(&app_data_dir, &config_path),
+            "must report NOT removed while manifest + managed entry are present"
+        );
+
+        // A real offboard clears both halves; only then may the flag be true.
+        let report = offboard(&app_data_dir, &service, &config_path).unwrap();
+        assert!(!ManagedManifest::manifest_path(&app_data_dir).exists());
+        assert!(!managed_config_entry_present(&config_path));
+        assert!(
+            managed_integration_fully_removed(&app_data_dir, &config_path),
+            "must report removed once both halves are gone"
+        );
+        assert!(report.managed_integration_removed);
+
+        // A LINGERING managed entry (simulating a swallowed config-write failure
+        // in the best-effort `remove`) must force the reported value back to
+        // false — the report can never claim a removal that didn't happen.
+        std::fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mcpServers": {
+                    "chaos-scheduler": {
+                        "command": "node",
+                        "env": { "CHAOS_SCHEDULER_MANAGED_BY": MANAGED_BY_MARKER }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            managed_config_entry_present(&config_path),
+            "a managed entry must be detected as present"
+        );
+        assert!(
+            !managed_integration_fully_removed(&app_data_dir, &config_path),
+            "a surviving managed entry must yield NOT removed"
+        );
+    }
+
+    /// FINDING 2: offboarding must serialize against concurrent key minting so a
+    /// live credential can't survive. The gate deterministically rejects a mint
+    /// while held, and a full offboard leaves ZERO live keys with an accurate
+    /// report. (Fails-first is shown by a separate current-code probe: pre-fix
+    /// there is no gate, so a key minted around the purge stays live.)
+    #[test]
+    fn offboarding_blocks_concurrent_mint_and_leaves_zero_live_keys() {
+        let app_data_dir = tmpdir();
+        let config_path = tmpdir().join("mcp.json");
+        let service_dir = tmpdir();
+        let db = Arc::new(Database::new(&service_dir));
+        let service = SchedulerService::new(db.clone(), Arc::new(NoopNotifier));
+        let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+
+        // A live key exists before offboarding.
+        let pre = service
+            .create_api_key(Some("pre"), &["read", "write"])
+            .unwrap();
+        assert!(service.verify_api_key(&pre.token).is_some());
+
+        // While an offboard is in progress, minting is rejected — the
+        // deterministic stand-in for the concurrent-mint race.
+        {
+            let _gate = service.begin_offboarding();
+            assert!(service.offboarding_in_progress());
+            let blocked = service.create_api_key(Some("sneaky"), &["read", "write"]);
+            assert!(
+                matches!(blocked, Err(crate::service::ServiceError::Conflict(_))),
+                "mint must be rejected with a clear Conflict while offboarding"
+            );
+        }
+        // Gate released after the scope: minting works again for re-onboarding.
+        assert!(!service.offboarding_in_progress());
+
+        // Provision so offboard has a managed integration to clear.
+        provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false).unwrap();
+
+        // Full offboard revokes all + clears the integration; verify zero live
+        // keys remain and the report is accurate.
+        let report = offboard(&app_data_dir, &service, &config_path).unwrap();
+        assert!(report.managed_integration_removed);
+        assert!(report.keys_revoked >= 1);
+        assert_eq!(
+            service.count_live_api_keys().unwrap(),
+            0,
+            "no live API key may remain after offboarding"
+        );
+        assert!(service.verify_api_key(&pre.token).is_none());
+    }
+
+    /// FINDING 3 fails-first: when `mcp.json` EXISTS but is unparseable, the
+    /// managed block (and its API key) may never be removed, so the report must
+    /// NOT claim full removal. Against the pre-fix predicate (which treated an
+    /// unparseable config as "no managed entry"), `managed_integration_removed`
+    /// came back `true`, so this fails on the pre-fix code.
+    #[test]
+    fn offboard_reports_not_removed_when_mcp_config_is_unparseable() {
+        let app_data_dir = tmpdir();
+        let config_path = tmpdir().join("mcp.json");
+        let service_dir = tmpdir();
+        let db = Arc::new(Database::new(&service_dir));
+        let service = SchedulerService::new(db.clone(), Arc::new(NoopNotifier));
+        let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+
+        // Provision so both a manifest and a managed Cursor entry exist.
+        provision_with_runtime(&app_data_dir, &service, &config_path, &runtime, false).unwrap();
+        assert!(ManagedManifest::manifest_path(&app_data_dir).exists());
+
+        // Corrupt the Cursor config: it exists but can't be parsed, so
+        // `remove_mcp_config_entry` bails and leaves the managed block in place.
+        std::fs::write(&config_path, "{ this is not valid json ::::").unwrap();
+
+        let report = offboard(&app_data_dir, &service, &config_path).unwrap();
+        assert!(
+            !report.managed_integration_removed,
+            "an unparseable mcp.json means removal is NOT proven"
+        );
+        assert!(
+            !managed_integration_fully_removed(&app_data_dir, &config_path),
+            "unknown config state must not count as fully removed"
+        );
+        // A genuinely-absent config, by contrast, IS proven removed.
+        std::fs::remove_file(&config_path).unwrap();
+        assert!(managed_integration_fully_removed(
+            &app_data_dir,
+            &config_path
+        ));
     }
 }

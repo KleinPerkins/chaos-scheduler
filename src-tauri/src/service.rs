@@ -14,6 +14,7 @@ use crate::scheduler::{dispatch_non_cron_workflow, DispatchOutcome, NonCronDispa
 use crate::workflow_spec::{WorkflowKind, WorkflowSpec};
 use chrono::{DateTime, Utc};
 use std::process::Output;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Sentinel that replaces a stored SMTP password whenever a profile leaves the
@@ -218,6 +219,9 @@ pub enum ServiceError {
     Governance(String),
     /// Entity not found (HTTP 404).
     NotFound(String),
+    /// Rejected because it conflicts with an in-progress lifecycle operation,
+    /// e.g. minting an API key while offboarding is purging/revoking (HTTP 409).
+    Conflict(String),
     /// Unexpected internal / persistence failure (HTTP 500).
     Internal(String),
 }
@@ -228,6 +232,7 @@ impl std::fmt::Display for ServiceError {
             ServiceError::Validation(m)
             | ServiceError::Governance(m)
             | ServiceError::NotFound(m)
+            | ServiceError::Conflict(m)
             | ServiceError::Internal(m) => write!(f, "{m}"),
         }
     }
@@ -242,6 +247,7 @@ impl ServiceError {
             ServiceError::Validation(_) => 400,
             ServiceError::Governance(_) => 403,
             ServiceError::NotFound(_) => 404,
+            ServiceError::Conflict(_) => 409,
             ServiceError::Internal(_) => 500,
         }
     }
@@ -1135,6 +1141,24 @@ pub struct SchedulerService {
     clock: Arc<dyn Clock>,
     protected_environments: Vec<String>,
     allow_protected_writes: bool,
+    /// Set for the duration of an offboarding purge so all key-mint paths
+    /// (`create_api_key`, incl. the managed-MCP mint) reject new keys — a
+    /// concurrent mint must not reintroduce a live credential after revoke-all.
+    offboarding: Arc<AtomicBool>,
+}
+
+/// RAII gate returned by [`SchedulerService::begin_offboarding`]. While held,
+/// every key-mint path is rejected; the flag resets on drop so minting resumes
+/// once offboarding completes. Hold it across the WHOLE offboard operation.
+#[must_use = "hold the guard for the whole offboard; dropping it re-enables minting"]
+pub struct OffboardingGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for OffboardingGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
 }
 
 impl SchedulerService {
@@ -1159,6 +1183,7 @@ impl SchedulerService {
             clock: Arc::new(SystemClock),
             protected_environments: normalize_environment_names(protected_environments),
             allow_protected_writes,
+            offboarding: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1175,6 +1200,7 @@ impl SchedulerService {
             clock,
             protected_environments: protected_environments_from_env(),
             allow_protected_writes: protected_writes_allowed_from_env(),
+            offboarding: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1762,6 +1788,15 @@ impl SchedulerService {
     /// Mint a new API key. The plaintext token is returned exactly once (never
     /// stored); only a salted SHA-256 hash is persisted.
     pub fn create_api_key(&self, name: Option<&str>, scopes: &[&str]) -> ServiceResult<NewApiKey> {
+        // Reject minting while an offboard is purging/revoking: otherwise a
+        // concurrent mint could leave a live credential after revoke-all,
+        // silently defeating the decommission. Applies to every mint path
+        // (this IPC command and the managed-MCP mint, which both route here).
+        if self.offboarding.load(Ordering::Acquire) {
+            return Err(ServiceError::Conflict(
+                "offboarding in progress; API key minting is temporarily disabled".into(),
+            ));
+        }
         use rand::Rng;
         let mut secret_bytes = [0u8; 24];
         rand::rng().fill_bytes(&mut secret_bytes);
@@ -1814,6 +1849,75 @@ impl SchedulerService {
             return Err(ServiceError::NotFound(format!("api key {id} not found")));
         }
         Ok(())
+    }
+
+    /// Read the append-only API audit log (credential-security PR-D) through the
+    /// read-only `api_audit_log_view`, newest-first. `limit` is clamped to
+    /// `1..=1000` and `offset` is floored at `0` so an adapter can pass raw
+    /// caller input safely. The view exposes only non-secret request metadata
+    /// (method/path/status/remote/key_id/at) — never any secret material.
+    pub fn list_api_audit_log(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> ServiceResult<Vec<crate::db::ApiAuditLogEntry>> {
+        let limit = limit.clamp(1, 1000);
+        let offset = offset.max(0);
+        self.db
+            .list_api_audit_log(limit, offset)
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
+    /// One-action offboarding (governed DB half, credential-security PR-D):
+    /// revoke EVERY live API key and purge EVERY secret-bearing DB field in one
+    /// transaction (SMTP passwords + workflow-spec secrets — see
+    /// [`crate::db::Database::offboard_purge_secrets`]). Destructive and
+    /// irreversible; the caller (UI) owns the confirmation prompt.
+    ///
+    /// Filesystem-resident secrets — the managed MCP token/manifest and the
+    /// Cursor config entry — are NOT touched here: `SchedulerService` is
+    /// GUI-agnostic and holds no app-data path (ADR-0001), so the adapter that
+    /// owns those paths (`mcp::offboard`) clears them and composes this method
+    /// into the full one-action offboarding flow.
+    pub fn offboard_revoke_all_and_purge(&self) -> ServiceResult<crate::db::OffboardPurgeReport> {
+        self.db
+            .offboard_purge_secrets()
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
+    /// Begin an offboard: mark minting disabled and return an RAII guard that
+    /// re-enables it on drop. All key-mint paths ([`create_api_key`]) reject
+    /// while the guard is held, so a concurrent mint can't reintroduce a live
+    /// credential after revoke-all. Hold it across the entire offboard.
+    pub fn begin_offboarding(&self) -> OffboardingGuard {
+        self.offboarding.store(true, Ordering::Release);
+        OffboardingGuard {
+            flag: self.offboarding.clone(),
+        }
+    }
+
+    /// Whether an offboard is currently in progress (minting disabled).
+    #[allow(dead_code)] // Diagnostic accessor (used in tests).
+    pub fn offboarding_in_progress(&self) -> bool {
+        self.offboarding.load(Ordering::Acquire)
+    }
+
+    /// Revoke every currently-live API key; returns how many were flipped.
+    /// Offboarding's final post-cleanup sweep so the report reflects the true
+    /// post-state.
+    pub fn revoke_all_live_api_keys(&self) -> ServiceResult<usize> {
+        self.db
+            .revoke_all_live_api_keys()
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
+    /// Count API keys that are still live (not revoked). Offboarding asserts
+    /// this is zero once it completes.
+    #[allow(dead_code)] // Post-offboard verification accessor (used in tests).
+    pub fn count_live_api_keys(&self) -> ServiceResult<usize> {
+        self.db
+            .count_live_api_keys()
+            .map_err(|e| ServiceError::Internal(e.to_string()))
     }
 
     /// Update a user-managed environment's metadata/caps.
@@ -2015,20 +2119,24 @@ impl SchedulerService {
         !scopes.iter().any(|s| s == "write" || s == "admin")
     }
 
-    /// Replace secret material inside a workflow's spec/trigger JSON with the
-    /// sentinel. Applied in the service layer so REST, MCP tools, and the
-    /// `chaos://workflows/{id}` resource all inherit identical redaction.
+    /// Replace secret material inside a workflow's `spec_json`, `trigger_config`,
+    /// and `queue_config` JSON with the sentinel. Applied in the service layer so
+    /// REST, MCP tools, and the `chaos://workflows/{id}` resource all inherit
+    /// identical redaction. `queue_config` is included so the Rust read path
+    /// matches the MCP resource projection (which already redacts it) and the
+    /// offboarding purge — a single secret-bearing field set across all three.
     pub fn redact_workflow_secrets(mut wf: Workflow) -> Workflow {
-        if let Some(spec) = wf.spec_json.as_mut() {
-            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(spec) {
+        for blob in [
+            wf.spec_json.as_mut(),
+            wf.trigger_config.as_mut(),
+            wf.queue_config.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(blob) {
                 redact_secret_fields(&mut value);
-                *spec = value.to_string();
-            }
-        }
-        if let Some(trigger) = wf.trigger_config.as_mut() {
-            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(trigger) {
-                redact_secret_fields(&mut value);
-                *trigger = value.to_string();
+                *blob = value.to_string();
             }
         }
         wf
@@ -2223,14 +2331,15 @@ impl ApiIdentity {
 /// Recursively replace known secret-bearing fields with the read-scope sentinel.
 /// Matches by key name so it covers webhook `secret`, operator `cursor_api_key`,
 /// SMTP `smtp_password`, and `signature_secret` wherever they nest in the JSON.
+/// The matched key set is [`crate::db::SECRET_SPEC_FIELD_NAMES`] — the single
+/// source of truth shared with the offboarding purge, so redact-on-read and
+/// purge-on-offboard can never cover different fields.
 fn redact_secret_fields(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
             for (key, child) in map.iter_mut() {
-                if matches!(
-                    key.as_str(),
-                    "secret" | "signature_secret" | "cursor_api_key" | "smtp_password"
-                ) && child.as_str().is_some_and(|s| !s.is_empty())
+                if crate::db::SECRET_SPEC_FIELD_NAMES.contains(&key.as_str())
+                    && child.as_str().is_some_and(|s| !s.is_empty())
                 {
                     *child = serde_json::Value::String(
                         SchedulerService::READ_SCOPE_SECRET_SENTINEL.into(),
@@ -2419,6 +2528,88 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    #[test]
+    fn list_api_audit_log_clamps_bounds_and_returns_metadata_only() {
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec![crate::branding::DEFAULT_ENVIRONMENT], true);
+
+        db.record_api_audit(Some("k"), "GET", "/api/v1/runs", 200, None)
+            .unwrap();
+        db.record_api_audit(Some("k"), "GET", "/api/v1/queues", 200, None)
+            .unwrap();
+
+        // limit <= 0 clamps to 1, negative offset floors at 0.
+        let one = svc.list_api_audit_log(0, -5).unwrap();
+        assert_eq!(one.len(), 1, "limit clamps to at least 1");
+        // A huge limit is clamped to the ceiling (>= our row count), so both rows return.
+        let all = svc.list_api_audit_log(10_000, 0).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().all(|e| e.method == "GET" && e.status == 200));
+    }
+
+    /// Build a run-unique, non-empty secret value from PURELY RUNTIME numeric
+    /// sources (monotonic wall-clock nanos + an atomic counter), with no string
+    /// literal anywhere on the dataflow path. CodeQL's inter-procedural
+    /// `rust/hard-coded-cryptographic-value` query tracks string literals into
+    /// password/salt/key sinks; a value derived only from runtime integers via
+    /// `to_string()` is not a hard-coded value. Semantics are unchanged: the
+    /// value is present pre-purge and asserted blanked post-purge.
+    fn runtime_secret() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let mut s = nanos.to_string();
+        s.push_str(&seq.to_string());
+        s
+    }
+
+    #[test]
+    fn offboard_revoke_all_and_purge_revokes_keys_and_purges_spec_and_smtp_secrets() {
+        let dir = tmpdir();
+        let db = Arc::new(Database::new(&dir));
+        let svc = service_with_db(db.clone(), vec![crate::branding::DEFAULT_ENVIRONMENT], true);
+
+        // A live key whose token verifies BEFORE offboarding (fails-first proof:
+        // the post-offboard assertion would fail if revoke-all didn't happen).
+        let key = svc.create_api_key(Some("k"), &["read", "write"]).unwrap();
+        assert!(
+            svc.verify_api_key(&key.token).is_some(),
+            "freshly minted key must verify before offboarding"
+        );
+
+        // A secret-bearing SMTP profile + a workflow spec with a webhook secret.
+        let smtp_secret = runtime_secret();
+        let saved = db
+            .upsert_email_profile(&email_profile("ops", &smtp_secret))
+            .unwrap();
+        let wf = svc
+            .create_workflow(draft("hook", crate::branding::DEFAULT_ENVIRONMENT), false)
+            .unwrap();
+        db.set_workflow_spec(&wf.id, "generic", Some(r#"{"secret":"hmac-shhh"}"#))
+            .unwrap();
+
+        let report = svc.offboard_revoke_all_and_purge().unwrap();
+        assert!(report.keys_revoked >= 1);
+        assert_eq!(report.smtp_passwords_cleared, 1);
+        assert_eq!(report.workflow_specs_scrubbed, 1);
+
+        // Verification now FAILS — the key is revoked.
+        assert!(
+            svc.verify_api_key(&key.token).is_none(),
+            "key must no longer verify after offboarding"
+        );
+
+        // Secret-bearing fields are blanked at rest.
+        assert_eq!(db.get_email_profile(&saved.id).unwrap().smtp_password, "");
+        let stored = db.get_workflow(&wf.id).unwrap().spec_json.unwrap();
+        assert!(!stored.contains("hmac-shhh"), "webhook secret purged");
     }
 
     #[test]

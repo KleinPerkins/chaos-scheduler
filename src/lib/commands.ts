@@ -130,6 +130,31 @@ export interface ApiKey {
   revoked?: boolean;
 }
 
+/** One row of the read-only `api_audit_log_view` returned by
+ * `list_api_audit_log` (credential-security PR-D). Non-secret request metadata
+ * only — mirrors the Rust `db::ApiAuditLogEntry` serde field names exactly. */
+export interface ApiAuditLogEntry {
+  id: string;
+  key_id?: string | null;
+  method: string;
+  path: string;
+  status: number;
+  remote?: string | null;
+  at?: string | null;
+}
+
+/** Result of the one-action `offboard_and_purge_secrets` command — mirrors the
+ * Rust `mcp::OffboardReport` serde field names exactly. */
+export interface OffboardReport {
+  keys_revoked: number;
+  smtp_passwords_cleared: number;
+  workflow_specs_scrubbed: number;
+  trigger_configs_scrubbed: number;
+  queue_configs_scrubbed: number;
+  scheduler_config_secrets_cleared: number;
+  managed_integration_removed: boolean;
+}
+
 // --- Updater (Phase 11) ---
 
 export type UpdatePhase =

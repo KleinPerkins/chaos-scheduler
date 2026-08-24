@@ -416,6 +416,8 @@ pub fn run() {
             commands::create_api_key,
             commands::list_api_keys,
             commands::revoke_api_key,
+            commands::list_api_audit_log,
+            commands::offboard_and_purge_secrets,
             commands::check_for_update,
             commands::apply_update,
             commands::get_app_update_status,
