@@ -1320,13 +1320,6 @@ fn provision_with_runtime(
     )
     .map_err(|e| fail_provision(&mut manifest, app_data_dir, e))?;
 
-    // Whether this write completes a one-time inline→Keychain migration: an
-    // inline token is still physically in the config right now, so
-    // `merge_mcp_config`'s backup-before-write will copy those bytes (INCLUDING
-    // the token) into `mcp.json.bak`. We shred that sidecar after the merge
-    // (Finding 2) so no plaintext token is left at rest beside the config.
-    let migrating = read_inline_managed_token(config_path).is_some();
-
     let merge_outcome = merge_mcp_config(
         config_path,
         &managed_id,
@@ -1362,13 +1355,15 @@ fn provision_with_runtime(
         ));
     }
 
-    // FINDING 2: the merge just rewrote `mcp.json` to launcher form. If this was
-    // a migration, `mcp.json.bak` now holds the pre-migration bytes — including
-    // the inline plaintext token. Securely delete that sidecar so the token is
-    // not left at rest beside the scrubbed config.
-    if migrating {
-        crate::db::secure_remove(&config_path.with_extension("json.bak"));
-    }
+    // FINDING 2 (re-review): the merge just rewrote `mcp.json` to launcher form.
+    // Its backup-before-write copied the pre-merge bytes into `mcp.json.bak`, and
+    // an unparseable pre-migration config would also have left an
+    // `mcp.json.invalid-*` copy — either can hold a pre-#292 inline plaintext
+    // token. Shred ALL managed-config sidecars unconditionally (a no-op when none
+    // exist), rather than only the `.bak` on the parseable-migration path. This
+    // is the same scoped helper offboard uses, so no token is left at rest beside
+    // the scrubbed config regardless of the pre-migration config's shape.
+    secure_delete_config_sidecars(config_path);
 
     // The managed identity + `key_in_keychain` were already persisted above
     // (Finding 1(a)); re-affirm them alongside `provisioned_version` for a
@@ -3735,5 +3730,86 @@ exit 0
             !bak.exists(),
             "the token-bearing .bak sidecar must be securely deleted on offboard"
         );
+    }
+
+    /// FINDING 2 (re-review) fails-first: a SUCCESSFUL provision whose
+    /// pre-migration `~/.cursor/mcp.json` was UNPARSEABLE but carried an inline
+    /// `CHAOS_SCHEDULER_API_KEY` must leave NO token at rest in a sidecar. The
+    /// merge's backup-before-write copies the pre-merge bytes into `mcp.json.bak`
+    /// AND the invalid-JSON path leaves an `mcp.json.invalid-*` copy — both hold
+    /// the plaintext token. Against the old `if migrating` shred (which required
+    /// PARSEABLE JSON to detect the inline token, so it did nothing here), those
+    /// sidecars survived; the unconditional `secure_delete_config_sidecars` shreds
+    /// them. FAILS before, PASSES after.
+    #[test]
+    fn provision_shreds_all_sidecars_when_premigration_config_was_unparseable() {
+        let app_data_dir = tmpdir();
+        let config_path = tmpdir().join("mcp.json");
+        let service_dir = tmpdir();
+        let service = test_service(&service_dir);
+        let runtime = fake_runtime(&tmpdir(), "v20.11.0", pinned_mcp_version());
+        let keystore = fake_keystore();
+
+        // An UNPARSEABLE pre-#292 config that still physically contains a managed
+        // inline token. The token is derived from runtime integers so no literal
+        // secret lands in the test source.
+        let token = runtime_secret();
+        let corrupt = format!(
+            "{{ \"mcpServers\": {{ \"chaos-scheduler\": {{ \"env\": {{ \
+             \"CHAOS_SCHEDULER_API_KEY\": \"{token}\", \
+             \"CHAOS_SCHEDULER_MANAGED_BY\": \"{MANAGED_BY_MARKER}\" }} }} }} <<< garbage ::::"
+        );
+        std::fs::write(&config_path, &corrupt).unwrap();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&corrupt).is_err(),
+            "fixture must be genuinely unparseable"
+        );
+
+        provision_with_runtime(
+            &app_data_dir,
+            &service,
+            &config_path,
+            &runtime,
+            false,
+            &keystore,
+        )
+        .expect("provision should succeed and migrate the key into the Keychain");
+
+        // The live config is now valid launcher-form JSON with no inline token...
+        let live = std::fs::read_to_string(&config_path).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&live).is_ok());
+        assert!(
+            !live.contains(&token),
+            "the live config must not carry the inline token after migration"
+        );
+
+        // ...and NO token-bearing sidecar survives: not `.bak`, not any
+        // `.invalid-*`, and no file in the config dir still contains the token.
+        let dir = config_path.parent().unwrap();
+        assert!(
+            !config_path.with_extension("json.bak").exists(),
+            "mcp.json.bak must be shredded after a successful provision"
+        );
+        let leftover: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with("mcp.json.invalid-")
+            })
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "no mcp.json.invalid-* sidecar may survive a successful provision, found {leftover:?}"
+        );
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let contents = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            assert!(
+                !contents.contains(&token),
+                "no file beside the config may retain the token: {:?}",
+                entry.path()
+            );
+        }
     }
 }
