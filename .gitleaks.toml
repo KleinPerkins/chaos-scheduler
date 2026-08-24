@@ -1,0 +1,14 @@
+title = "Chaos Scheduler — gitleaks secret-scanning configuration"
+
+[extend]
+# Inherit gitleaks' built-in ruleset: entropy heuristics + known secret signatures
+# (generic API keys, GitHub tokens, AWS credentials, etc.).
+useDefault = true
+
+[allowlist]
+description = "Repository-level false-positive exclusions"
+paths = [
+  # The data-guard test file contains path strings like ".env" and "id_rsa" as
+  # test-input data. These are file-path strings only, not actual secrets.
+  '''^scripts/check-no-committed-data\.test\.mjs$''',
+]

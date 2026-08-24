@@ -26,6 +26,12 @@ pre-commit:
       # Apple .p12, ssh private keys). Local, bypassable defense; the `data-guard`
       # CI job is the authoritative gate and also covers the git-data-API PR flow.
       run: node scripts/check-no-committed-data.mjs {staged_files}
+    secret-scan:
+      # Scan staged content for committed secrets (high-entropy strings, known API
+      # key patterns). Requires `brew install gitleaks` (or equivalent).
+      # Local, bypassable defense; the `secret-scan` CI job is the authoritative
+      # gate and also covers the git-data-API single-commit PR flow this repo uses.
+      run: gitleaks protect --staged --source . --config .gitleaks.toml --redact --verbose
     cargo-fmt:
       root: "src-tauri/"
       glob: "*.rs"
