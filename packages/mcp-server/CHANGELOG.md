@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.0](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v1.3.1...mcp-server-v1.4.0) (2026-08-24)
+
+
+### Features
+
+* **mcp-server:** add workflow authoring resources ([#362](https://github.com/KleinPerkins/chaos-scheduler/issues/362)) ([26519e2](https://github.com/KleinPerkins/chaos-scheduler/commit/26519e20cb48a8a2e31cc9a35f7a29a9ca2177fe))
+* **security:** envelope-encrypt secret-bearing fields at rest (on by default) ([#389](https://github.com/KleinPerkins/chaos-scheduler/issues/389)) ([13401ec](https://github.com/KleinPerkins/chaos-scheduler/commit/13401ec745e1d0fcaa7f0091e2e25592736dfdf4))
+
 ## [1.3.1](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v1.3.0...mcp-server-v1.3.1) (2026-08-24)
 
 
