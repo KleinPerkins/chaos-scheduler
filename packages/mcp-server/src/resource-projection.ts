@@ -2,6 +2,14 @@ import type { Workflow } from "@chaos-scheduler/sdk";
 
 export const REDACTED_SECRET = "__redacted__";
 export const INVALID_STORED_JSON = "__redacted_invalid_json__";
+/**
+ * Distinct sentinel the Rust seam substitutes for a secret it could not decrypt
+ * because the master key is unavailable (secrets-locked). It is an
+ * already-terminal state and must PASS THROUGH redaction unchanged — collapsing
+ * it into {@link REDACTED_SECRET} would hide "master key unavailable — re-enter
+ * this secret" behind "hidden on read" (ADR 0011).
+ */
+export const SECRET_UNAVAILABLE = "__secret_unavailable__";
 
 const MAX_STORED_JSON_BYTES = 256 * 1024;
 const MAX_STORED_JSON_DEPTH = 32;
@@ -74,9 +82,14 @@ function redactJsonValue(
     for (const [key, item] of Object.entries(
       value as Record<string, unknown>,
     )) {
-      projected[key] = SENSITIVE_KEYS.has(key.toLowerCase())
-        ? REDACTED_SECRET
-        : redactJsonValue(item, depth + 1, state);
+      if (SENSITIVE_KEYS.has(key.toLowerCase())) {
+        // Preserve the terminal "master key unavailable" sentinel; redact
+        // everything else in a sensitive key to the scope sentinel.
+        projected[key] =
+          item === SECRET_UNAVAILABLE ? SECRET_UNAVAILABLE : REDACTED_SECRET;
+      } else {
+        projected[key] = redactJsonValue(item, depth + 1, state);
+      }
     }
     return projected;
   }

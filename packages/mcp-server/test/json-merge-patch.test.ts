@@ -89,6 +89,23 @@ describe("workflow spec JSON Merge Patch", () => {
     ).toThrow(/duplicate array identity/i);
   });
 
+  it("treats __secret_unavailable__ as a preserve-stored-value sentinel, never writing the literal string", () => {
+    // A secrets-locked read surfaces __secret_unavailable__ for undecryptable
+    // secrets. If a caller round-trips that back in a patch, we must preserve
+    // the stored ciphertext, exactly like __redacted__ — never persist the
+    // literal sentinel string as the new secret.
+    const current = {
+      kind: "generic",
+      trigger: { type: "webhook", secret: "real-webhook-secret" },
+    };
+
+    const merged = applyWorkflowSpecMergePatch(current, {
+      trigger: { type: "webhook", secret: "__secret_unavailable__" },
+    }) as typeof current;
+
+    expect(merged.trigger.secret).toBe("real-webhook-secret");
+  });
+
   it("preserves untouched string bytes during an unrelated patch", () => {
     const current = {
       kind: "generic",

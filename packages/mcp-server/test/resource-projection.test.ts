@@ -4,6 +4,7 @@ import {
   projectStoredJson,
   projectWorkflowForResource,
   REDACTED_SECRET,
+  SECRET_UNAVAILABLE,
 } from "../src/resource-projection.js";
 
 describe("workflow resource projection", () => {
@@ -16,6 +17,25 @@ describe("workflow resource projection", () => {
     expect(projectStoredJson('{"secret":"value"')).toEqual({
       status: "invalid",
       value: null,
+    });
+  });
+
+  it("preserves the __secret_unavailable__ sentinel and never collapses it to __redacted__", () => {
+    // A secret the Rust seam could not decrypt (master key unavailable) is a
+    // terminal state, not a scope-redactable value: it must pass through so a
+    // caller can tell "re-enter this secret" from "hidden on read".
+    expect(
+      projectStoredJson(
+        `{"secret":"${SECRET_UNAVAILABLE}","other":"live-secret"}`,
+      ),
+    ).toEqual({
+      status: "parsed",
+      value: { secret: SECRET_UNAVAILABLE, other: "live-secret" },
+    });
+    // A normal live secret in a sensitive key still redacts to the scope sentinel.
+    expect(projectStoredJson('{"smtp_password":"hunter2"}')).toEqual({
+      status: "parsed",
+      value: { smtp_password: REDACTED_SECRET },
     });
   });
 

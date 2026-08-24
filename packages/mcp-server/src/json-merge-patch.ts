@@ -1,4 +1,16 @@
-import { REDACTED_SECRET } from "./resource-projection.js";
+import { REDACTED_SECRET, SECRET_UNAVAILABLE } from "./resource-projection.js";
+
+/**
+ * A secret sentinel that must never be written back as a literal secret value:
+ * the scope-redaction `__redacted__` and the master-key-unavailable
+ * `__secret_unavailable__` (ADR 0011). Either one in a sensitive field means
+ * "preserve the stored value", so a read-modify-write round-trip against a
+ * redacted OR secrets-locked read never overwrites the real ciphertext with the
+ * sentinel string.
+ */
+function isSecretSentinel(value: unknown): boolean {
+  return value === REDACTED_SECRET || value === SECRET_UNAVAILABLE;
+}
 
 const MAX_PATCH_BYTES = 256 * 1024;
 const MAX_PATCH_DEPTH = 32;
@@ -50,7 +62,7 @@ function containsSensitiveSentinel(
   if (
     key !== undefined &&
     SENSITIVE_KEYS.has(key.toLowerCase()) &&
-    value === REDACTED_SECRET
+    isSecretSentinel(value)
   ) {
     return true;
   }
@@ -124,7 +136,7 @@ function restoreRedactedSecrets(
   if (
     key !== undefined &&
     SENSITIVE_KEYS.has(key.toLowerCase()) &&
-    patch === REDACTED_SECRET
+    isSecretSentinel(patch)
   ) {
     return current === undefined ? OMIT : cloneJson(current, depth + 1, state);
   }

@@ -171,7 +171,10 @@ The managed Cursor MCP integration key is write-scoped, so this scope-independen
 boundary (not the service-layer scope check) is what keeps workflow secrets out
 of agent context. Known secret fields are always redacted across spec, trigger,
 and queue JSON; parsing is bounded; malformed or oversized nested JSON is
-replaced with `__redacted_invalid_json__`.
+replaced with `__redacted_invalid_json__`. The **one** value redaction passes
+through unchanged is the `__secret_unavailable__` sentinel (an undecryptable
+secret under a locked/absent master key): it is already terminal, so collapsing
+it into `__redacted__` would hide "re-enter this secret" behind "hidden on read".
 
 **Secret-preserving edits never hand a secret to the caller.** MCP tool and
 resource reads are not write round-trip payloads. To edit a spec that still
@@ -197,10 +200,14 @@ is fetched once and the DEK unwrapped once, then held in memory — the KEK is
 never re-fetched per operation.
 
 **Cipher.** Field values are sealed with **XChaCha20-Poly1305** (random 24-byte
-nonces) and bound to their storage location via **AAD** (a `table:column`-style
-context) so a ciphertext cannot be relocated or swapped between fields. The
-stored token is `enc:v1:` + base64(nonce ‖ ciphertext ‖ tag); the `enc:v1:`
-prefix keeps writes and the migration idempotent.
+nonces) and bound to their storage location via **AAD** so a ciphertext cannot
+be relocated or swapped between fields **or between rows**. Multi-row tables bind
+the **stable row id** into the AAD (`email_profiles:{profile_id}:smtp_password`,
+`workflows:{workflow_id}:spec_json:{field}`); single-row config tables use a
+fixed `table:column` context (no swap surface). A ciphertext lifted from one row
+fails AEAD-open under another row's AAD. The stored token is `enc:v1:` +
+base64(nonce ‖ ciphertext ‖ tag); the `enc:v1:` prefix keeps writes and the
+migration idempotent.
 
 **Scope.** SMTP password (global + per-profile), `inbound_webhook_secret`, and
 the workflow `spec_json` / `trigger_config` / `queue_config` secret fields.
@@ -211,18 +218,48 @@ adapters transparently receive plaintext from the service and the read-scope /
 MCP redaction above still replaces secrets with `__redacted__`. The offboarding
 purge blanks the (now ciphertext) fields exactly as before.
 
-**Rotation.** The KEK can be rotated (mint a new KEK, re-wrap the DEK; field
-data untouched) and the DEK can be rotated (mint a new DEK, decrypt-all +
-re-encrypt, bump the key version). Both are available as IPC commands
-(`rotate_master_key`, `rotate_data_key`).
+**Rotation (crash- and race-safe).** The KEK can be rotated (field data
+untouched) and the DEK can be rotated (mint a new DEK, decrypt-all + re-encrypt,
+bump the key version). Both are available as IPC commands (`rotate_master_key`,
+`rotate_data_key`).
+
+- **KEK rotation is crash-consistent.** It never overwrites the live Keychain KEK
+  in place. It stages the new KEK under a **new generation slot**, then in one DB
+  transaction persists the DEK re-wrapped under it together with the new
+  generation marker, then best-effort deletes the old slot. A crash at either
+  point leaves the DB openable (before commit: DB still points at the old
+  generation, whose KEK is present; after commit: both KEKs present, DB points at
+  the new one — an orphaned old slot is harmless).
+- **DEK rotation is atomic for readers.** The DB commit and the in-memory cipher
+  swap happen under the **same** lock readers acquire, so a concurrent read never
+  sees new ciphertext through the stale old key. A crash between commit and swap
+  self-heals: on next open the cipher is unwrapped from the DB's current wrapped
+  DEK.
 
 **Lost / unavailable master key.** If the KEK is missing or unreadable at
 startup the app runs in a **secrets-locked** state rather than crashing:
 encrypted fields read back as the distinct `__secret_unavailable__` sentinel
-(**not** `__redacted__`), new secret **writes** are rejected with a clear error,
-and all non-secret operation proceeds. A re-provision action
-(`reprovision_secrets`) mints a fresh KEK/DEK so the operator can re-enter
-secrets without destroying the existing ciphertext blindly.
+(**not** `__redacted__`; the read-scope and unconditional-MCP redaction layers
+**preserve** this terminal sentinel and never collapse it to `__redacted__`, on
+every REST/SDK/MCP surface, so callers can always tell "hidden on read" from
+"master key unavailable / needs re-provision"), new secret **writes** are
+rejected with a clear error, and all non-secret operation proceeds. A re-provision action (`reprovision_secrets`) mints a fresh KEK/DEK so
+the operator can re-enter secrets without destroying the existing ciphertext
+blindly — but it **only runs when secrets are genuinely locked**; on a healthy
+DB it refuses, because swapping the active DEK without re-encrypting would brick
+every already-sealed secret. Healthy re-keying is `rotate_master_key` /
+`rotate_data_key`.
+
+**Sealing is verified on every open, never assumed from the schema version.**
+Because the schema can advance to v19 even while the KEK is unavailable (the
+in-place sweep is a no-op when locked), the app tracks a durable
+"sealing incomplete" flag instead of trusting "schema = 19". Each open runs the
+idempotent sweep and counts any remaining in-scope plaintext: only when the
+envelope is available **and** zero plaintext remains does it wipe the
+`*.pre-migrate-*.bak` sidecars and clear the flag; otherwise it keeps the flag
+and the backup and retries on the next open. This closes both the
+crash-skipped-wipe window (a plaintext backup surviving forever) and the
+false-"sealed" state after a locked upgrade.
 
 > **A lost KEK means the existing encrypted secrets are unrecoverable.** This is
 > inherent to encrypting at rest and is accepted by design: there is no in-app

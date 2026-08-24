@@ -39,10 +39,32 @@ use chacha20poly1305::{
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
-/// Keychain service for the single master KEK.
+/// Keychain service for the master KEK (the PR-E envelope key ONLY — distinct
+/// from the #292 managed-MCP-key service in [`crate::keychain`]).
 pub const MASTER_KEK_KEYCHAIN_SERVICE: &str = "chaos-scheduler-master-kek";
-/// Keychain account for the single master KEK.
+/// Keychain account for the master KEK at the initial generation. Equal to
+/// `master_kek_account(INITIAL_KEK_GENERATION)`, kept as a named constant for
+/// the fresh-provision path and tests.
 pub const MASTER_KEK_KEYCHAIN_ACCOUNT: &str = "db-envelope-kek-v1";
+
+/// The first KEK generation (a fresh provision). Crash-safe KEK rotation
+/// (ADR 0011 B4) addresses generation N+1 in a NEW Keychain slot before flipping
+/// the DB, leaving generation N intact so EITHER crash point stays openable.
+pub const INITIAL_KEK_GENERATION: i64 = 1;
+
+/// Keychain account (slot) for KEK `generation`. Generation 1 is the historical
+/// [`MASTER_KEK_KEYCHAIN_ACCOUNT`] so a fresh provision is byte-for-byte
+/// unchanged; each rotation writes the next `db-envelope-kek-v{N}` slot.
+/// Generation-addressed slots are what make KEK rotation crash-consistent across
+/// its two stores (Keychain + DB). This is the PR-E envelope KEK ONLY — the #292
+/// managed MCP key uses a separate service/account and is never touched here.
+pub fn master_kek_account(generation: i64) -> String {
+    if generation == INITIAL_KEK_GENERATION {
+        MASTER_KEK_KEYCHAIN_ACCOUNT.to_string()
+    } else {
+        format!("db-envelope-kek-v{generation}")
+    }
+}
 
 /// AEAD algorithm identifier persisted alongside the wrapped DEK.
 pub const ENVELOPE_ALGO: &str = "XChaCha20Poly1305";
@@ -312,6 +334,27 @@ impl EnvelopeState {
         *self.cipher.write().expect("envelope cipher lock poisoned") = CipherState::Active(cipher);
     }
 
+    /// Atomically run a DEK-rotation `commit` and swap in the `new` cipher under
+    /// the SAME write lock that readers take via [`Self::cipher`] (ADR 0011 B3).
+    ///
+    /// `commit` (the SQLite `tx.commit()` that publishes the re-encrypted fields
+    /// and the newly-wrapped DEK) runs while the write lock is held; the swap to
+    /// `new` happens before the lock is released. A concurrent reader therefore
+    /// either sees {old ciphertext + old cipher} (before) or {new ciphertext +
+    /// new cipher} (after) — never the torn {new ciphertext + stale old cipher}
+    /// that would fail AEAD-open and surface `__secret_unavailable__`. On a
+    /// `commit` error the old cipher stays active and the caller reports failure.
+    pub fn commit_then_swap<E>(
+        &self,
+        new: Arc<FieldCipher>,
+        commit: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut guard = self.cipher.write().expect("envelope cipher lock poisoned");
+        commit()?;
+        *guard = CipherState::Active(new);
+        Ok(())
+    }
+
     /// Drop to the locked state (missing/unreadable master key).
     pub fn set_locked(&self) {
         *self.cipher.write().expect("envelope cipher lock poisoned") = CipherState::Locked;
@@ -384,5 +427,56 @@ mod tests {
         let kek = generate_key();
         let restored = kek_from_b64(&kek_to_b64(&kek)).unwrap();
         assert_eq!(restored, kek);
+    }
+
+    /// B3 (ADR 0011): [`EnvelopeState::commit_then_swap`] must run the commit and
+    /// the in-memory cipher swap ATOMICALLY under the write lock readers take via
+    /// [`EnvelopeState::cipher`]. A reader that races the commit (the "DB commit"
+    /// point) must therefore observe the NEW cipher — never the stale old one
+    /// that would fail AEAD-open on the just-committed new ciphertext.
+    ///
+    /// Deterministic proxy for the DEK-rotation race: the reader is released the
+    /// instant the writer enters the commit closure and then parks on the read
+    /// lock for the whole time the writer holds the write lock; it can only read
+    /// AFTER the swap. A non-atomic implementation (commit, release, then a
+    /// separate `set_active`) would let the reader observe version 1 here — that
+    /// is exactly the pre-fix `rotate_dek` window and is how this test fails
+    /// first against it.
+    #[test]
+    fn commit_then_swap_is_atomic_for_racing_readers() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let env = Arc::new(EnvelopeState::new(Arc::new(
+            crate::keychain::FakeKeyStore::new(),
+        )));
+        env.set_active(Arc::new(FieldCipher::from_bytes(generate_key(), 1)));
+        let new = Arc::new(FieldCipher::from_bytes(generate_key(), 2));
+
+        let (in_commit_tx, in_commit_rx) = mpsc::channel::<()>();
+        let env_reader = Arc::clone(&env);
+        let reader = thread::spawn(move || {
+            // Wait until the writer is inside the commit closure (holding the
+            // write lock), then attempt the read — it must block until the swap.
+            in_commit_rx.recv().unwrap();
+            env_reader.cipher().map(|c| c.version())
+        });
+
+        env.commit_then_swap(Arc::clone(&new), || -> Result<(), ()> {
+            in_commit_tx.send(()).unwrap();
+            // Hold the write lock long enough for the reader to reach and park on
+            // the read lock while the "commit" is in flight.
+            thread::sleep(Duration::from_millis(200));
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            reader.join().unwrap(),
+            Some(2),
+            "a reader racing the commit must observe the NEW cipher (atomic commit+swap), \
+             never the stale old one"
+        );
     }
 }

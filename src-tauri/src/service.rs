@@ -2388,7 +2388,14 @@ fn redact_secret_fields(value: &mut serde_json::Value) {
         serde_json::Value::Object(map) => {
             for (key, child) in map.iter_mut() {
                 if crate::db::SECRET_SPEC_FIELD_NAMES.contains(&key.as_str())
-                    && child.as_str().is_some_and(|s| !s.is_empty())
+                    && child.as_str().is_some_and(|s| {
+                        // Preserve the distinct "master key unavailable" sentinel
+                        // that decrypt-on-read substitutes for an undecryptable
+                        // secret: it is an already-terminal state, not a value to
+                        // scope-redact. Collapsing it into `__redacted__` would hide
+                        // "re-enter this secret" behind "hidden on read".
+                        !s.is_empty() && s != crate::envelope::SECRET_UNAVAILABLE_SENTINEL
+                    })
                 {
                     *child = serde_json::Value::String(
                         SchedulerService::READ_SCOPE_SECRET_SENTINEL.into(),
@@ -2710,6 +2717,36 @@ mod tests {
         assert!(full.spec_json.unwrap().contains("hmac-shhh"));
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// B2 fails-first (ADR 0011): read-scope / MCP redaction must PRESERVE the
+    /// `__secret_unavailable__` sentinel that decrypt-on-read substitutes when
+    /// the master key is unavailable — never collapse it into the scope
+    /// `__redacted__` sentinel. The two are distinct states to the operator:
+    /// "hidden on read" vs "master key unavailable — re-enter this secret". A
+    /// normal plaintext secret must still redact to `__redacted__`.
+    #[test]
+    fn redaction_preserves_secret_unavailable_sentinel() {
+        use crate::envelope::SECRET_UNAVAILABLE_SENTINEL;
+
+        let mut value: serde_json::Value = serde_json::from_str(&format!(
+            r#"{{"secret":"{SECRET_UNAVAILABLE_SENTINEL}","nested":{{"signature_secret":"real-plaintext"}}}}"#
+        ))
+        .unwrap();
+        redact_secret_fields(&mut value);
+
+        // The undecryptable-secret sentinel survives redaction unchanged.
+        assert_eq!(
+            value["secret"],
+            serde_json::Value::String(SECRET_UNAVAILABLE_SENTINEL.to_string()),
+            "the __secret_unavailable__ sentinel must survive redaction: {value}"
+        );
+        // A normal plaintext secret is still redacted to __redacted__.
+        assert_eq!(
+            value["nested"]["signature_secret"],
+            serde_json::Value::String(SchedulerService::READ_SCOPE_SECRET_SENTINEL.to_string()),
+            "a normal plaintext secret must still be scope-redacted: {value}"
+        );
     }
 
     /// PR-D(a) fails-first: overlapping offboards must keep API-key minting
