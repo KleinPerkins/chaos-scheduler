@@ -49,5 +49,11 @@ scheduler.db
 *.pfx
 *.mobileprovision
 
+# Project-local Cursor MCP config — never commit (#292). The managed scheduler
+# key lives in the macOS Keychain, never in this file; the tracked
+# `.cursor/mcp.example.json` / `.cursor/mcp.remote.example.json` carry only
+# placeholders. The `mcp-config-secret-free` CI check enforces this.
+.cursor/mcp.json
+
 # machine-local continual-learning memory — never commit
 agent-learnings.md

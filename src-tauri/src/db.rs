@@ -142,8 +142,10 @@ fn exclude_from_backup(path: &std::path::Path) {
 
 /// Overwrites the file content with zeros before removing it, reducing the
 /// chance that the OS or filesystem retains plaintext content after unlink.
-/// Best-effort: errors at any step fall through to a normal remove.
-fn secure_remove(path: &std::path::Path) {
+/// Best-effort: errors at any step fall through to a normal remove. Shared with
+/// `mcp` (issue #292 review, Finding 2) so offboarding can shred token-bearing
+/// `mcp.json` sidecars with the same audited overwrite-before-unlink helper.
+pub(crate) fn secure_remove(path: &std::path::Path) {
     use std::io::Write as _;
     if let Ok(metadata) = std::fs::metadata(path) {
         let total = metadata.len() as usize;

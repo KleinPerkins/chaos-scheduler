@@ -1,0 +1,30 @@
+{
+  "_comment": [
+    "Example LOCAL / project configuration for the Chaos MCP server over stdio.",
+    "Cursor only auto-loads `.cursor/mcp.json`, which is now git-IGNORED so a real",
+    "key can never be committed. Copy this file to `.cursor/mcp.json` and fill in",
+    "your own SCOPED scheduler API key for local development.",
+    "",
+    "IMPORTANT — the managed integration does NOT store a key here. When the",
+    "Chaos Scheduler app provisions the managed integration, the scheduler API key",
+    "is stored in the macOS Keychain (service 'chaos-scheduler-managed-mcp',",
+    "account 'managed-mcp-api-key') and the managed `command` becomes an app-owned",
+    "launcher script (`<app_data_dir>/mcp/launch-managed.sh`) that resolves the key",
+    "from the Keychain at spawn time. The real key is NEVER written into this file",
+    "(see SECURITY.md 'MCP config and Git history' and docs/adr/0010-keychain-managed-mcp-key.md).",
+    "",
+    "For manual local dev only: put your own scoped key in the UNTRACKED",
+    "`.cursor/mcp.json`, never in this tracked example."
+  ],
+  "mcpServers": {
+    "chaos-scheduler": {
+      "command": "node",
+      "args": ["packages/mcp-server/dist/cli.js"],
+      "env": {
+        "CHAOS_SCHEDULER_URL": "http://127.0.0.1:9618",
+        "CHAOS_SCHEDULER_API_KEY": "REPLACE_WITH_SCOPED_API_KEY",
+        "CHAOS_SCHEDULER_MCP_PROTECTED_ENVIRONMENTS": "prod,production"
+      }
+    }
+  }
+}

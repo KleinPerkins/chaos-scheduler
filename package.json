@@ -18,6 +18,8 @@
     "test:mcp-diff-attribute": "node --test scripts/check-mcp-diff-attribute.test.mjs",
     "check:no-committed-data": "node scripts/check-no-committed-data.mjs",
     "test:no-committed-data": "node --test scripts/check-no-committed-data.test.mjs",
+    "check:mcp-config-secret-free": "node scripts/check-mcp-config-secret-free.mjs",
+    "test:mcp-config-secret-free": "node --test scripts/check-mcp-config-secret-free.test.mjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc -b --noEmit",
