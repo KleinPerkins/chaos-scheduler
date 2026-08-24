@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.7.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v1.6.0...chaos-scheduler-tauri-v1.7.0) (2026-08-24)
+
+
+### Features
+
+* **security:** audit-log read path + revoke-all/purge offboarding ([#386](https://github.com/KleinPerkins/chaos-scheduler/issues/386)) ([1e54879](https://github.com/KleinPerkins/chaos-scheduler/commit/1e54879b0dcfe3e1eef790857b5611f4c82e1d44))
+* **security:** harden sqlite at rest (0600, no-backup, secure-delete) ([#385](https://github.com/KleinPerkins/chaos-scheduler/issues/385)) ([fd88ca4](https://github.com/KleinPerkins/chaos-scheduler/commit/fd88ca4907a29740f46a51a8fc2e2f526cc0be80))
+
 ## [1.6.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-tauri-v1.5.0...chaos-scheduler-tauri-v1.6.0) (2026-08-23)
 
 

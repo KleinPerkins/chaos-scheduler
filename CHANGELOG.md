@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.7.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.6.0...chaos-scheduler-v1.7.0) (2026-08-24)
+
+
+### Features
+
+* **security:** audit-log read path + revoke-all/purge offboarding ([#386](https://github.com/KleinPerkins/chaos-scheduler/issues/386)) ([1e54879](https://github.com/KleinPerkins/chaos-scheduler/commit/1e54879b0dcfe3e1eef790857b5611f4c82e1d44))
+* **security:** harden sqlite at rest (0600, no-backup, secure-delete) ([#385](https://github.com/KleinPerkins/chaos-scheduler/issues/385)) ([fd88ca4](https://github.com/KleinPerkins/chaos-scheduler/commit/fd88ca4907a29740f46a51a8fc2e2f526cc0be80))
+
+
+### Bug Fixes
+
+* **mcp-server:** redact secrets in list_workflows/get_workflow tool reads ([#382](https://github.com/KleinPerkins/chaos-scheduler/issues/382)) ([c6baf8b](https://github.com/KleinPerkins/chaos-scheduler/commit/c6baf8b55819fdfce95bd3a91c4e9752b9fe049c))
+
+
+### Documentation
+
+* capture D05 ADR-0009, credential-security plan, and out-of-band workstreams ([#379](https://github.com/KleinPerkins/chaos-scheduler/issues/379)) ([cbe044e](https://github.com/KleinPerkins/chaos-scheduler/commit/cbe044e4e114db40a9d9a9368548133450a1dffd))
+* **plans:** add design-to-code completion v2 (screen-per-session) ([#381](https://github.com/KleinPerkins/chaos-scheduler/issues/381)) ([039b50a](https://github.com/KleinPerkins/chaos-scheduler/commit/039b50ac56abf28cc0e24695b13a2e6bbb23f06c))
+* **plans:** record Option A (FileVault-stack) as at-rest posture ([#383](https://github.com/KleinPerkins/chaos-scheduler/issues/383)) ([f40adb0](https://github.com/KleinPerkins/chaos-scheduler/commit/f40adb03159e823cc5b7e15df5ceb911a07f9f6b))
+
 ## [1.6.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.5.0...chaos-scheduler-v1.6.0) (2026-08-23)
 
 

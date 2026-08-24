@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v1.3.0...mcp-server-v1.3.1) (2026-08-24)
+
+
+### Bug Fixes
+
+* **mcp-server:** redact secrets in list_workflows/get_workflow tool reads ([#382](https://github.com/KleinPerkins/chaos-scheduler/issues/382)) ([c6baf8b](https://github.com/KleinPerkins/chaos-scheduler/commit/c6baf8b55819fdfce95bd3a91c4e9752b9fe049c))
+
 ## [1.3.0](https://github.com/KleinPerkins/chaos-scheduler/compare/mcp-server-v1.2.0...mcp-server-v1.3.0) (2026-08-23)
 
 
