@@ -9,10 +9,10 @@ version is never modified.
 
 ## Index
 
-| Plan | Status | Date | Notes |
-|---|---|---|---|
-| [design-to-code-completion-v2](design-to-code-completion-v2.md) | DRAFT | 2026-08-23 | Screen-per-session roadmap superseding v1's M1/M2/M3 milestones: one UI surface uplifted to the Mission Control design language per session, each passing the G11 native-proof gate. Backbone = Figma triage (P0) + foundation primitives (F0) + Run Detail / Mission Control / History / Workflow authoring / Admin / Settings / tray-popup screen sessions + design↔code re-sync closeout. Each screen promotes to its own task-block execution plan at dispatch. |
-| [credential-security-hardening-v1](credential-security-hardening-v1.md) | DRAFT | 2026-08-23 | Credential-exposure hardening surfaced by a read-only security audit: redact MCP tool reads, secret-scan CI, at-rest file hardening, audit-log/offboarding + read-only managed key, optional envelope encryption (open decision). Distinct MCP/SDK/backend subsystem; anchored to open security issue #292. Not yet operator-accepted. |
+| Plan                                                                    | Status | Date       | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ----------------------------------------------------------------------- | ------ | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [design-to-code-completion-v2](design-to-code-completion-v2.md)         | DRAFT  | 2026-08-23 | Screen-per-session roadmap superseding v1's M1/M2/M3 milestones: one UI surface uplifted to the Mission Control design language per session, each passing the G11 native-proof gate. Backbone = Figma triage (P0) + foundation primitives (F0) + Run Detail / Mission Control / History / Workflow authoring / Admin / Settings / tray-popup screen sessions + design↔code re-sync closeout. Each screen promotes to its own task-block execution plan at dispatch. |
+| [credential-security-hardening-v1](credential-security-hardening-v1.md) | DRAFT  | 2026-08-23 | Credential-exposure hardening surfaced by a read-only security audit: redact MCP tool reads, secret-scan CI, at-rest file hardening, audit-log/offboarding + read-only managed key, optional envelope encryption (open decision). Distinct MCP/SDK/backend subsystem; anchored to open security issue #292. Not yet operator-accepted.                                                                                                                              |
 
 ## Conventions
 
@@ -34,19 +34,19 @@ Before flipping an `agentic-execution` plan's Status to `ACCEPTED`, run this `wr
 self-review — a zero-context subagent must be able to execute each work item from its block alone:
 
 - [ ] **Spec coverage:** every requirement in the source spec maps to at least one work item; nothing
-  silently dropped.
+      silently dropped.
 - [ ] **Placeholder scan:** no `TBD`, `add error handling`, `similar to Task N`, or code step without
-  a code block anywhere in the Work items.
+      a code block anywhere in the Work items.
 - [ ] **Type consistency:** every name/type a task lists under `Produces` matches what a consuming
-  task lists under `Consumes`; no work item references a symbol no task defines.
+      task lists under `Consumes`; no work item references a symbol no task defines.
 - [ ] **Self-containment:** each work item names exact file paths and gives runnable commands with
-  expected pass/fail output; no cross-task "see above".
+      expected pass/fail output; no cross-task "see above".
 
 ## Archive
 
 Superseded and retired plans that are no longer active but preserved for history live in
 `docs/archive/plans/` (moved via `git mv`, not deleted).
 
-| Plan | Status | Date | Notes |
-|---|---|---|---|
+| Plan                                                                             | Status           | Date       | Notes                                                                                                                                                                                                                     |
+| -------------------------------------------------------------------------------- | ---------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [design-to-code-completion-v1](../archive/plans/design-to-code-completion-v1.md) | SUPERSEDED by v2 | 2026-08-23 | Original M1/M2/M3 milestone roadmap for the remaining Design-to-Code work; superseded by the screen-per-session `design-to-code-completion-v2.md`. Retained byte-identical, moved to `docs/archive/plans/` per POLICY §9. |

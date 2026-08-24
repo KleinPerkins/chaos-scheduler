@@ -1,4 +1,5 @@
 # ADR 0009: The D05 fix-agent is propose-only — never auto-merged or auto-applied (born-draft PR, trusted-local-tool threat model)
+
 Status: accepted — 2026-08-23
 
 ## Decision
@@ -49,7 +50,7 @@ must not weaken any invariant here.
   PR; the cloud and local paths converge on the identical human-reviewed draft-PR outcome, so the UI
   and the reviewer see one contract.
 - **Forecloses.** No backend or UI path may auto-merge or auto-apply a fix, set
-  `workOnCurrentBranch`, or open a non-draft fix PR. The M1 UI only *surfaces* this backend; it adds
+  `workOnCurrentBranch`, or open a non-draft fix PR. The M1 UI only _surfaces_ this backend; it adds
   no PR-merge path and cannot weaken the born-draft/new-branch/rerun-gate guarantees.
 - **Invariant to keep true.** Propose-only + born-draft + new-branch-only + credential-scrubbed
   agent + green-rerun-gated local path + hook-hijack-proof git with a PR-base preflight — each

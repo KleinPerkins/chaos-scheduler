@@ -1,4 +1,5 @@
 # ADR 0007: All manual runs go through admission control via the `dispatch_manual_run` choke point
+
 Status: accepted — 2026-08-22
 
 ## Decision

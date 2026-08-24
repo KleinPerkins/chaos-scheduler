@@ -34,12 +34,14 @@ The Design-to-Code Completion roadmap — screen/component coverage (F01–F24, 
 ## 2. Scope and non-goals
 
 **In scope:**
+
 - **M1 — D05:** the Run-detail agent-actions UI over the already-shipped, disabled-by-default fix-agent backend/cloud/local paths.
 - **M2 — P4:** Mission Control composition completion (F01/F03/F04/F05/F08/F11/F18) and the missing demo/transient states (F19/F22/F23, F21/F24).
 - **M3 — P5:** design↔code re-sync and audit close (G00 co-design half, G03 token/version readback, G04 exhaustive audit + residual R01, G12 unify-in-code, G13 rollback drill, Code Connect version pinning).
 
 **Non-goals:**
-- Any change to the shipped fix-agent **backend** contract or its safety invariants — this plan only *surfaces* it; no PR-merge path is added and `workOnCurrentBranch` is never set.
+
+- Any change to the shipped fix-agent **backend** contract or its safety invariants — this plan only _surfaces_ it; no PR-merge path is added and `workOnCurrentBranch` is never set.
 - Re-opening resolved decisions (D00 sequencing, D02 384×590 popup, D03 MC depth/history consolidation, D07 charting, D08 race-track), or re-adding **F06** as a standalone surface (removed only via D03 consolidation into F11).
 - `repo-baseline`/pr-automation integration for this repo — it stays independently governed; doc-warden governs its documentation only (ADR-0008 in `~/dev`).
 - Adding a charting library (ADR-0008), or moving business logic out of `SchedulerService`.
@@ -48,12 +50,12 @@ The Design-to-Code Completion roadmap — screen/component coverage (F01–F24, 
 
 Verified from `design/divergence-ledger.md` (current `main`) and the merged PRs it cites:
 
-- **Repo is ahead of the roadmap baseline for Mission Control.** The D07 chart primitives are already composed into `Overview` (race-track, status donut, dual-axis trend), `OperationalHealth` (dual-axis), `NeedsAttention` (impact bars), and `Resources` (gauge + queue line) — ledger §1 note. P4 is *completion*, not *greenfield*.
+- **Repo is ahead of the roadmap baseline for Mission Control.** The D07 chart primitives are already composed into `Overview` (race-track, status donut, dual-axis trend), `OperationalHealth` (dual-axis), `NeedsAttention` (impact bars), and `Resources` (gauge + queue line) — ledger §1 note. P4 is _completion_, not _greenfield_.
 - **Manual-run standardization is COMPLETE (Decision-3).** All manual runs (desktop UI + REST + SDK + MCP) route through admission control; `trigger_workflow` was removed (#266); `rerun_workflow` routes through `dispatch_manual_run` with a visible queued/admitted/duplicate outcome (#263/#264); SDK `runWorkflow` (#265) and MCP `run_workflow_now` (#267) are deprecated with corrected docs (#268).
 - **Run read model snapshots the run-time environment** (schema v13, Decision-4, #251) so re-homing a workflow never re-buckets its history; the lean log-free read model (#247) lives at the DB/read-model layer but is **not yet wired** to the F11 Global History surface.
 - **D05 backend is shipped, disabled-by-default, UI pending.** Backend safety foundation (#275/#277/#278/#279/#281), cloud propose-only path (#284), local rerun-gated path (#286/#287/#288/#289), and PR2e "Option C" born-draft cloud PR (#313, ledger §5d) are merged and green, each safety invariant carrying a biting failing-first test. The pending surface is: a Settings "Cursor integration" section, RunDetail actions, and a consent `Modal`.
 - **G00 mirror-half is satisfied for shipped surfaces** (ledger §5b). The **co-design half** — MC surfaces F01/F03/F04/F05, demo states F19/F22/F23, and MC components C12–C29 — is OPERATOR-GATED (issues #301/#305/#306), so G00 is not fully complete.
-- **G04 binding-half is COMPLETE** (ledger §5a). Residual **R01** (node-level proof that every descendant is a zero-remote-*instance* node) and node IDs for unmapped masters remain; live Code Connect reports `version: "unknown"` for every mapped node (no pin).
+- **G04 binding-half is COMPLETE** (ledger §5a). Residual **R01** (node-level proof that every descendant is a zero-remote-_instance_ node) and node IDs for unmapped masters remain; live Code Connect reports `version: "unknown"` for every mapped node (no pin).
 
 ## 4. Approach
 

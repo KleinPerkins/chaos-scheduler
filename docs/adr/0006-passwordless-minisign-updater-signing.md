@@ -1,4 +1,5 @@
 # ADR 0006: Passwordless minisign updater signing, separate from and additional to Apple Developer-ID signing
+
 Status: accepted — 2026-08-22
 
 ## Decision

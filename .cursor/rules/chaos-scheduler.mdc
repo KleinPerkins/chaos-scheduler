@@ -89,6 +89,10 @@ Definition resources always redact known secrets and report parse status.
 Parsed stored configuration is not effective configuration or proof of runtime
 enforcement.
 
+Definition resources always redact known secrets and report parse status.
+Parsed stored configuration is not effective configuration or proof of runtime
+enforcement.
+
 ## Prompts
 
 Reusable templates: `triage_failed_run(run_id)`,

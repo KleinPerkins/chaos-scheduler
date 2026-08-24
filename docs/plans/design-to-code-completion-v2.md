@@ -36,13 +36,15 @@ v1 consolidated the remaining Design-to-Code work into a durable, doc-warden-tra
 ## 2. Scope and non-goals
 
 **In scope:**
+
 - The **screen-per-session execution model** (§4) and its per-session Definition of Done, including the **G11 native-proof** gate applied per screen and once as a program-level aggregate.
 - Every real app surface as a screen session (§5): **Run Detail** (D05), the **Mission Control** cluster + demo/transient states (P4), **Global/Run History**, **Workflow authoring**, **Admin** (Environments/Integrations/Queues), **Settings**, and the **tray popup**.
 - The two cross-cutting workstreams that make screens land compliant and closed: the **Figma triage/prune** precondition and the **foundation-first primitive uplift** (epic #329 / #334: `ui/Notice`, `Modal`/`PageHeader`, `.page-title`, a lint gate).
 - The **design↔code re-sync/audit close** (v1's P5) re-scoped as a program closeout after the surfaces land.
 
 **Non-goals:**
-- Any change to the shipped fix-agent **backend** contract or its safety invariants (ADR-0009) — screens only *surface* it; no PR-merge path is added and `workOnCurrentBranch` is never set.
+
+- Any change to the shipped fix-agent **backend** contract or its safety invariants (ADR-0009) — screens only _surface_ it; no PR-merge path is added and `workOnCurrentBranch` is never set.
 - Re-opening resolved decisions (D00 sequencing, D02 384×590 popup, D03 MC depth/history consolidation, D07 charting, D08 race-track), or re-adding **F06** as a standalone surface (consolidated into F11 per D03).
 - **Credential-security hardening** — a distinct MCP/SDK/backend subsystem tracked in its own plan (`credential-security-hardening-v1.md`, §8); it is cross-referenced here, never folded into this design roadmap.
 - `repo-baseline`/pr-automation integration for this repo — it stays independently governed; doc-warden governs its documentation only (ADR-0008 in `~/dev`).
@@ -55,7 +57,7 @@ Verified from `design/divergence-ledger.md` (current `main`), the merged PRs it 
 - **The MC design language did not filter into the non-MC surfaces.** Mission Control got the "delightful" aesthetic; subpages, dialogs, editors, and Settings drifted saturated/retro — bound to valid tokens but using the wrong patterns (saturated fills, ad-hoc type scale) and hand-built primitives instead of composed DS masters. The retro look is baked into **shipped code** (not just mocks) across ~11 surfaces (Queues, Integrations, Workflow Editor, Environments, Run/Global History, tray popup, …).
 - **Concrete shipped-code design debt** (from the audit): a systemic off-scale `.page-title` inherited by every non-MC page; `ui/Notice` carries hardcoded Google-palette RGB that is not even tokenized (worst offender); and Settings' email/SMTP/theme sections have genuinely broken CSS (undefined `var(--bg)`/`var(--text)`, hardcoded `#f8f8fa`, raw mono).
 - **Tracking artifacts exist.** The uplift is scoped in Project #3 as design-discipline epic **#329** with children **#330–#335** (foundation-first), and the shared Figma file has a triage page `00 — Status & Triage` (node `852:7289`) tagging ~50 frames (19 FINAL / 22 DUP / 3 WIP / 1 DRAFT / 1 FIX / 1 JUNK / 3 LIBRARY).
-- **The repo is ahead of the roadmap baseline for Mission Control.** The D07 chart primitives are already composed into `Overview` (race-track, status donut, dual-axis trend), `OperationalHealth` (dual-axis), `NeedsAttention` (impact bars), and `Resources` (gauge + queue line) — ledger §1 note. MC work is *completion*, not greenfield.
+- **The repo is ahead of the roadmap baseline for Mission Control.** The D07 chart primitives are already composed into `Overview` (race-track, status donut, dual-axis trend), `OperationalHealth` (dual-axis), `NeedsAttention` (impact bars), and `Resources` (gauge + queue line) — ledger §1 note. MC work is _completion_, not greenfield.
 - **D05 backend is shipped, disabled-by-default, UI pending.** The safety foundation (#275/#277/#278/#279/#281), cloud propose-only path (#284), local rerun-gated path (#286/#287/#288/#289), and PR2e "Option C" born-draft cloud PR (#313, ledger §5d) are merged and green, each safety invariant carrying a biting failing-first test; ADR-0009 records the propose-only invariant. The pending surface is a Settings "Cursor integration" section, RunDetail actions, and a consent `Modal`.
 - **The design↔code gates are partly closed.** G00 mirror-half is satisfied for shipped surfaces; the **co-design half** (MC surfaces F01/F03/F04/F05, demo states F19/F22/F23, MC components C12–C29) is operator-gated (#301/#305/#306). G04 binding-half is complete; residual **R01** (node-level zero-remote-instance proof) and node IDs for unmapped masters remain; live Code Connect reports `version: "unknown"` for every mapped node.
 - **G11 native-proof (R07) is open.** No surface has yet been proven in a signed / release-equivalent macOS build; v1 explicitly left this Definition-of-Done gate uncovered by M1–M3.
@@ -71,9 +73,10 @@ Verified from `design/divergence-ledger.md` (current `main`), the merged PRs it 
 
 **Global sequence:** finalize all screens (design-to-code ready) → build screens → close backend gaps → test → iterate → test → repeat. Two cross-cutting workstreams bracket the screens: the **Figma triage/prune** precondition (so sessions iterate from a single canonical frame set) and the **foundation-first primitive uplift** (so every screen inherits compliant primitives), both in §5; and the **design↔code re-sync/audit close** (§5) as the program closeout once the surfaces land.
 
-**G11 native-proof gate (the Definition-of-Done gate).** A surface is *native-proven* when it renders correctly in a **signed / release-equivalent macOS build** (not merely a browser or component harness): correct viewport (main window 960×680, or the tray popup 384×590), correct self-hosted Inter fonts, `cs.*` tokens with no raw hex and no saturated/retro drift, working scroll/reflow, focus, tray navigation, and drill-downs — with a native-viewport visual baseline captured in Playwright (`e2e/visual/`) and green, and Playwright mocks proven isolated from the production SQLite DB. G11 is applied **per screen** as each session's closeout and once more as a **program-level aggregate** smoke across all surfaces (R07).
+**G11 native-proof gate (the Definition-of-Done gate).** A surface is _native-proven_ when it renders correctly in a **signed / release-equivalent macOS build** (not merely a browser or component harness): correct viewport (main window 960×680, or the tray popup 384×590), correct self-hosted Inter fonts, `cs.*` tokens with no raw hex and no saturated/retro drift, working scroll/reflow, focus, tray navigation, and drill-downs — with a native-viewport visual baseline captured in Playwright (`e2e/visual/`) and green, and Playwright mocks proven isolated from the production SQLite DB. G11 is applied **per screen** as each session's closeout and once more as a **program-level aggregate** smoke across all surfaces (R07).
 
 **Per-session Definition of Done.** A screen session is DONE when:
+
 - its design debt is audited and captured as a Project #3 screen issue;
 - an approved Dark-pinned Figma mock exists for the surface (design-first);
 - the surface is composed from `cs.*`-bound DS masters (no hand-built primitives), on-scale type/weights/spacing/radii, tokens-only, with no saturated/retro drift and no `.page-title`/`ui/Notice` debt;
@@ -99,13 +102,13 @@ Ordered by leverage. The two preconditions come first (they make screens land bo
 - **Work:** tokenize `ui/Notice` to `cs.*`; fix the systemic `.page-title` to the MC type scale; lift `Modal` and `PageHeader` to composed `cs.*`-bound masters; add a **lint gate** that blocks raw hex, off-token fills, and off-type-scale so new screen code lands **born-compliant**.
 - **DoD:** the shared primitives are MC-compliant and the lint gate is green in CI; sequenced before (or alongside) the first screen session so surfaces inherit compliant primitives. Tracked as epic #329 children #330–#335.
 
-### S1 — Run Detail (F10 / D05)  ·  *maps v1 M1*
+### S1 — Run Detail (F10 / D05) · _maps v1 M1_
 
 - **Debt:** the shipped fix-agent capability is not yet surfaced; the earlier D05 mock drifted retro. (Shipped `RunDetail` + the Settings "Cursor integration" code already meet the MC rubric, so the uplift here is mostly composing the actions/consent surface compliantly, not a rebuild.)
 - **Work:** expose the already-shipped, disabled-by-default fix-agent path — a Settings "Cursor integration" opt-in section, RunDetail "Open in Cursor / Dispatch fix agent" actions on failed runs, a consent `Modal` (built from the `Modal` master), and the dispatch outcome (queued/admitted/duplicate) + born-draft PR link. UI calls the existing admission-controlled IPC commands only; no new backend.
 - **G11 DoD:** reachable only after explicit opt-in; every path calls the propose-only/admission-controlled commands and can never auto-merge/apply or set `workOnCurrentBranch` (ADR-0009), each as a failing-first test; consent copy is accurate; renders native at 960×680 with a green native-viewport baseline; ships default-off. First because the backend is already shipped — the least code to a proven vertical slice.
 
-### S2 — Mission Control cluster + demo/transient states  ·  *maps v1 M2 (P4)*
+### S2 — Mission Control cluster + demo/transient states · _maps v1 M2 (P4)_
 
 - **Surfaces:** F01 Overview (`overview/Overview.tsx`), F03 Operational Health (`missionControl/OperationalHealth.tsx`), F04 Needs Attention (`missionControl/NeedsAttention.tsx`), F05 Resources (`missionControl/Resources.tsx`), F08 Workflow Detail (`WorkflowDetail.tsx`); demo/transient states F19/F22/F23 and F21/F24.
 - **Debt:** these already carry the MC language but are partway through — missing sticky Lookback + two-group IA (Overview), the full KPI sets (Operational Health, Workflow Detail), the Collapsed/Debugging/FixReady/Fixed states (Needs Attention), the worker table (Resources, in scope per D03), and the missing demo states (collapsible Daily groups F19, Active/Disabled filter F22, plus F21/F24 persistent queued/running row treatments per D04).
@@ -115,7 +118,7 @@ Ordered by leverage. The two preconditions come first (they make screens land bo
 ### S3 — Global / Run History (F11, F18)
 
 - **Surfaces:** `GlobalHistory.tsx` (F11), `RunHistory.tsx` (F18).
-- **Debt:** among the ~11 retro shipped surfaces (Run/Global History) *and* incomplete MC composition — F11 does not yet wire the lean log-free read model (#247) or the snapshotted `run_environment` (schema v13).
+- **Debt:** among the ~11 retro shipped surfaces (Run/Global History) _and_ incomplete MC composition — F11 does not yet wire the lean log-free read model (#247) or the snapshotted `run_environment` (schema v13).
 - **Work:** uplift both to the MC language; add sticky Lookback/KPIs, env + duration columns, and the rehomed F06 aggregate charts (D03); wire the lean read model (#247) and snapshotted environment (schema v13) to F11.
 - **G11 DoD:** both render native at 960×680 on the MC language with green baselines; F11 reads the lean read model + snapshotted environment; re-homing a workflow never re-buckets its history.
 
@@ -147,9 +150,10 @@ Ordered by leverage. The two preconditions come first (they make screens land bo
 - **Work:** uplift the popup to the MC language and composed masters; preserve the AD10 queue-run affordance (D04); honor the D02 384×590 popup geometry.
 - **G11 DoD:** renders native in the **popup 384×590** viewport (not just the main window) with correct scroll/reflow, focus, and tray navigation, on the MC language, green popup-viewport baseline.
 
-### Closeout — design↔code re-sync + audit close (R07 aggregate G11)  ·  *maps v1 M3 (P5)*
+### Closeout — design↔code re-sync + audit close (R07 aggregate G11) · _maps v1 M3 (P5)_
 
 Runs after the surfaces land (the re-synced surfaces must exist):
+
 - **G00 co-design half:** land the MC mocks (F01/F03/F04/F05, demo states, C12–C29) and close #301/#305/#306.
 - **G03/G04:** live token/version readback and the exhaustive Figma plugin/API audit; resolve residual **R01** (node-level `INSTANCE`/`mainComponent.remote` pass) and capture node IDs for the unmapped masters.
 - **Code Connect version pin:** replace `version: "unknown"` across the mapped nodes (`*.figma.tsx` + `figma.config.json`).
@@ -179,4 +183,4 @@ When a screen session is dispatched, author `docs/plans/design-to-code-completio
 ## 8. Related / out-of-band workstreams
 
 - **Credential-security hardening** → its own governed plan, [`credential-security-hardening-v1.md`](credential-security-hardening-v1.md) (DRAFT). A read-only audit found the managed Cursor MCP key is minted `["read","write"]`, so everyday MCP **tool** reads return unredacted workflow secrets into agent/LLM context, plus at-rest, secret-scan-CI, audit-log/offboarding, and webhook-redaction gaps. Anchored to open security issue #292. It is a **distinct MCP/SDK/backend subsystem** and is deliberately **not** folded into this design roadmap — it is cross-referenced here only.
-- **Prior milestone framing (v1).** v1 (`design-to-code-completion-v1.md`, retained byte-identical at `docs/archive/plans/`) organized the same remaining work as M1 (D05) / M2 (P4) / M3 (P5) and listed design-discipline uplift, G11 native-proof, and Figma triage as *out-of-band* while leaving screen-per-session an open decision. This v2 **adopts** screen-per-session and pulls those three workstreams **in-band**: the design-discipline uplift becomes the F0 foundation + the per-screen uplift backbone (§5), G11 becomes the per-session and program DoD gate (§4), and Figma triage becomes the P0 precondition (§5). Only credential-security remains out-of-band.
+- **Prior milestone framing (v1).** v1 (`design-to-code-completion-v1.md`, retained byte-identical at `docs/archive/plans/`) organized the same remaining work as M1 (D05) / M2 (P4) / M3 (P5) and listed design-discipline uplift, G11 native-proof, and Figma triage as _out-of-band_ while leaving screen-per-session an open decision. This v2 **adopts** screen-per-session and pulls those three workstreams **in-band**: the design-discipline uplift becomes the F0 foundation + the per-screen uplift backbone (§5), G11 becomes the per-session and program DoD gate (§4), and Figma triage becomes the P0 precondition (§5). Only credential-security remains out-of-band.

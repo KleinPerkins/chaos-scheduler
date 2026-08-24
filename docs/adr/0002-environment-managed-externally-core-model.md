@@ -1,4 +1,5 @@
 # ADR 0002: `environment` + `managed_externally` replace the overloaded `corpus` concept
+
 Status: accepted — 2026-08-22
 
 ## Decision

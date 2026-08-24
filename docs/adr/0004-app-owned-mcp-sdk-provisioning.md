@@ -1,4 +1,5 @@
 # ADR 0004: MCP/SDK are app-owned provisioned artifacts version-pinned to the build (not DMG-bundled, not floating `npx`)
+
 Status: accepted — 2026-08-22
 
 ## Decision

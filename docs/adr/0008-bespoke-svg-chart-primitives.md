@@ -1,4 +1,5 @@
 # ADR 0008: Charts use bespoke in-repo SVG primitives (d3-scale/d3-shape), not a charting library
+
 Status: accepted — 2026-08-22
 
 ## Decision

@@ -32,6 +32,7 @@ A prior read-only audit found that, although Chaos Scheduler already does many t
 ## 2. Scope and non-goals
 
 **In scope:**
+
 - **PR-A — Redaction as an invariant.** Redact MCP **tool** reads (`list_workflows`, `get_workflow`) to match the `chaos://` **resource** redaction, regardless of key scope, plus a redaction-coverage test asserting no read surface emits a raw secret.
 - **PR-B — Secret-scan gate.** A CI secret-scan (e.g. gitleaks) + a pre-commit hook; an e2e/artifact scan asserting no known test secret appears in the built app, process env/argv, or config files.
 - **PR-C — At-rest hardening (FileVault-stack).** `0600` on the DB and backups, `0700` on app-data; `secure_delete` + VACUUM-on-delete; Time-Machine/cloud-sync exclusion; `.bak` sidecars covered by `.gitignore`.
@@ -40,6 +41,7 @@ A prior read-only audit found that, although Chaos Scheduler already does many t
 - **Documentation/caller-responsibility fixes:** correct `SECURITY.md`/SDK-README language on MCP-tool-vs-resource redaction, the SDK env-var key being the embedding app's responsibility, the `inbound_webhook_secret` setter/HMAC status, the `fix_agent_dispatches.detail` doc/code mismatch, and remove the "Add to Cursor" argv key-passing flow.
 
 **Non-goals:**
+
 - Moving every symmetric webhook/SMTP secret into Keychain, or whole-DB SQLCipher (justified: HMAC secrets must be runtime-usable; FileVault + `0600` + `secure_delete` + no-sync + redaction is a defensible baseline). Envelope encryption is offered as PR-E only.
 - Re-opening the D05 fix-agent posture (ADR-0009) or the admission-control choke point (ADR-0007).
 - The design-to-code UI roadmap (`design-to-code-completion-v1.md`); this is a distinct security subsystem.
@@ -65,34 +67,40 @@ Verified against current `main` where cited; other findings are audit-reported (
 ## 5. Work items
 
 ### PR-A — Redact MCP tool reads (redaction invariant)
+
 - **Objective:** Apply the `chaos://` resource projection redaction to the `list_workflows` and `get_workflow` MCP **tool** outputs, regardless of key scope, and lock it with a redaction-coverage test.
 - **Scope:** `packages/mcp-server/src/server.ts` (wrap the two tool handlers with `projectWorkflowsForResource` / `projectWorkflowForResource`); a new coverage-matrix test asserting no read surface emits a raw secret; `SECURITY.md` wording corrected so "MCP tools are always redacted" is true. `patch_workflow_spec`'s internal server-side fetch stays unaffected so secret-preserving edits still work.
 - **Prerequisites:** re-confirm the tool handlers and REST redaction semantics on the dispatch-time `main`.
 - **DoD:** a write-scoped key can no longer read a raw workflow secret through `list_workflows`/`get_workflow`; the coverage test fails first, then passes; edit round-trips via `patch_workflow_spec` are unchanged.
 
 ### PR-B — Secret-scan CI + pre-commit gate
+
 - **Objective:** Prevent any secret from reaching git and prove the built artifact carries none.
 - **Scope:** a CI secret-scan job (e.g. gitleaks) + a pre-commit hook (via the existing lefthook config); an e2e/artifact scan asserting no known test secret appears in the built app bundle, running process env/argv, or config files.
 - **DoD:** a planted test secret fails CI and the pre-commit hook; the artifact scan is green on a clean build.
 
 ### PR-C — At-rest hardening (FileVault-stack)
+
 - **Objective:** Harden secret-bearing files above FileVault.
 - **Scope:** `src-tauri/src/db.rs` (+ callers) — `0600` on the SQLite DB and `.bak` backups, `0700` on app-data; enable `secure_delete` and VACUUM-on-delete; exclude the DB/backups from Time Machine and document cloud-sync exclusion; extend `.gitignore` to cover `.bak` sidecars.
 - **DoD:** new DB/backup files are `0600`; deletes are secure; backups carry the exclusion attribute; a test asserts the permission/pragma settings.
 
 ### PR-D — Audit + offboarding + least-privilege
+
 - **Objective:** Give IT-grade visibility and a clean revoke/offboard path, and shrink the managed key's blast radius.
 - **Scope:** a read-only `api_audit_log` access view (new append-only migration + a read path/command); a one-action revoke-all-keys / purge-secrets offboarding flow; default the managed Cursor MCP key to **read-only** (`src-tauri/src/mcp.rs`), elevating to write only during an explicit authoring action.
 - **Prerequisites:** the managed-key → Keychain foundation (#292).
 - **DoD:** the audit log is readable through the product; one action revokes all keys and purges secrets/Keychain items; the everyday managed session is read-only + redacted, with write elevated only on authoring.
 
 ### PR-E — Optional envelope encryption (DEFERRED)
+
 - **DECIDED 2026-08-23 — Option A (FileVault-stack) is the chosen at-rest posture.** PR-C implements this baseline. PR-E / Option B is deferred as optional and should only be revisited if Affirm IT/security ever mandates application-level at-rest encryption beyond FileVault.
   - **Option A — FileVault-stack (PR-C; chosen).** Covers powered-off device loss, other-local-user reads, forensic residue, and backup/sync exfil at near-zero cost and with no data migration; HMAC secrets remain runtime-usable. Does not defend against malware already running as the same user on an unlocked Mac — a narrow threat that falls outside the practical scope of a personal-use tool.
   - **Option B — envelope encryption (this PR-E; DEFERRED / optional).** Secrets would be AEAD-encrypted at rest under a Keychain-held data key (same trust boundary established by the Keychain foundation); a copied/backed-up DB becomes ciphertext and same-user malware must also pull the ACL-bound Keychain key. The only added protection over Option A is against malware already running as the same user on an unlocked Mac. Cost: a one-time reversible migration + secure-wipe of pre-migration `.bak`s, a startup key fetch, and ongoing AEAD/rotation/failure-mode complexity. **Revisit trigger:** Affirm IT/security mandates application-level at-rest encryption beyond FileVault.
 - **DoD (only if Option B is later adopted):** secrets are AEAD-encrypted at rest under a Keychain data key; the migration is transactional and reversible; pre-migration backups are securely wiped; startup fetch and rotation are tested.
 
 ### Documentation / caller-responsibility fixes (fold into the nearest slice)
+
 - Correct `SECURITY.md`/SDK-README on MCP-tool-vs-resource redaction (PR-A) and that the SDK/remote-MCP env-var key is the embedding app's responsibility (Chaos Scheduler cannot secure the caller's environment).
 - Resolve the `inbound_webhook_secret` gap: add a setter (and real HMAC on `/dispatch`) **or** correct the docs to state `/dispatch` is bearer-token-authenticated.
 - Document outbound-webhook URLs as caller-owned (do not embed credentials); file a follow-up for a dedicated auth-header/bearer field or URL-query redaction, plus an `action_dead_letters` redaction guard/test.

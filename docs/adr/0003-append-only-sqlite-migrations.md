@@ -1,4 +1,5 @@
 # ADR 0003: SQLite migrations are append-only, transactional, and never mutated after shipping
+
 Status: accepted — 2026-08-22
 
 ## Decision

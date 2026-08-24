@@ -1,4 +1,5 @@
 # ADR 0001: SchedulerService is the single business-logic boundary; IPC/REST/SDK/MCP are thin adapters
+
 Status: accepted — 2026-08-22
 
 ## Decision

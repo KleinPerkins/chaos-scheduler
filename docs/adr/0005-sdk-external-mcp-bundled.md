@@ -1,4 +1,5 @@
 # ADR 0005: Bundle `mcp-server` with tsup but keep `@chaos-scheduler/sdk` external
+
 Status: accepted — 2026-08-22
 
 ## Decision
