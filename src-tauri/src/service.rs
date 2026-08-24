@@ -14,6 +14,7 @@ use crate::scheduler::{dispatch_non_cron_workflow, DispatchOutcome, NonCronDispa
 use crate::workflow_spec::{WorkflowKind, WorkflowSpec};
 use chrono::{DateTime, Utc};
 use std::process::Output;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Sentinel that replaces a stored SMTP password whenever a profile leaves the
@@ -218,6 +219,9 @@ pub enum ServiceError {
     Governance(String),
     /// Entity not found (HTTP 404).
     NotFound(String),
+    /// Rejected because it conflicts with an in-progress lifecycle operation,
+    /// e.g. minting an API key while offboarding is purging/revoking (HTTP 409).
+    Conflict(String),
     /// Unexpected internal / persistence failure (HTTP 500).
     Internal(String),
 }
@@ -228,6 +232,7 @@ impl std::fmt::Display for ServiceError {
             ServiceError::Validation(m)
             | ServiceError::Governance(m)
             | ServiceError::NotFound(m)
+            | ServiceError::Conflict(m)
             | ServiceError::Internal(m) => write!(f, "{m}"),
         }
     }
@@ -242,6 +247,7 @@ impl ServiceError {
             ServiceError::Validation(_) => 400,
             ServiceError::Governance(_) => 403,
             ServiceError::NotFound(_) => 404,
+            ServiceError::Conflict(_) => 409,
             ServiceError::Internal(_) => 500,
         }
     }
@@ -1135,6 +1141,24 @@ pub struct SchedulerService {
     clock: Arc<dyn Clock>,
     protected_environments: Vec<String>,
     allow_protected_writes: bool,
+    /// Set for the duration of an offboarding purge so all key-mint paths
+    /// (`create_api_key`, incl. the managed-MCP mint) reject new keys — a
+    /// concurrent mint must not reintroduce a live credential after revoke-all.
+    offboarding: Arc<AtomicBool>,
+}
+
+/// RAII gate returned by [`SchedulerService::begin_offboarding`]. While held,
+/// every key-mint path is rejected; the flag resets on drop so minting resumes
+/// once offboarding completes. Hold it across the WHOLE offboard operation.
+#[must_use = "hold the guard for the whole offboard; dropping it re-enables minting"]
+pub struct OffboardingGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for OffboardingGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
 }
 
 impl SchedulerService {
@@ -1159,6 +1183,7 @@ impl SchedulerService {
             clock: Arc::new(SystemClock),
             protected_environments: normalize_environment_names(protected_environments),
             allow_protected_writes,
+            offboarding: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1175,6 +1200,7 @@ impl SchedulerService {
             clock,
             protected_environments: protected_environments_from_env(),
             allow_protected_writes: protected_writes_allowed_from_env(),
+            offboarding: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1762,6 +1788,15 @@ impl SchedulerService {
     /// Mint a new API key. The plaintext token is returned exactly once (never
     /// stored); only a salted SHA-256 hash is persisted.
     pub fn create_api_key(&self, name: Option<&str>, scopes: &[&str]) -> ServiceResult<NewApiKey> {
+        // Reject minting while an offboard is purging/revoking: otherwise a
+        // concurrent mint could leave a live credential after revoke-all,
+        // silently defeating the decommission. Applies to every mint path
+        // (this IPC command and the managed-MCP mint, which both route here).
+        if self.offboarding.load(Ordering::Acquire) {
+            return Err(ServiceError::Conflict(
+                "offboarding in progress; API key minting is temporarily disabled".into(),
+            ));
+        }
         use rand::Rng;
         let mut secret_bytes = [0u8; 24];
         rand::rng().fill_bytes(&mut secret_bytes);
@@ -1847,6 +1882,41 @@ impl SchedulerService {
     pub fn offboard_revoke_all_and_purge(&self) -> ServiceResult<crate::db::OffboardPurgeReport> {
         self.db
             .offboard_purge_secrets()
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
+    /// Begin an offboard: mark minting disabled and return an RAII guard that
+    /// re-enables it on drop. All key-mint paths ([`create_api_key`]) reject
+    /// while the guard is held, so a concurrent mint can't reintroduce a live
+    /// credential after revoke-all. Hold it across the entire offboard.
+    pub fn begin_offboarding(&self) -> OffboardingGuard {
+        self.offboarding.store(true, Ordering::Release);
+        OffboardingGuard {
+            flag: self.offboarding.clone(),
+        }
+    }
+
+    /// Whether an offboard is currently in progress (minting disabled).
+    #[allow(dead_code)] // Diagnostic accessor (used in tests).
+    pub fn offboarding_in_progress(&self) -> bool {
+        self.offboarding.load(Ordering::Acquire)
+    }
+
+    /// Revoke every currently-live API key; returns how many were flipped.
+    /// Offboarding's final post-cleanup sweep so the report reflects the true
+    /// post-state.
+    pub fn revoke_all_live_api_keys(&self) -> ServiceResult<usize> {
+        self.db
+            .revoke_all_live_api_keys()
+            .map_err(|e| ServiceError::Internal(e.to_string()))
+    }
+
+    /// Count API keys that are still live (not revoked). Offboarding asserts
+    /// this is zero once it completes.
+    #[allow(dead_code)] // Post-offboard verification accessor (used in tests).
+    pub fn count_live_api_keys(&self) -> ServiceResult<usize> {
+        self.db
+            .count_live_api_keys()
             .map_err(|e| ServiceError::Internal(e.to_string()))
     }
 

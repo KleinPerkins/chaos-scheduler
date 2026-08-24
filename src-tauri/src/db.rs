@@ -1440,23 +1440,35 @@ fn blank_secret_fields(value: &mut serde_json::Value) -> bool {
 /// and to document the column order the scrub loop relies on.
 type WorkflowSecretRow = (String, Option<String>, Option<String>, Option<String>);
 
-/// Parse a stored JSON blob, blank every known secret-bearing field via
-/// [`blank_secret_fields`], and return the re-serialized JSON only if something
-/// actually changed. `None` means "nothing to purge" — an absent/empty/
-/// unparseable blob, or one with no secret field — so the caller skips the
-/// UPDATE (keeping the purge idempotent). Shares [`SECRET_SPEC_FIELD_NAMES`],
-/// so `spec_json`, `trigger_config`, and `queue_config` are all scrubbed with
-/// the exact field set the read-path redaction and MCP projection use.
+/// Decide the new value (if any) for a stored JSON blob during the offboarding
+/// purge, returning `Some(new_value)` to write or `None` to leave the column
+/// untouched. Shares [`SECRET_SPEC_FIELD_NAMES`], so `spec_json`,
+/// `trigger_config`, and `queue_config` are all handled with the exact field
+/// set the read-path redaction and MCP projection use:
+/// - Absent/empty blob → `None` (nothing to purge; keeps the purge idempotent).
+/// - Valid JSON with a secret field → `Some(scrubbed)` (selective field
+///   blanking; structure preserved). Unchanged from prior behavior.
+/// - Valid JSON with no secret field → `None`.
+/// - **Non-empty but NOT valid JSON → `Some("")`**: offboarding is a
+///   "purge everything" operation, so a corrupt/non-JSON column that could
+///   still embed a secret must NOT be left at rest — blank the ENTIRE column.
 fn blank_secret_json_blob(blob: Option<&str>) -> Option<String> {
     let raw = blob?;
     if raw.is_empty() {
         return None;
     }
-    let mut value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
-    if blank_secret_fields(&mut value) {
-        serde_json::to_string(&value).ok()
-    } else {
-        None
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(mut value) => {
+            if blank_secret_fields(&mut value) {
+                // Serializing a value that was just parsed from JSON effectively
+                // never fails; if it somehow did, blank the whole column rather
+                // than leave the secret at rest.
+                Some(serde_json::to_string(&value).unwrap_or_default())
+            } else {
+                None
+            }
+        }
+        Err(_) => Some(String::new()),
     }
 }
 
@@ -3018,6 +3030,26 @@ impl Database {
     pub fn revoke_api_key(&self, id: &str) -> rusqlite::Result<usize> {
         let conn = self.conn()?;
         conn.execute("UPDATE api_keys SET revoked = 1 WHERE id = ?1", params![id])
+    }
+
+    /// Revoke EVERY currently-live API key; returns how many were flipped. Used
+    /// by offboarding's final post-cleanup sweep so `keys_revoked` reflects the
+    /// true post-state even if a mint slipped in before the minting gate.
+    pub fn revoke_all_live_api_keys(&self) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        conn.execute("UPDATE api_keys SET revoked = 1 WHERE revoked = 0", [])
+    }
+
+    /// Count API keys that are still live (not revoked). Offboarding asserts
+    /// this is zero after it completes.
+    #[allow(dead_code)] // Post-offboard verification accessor (used in tests).
+    pub fn count_live_api_keys(&self) -> rusqlite::Result<usize> {
+        let conn = self.conn()?;
+        let n: i64 =
+            conn.query_row("SELECT COUNT(*) FROM api_keys WHERE revoked = 0", [], |r| {
+                r.get(0)
+            })?;
+        Ok(n as usize)
     }
 
     /// Insert a pre-hashed API key record. Returns the generated key id.
@@ -8499,6 +8531,118 @@ mod tests {
         assert_eq!(again.trigger_configs_scrubbed, 0);
         assert_eq!(again.queue_configs_scrubbed, 0);
         assert_eq!(again.scheduler_config_secrets_cleared, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// FINDING 1 fails-first: a workflow column that is NON-EMPTY but not valid
+    /// JSON must still be purged (whole-column blank) — never left at rest with
+    /// an embedded secret — and counted in the report. Against the previous
+    /// `blank_secret_json_blob` (which returned `None` on parse failure and
+    /// skipped the UPDATE), every count is 0 and the secret survives, so this
+    /// fails on the pre-fix code.
+    #[test]
+    fn offboard_purge_secrets_blanks_unparseable_secret_bearing_blobs() {
+        let dir = std::env::temp_dir().join(format!("chaos-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir);
+
+        // trigger_config + queue_config planted corrupt at create time (the db
+        // writer does not parse them).
+        let wf = db
+            .create_workflow(
+                "corrupt",
+                None,
+                "scripts/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                Some("not-json signature_secret=CORRUPT-TRIGGER"),
+                Some("also-not-json secret=CORRUPT-QUEUE"),
+            )
+            .unwrap();
+        // spec_json planted corrupt via a direct UPDATE (bypasses spec
+        // validation, mirroring on-disk corruption).
+        {
+            let conn = db.conn().unwrap();
+            conn.execute(
+                "UPDATE workflows SET spec_json = ?2 WHERE id = ?1",
+                params![wf.id, "garbage{ cursor_api_key: CORRUPT-SPEC"],
+            )
+            .unwrap();
+        }
+
+        let report = db.offboard_purge_secrets().unwrap();
+        assert_eq!(
+            report.workflow_specs_scrubbed, 1,
+            "corrupt spec_json must be scrubbed, not skipped"
+        );
+        assert_eq!(
+            report.trigger_configs_scrubbed, 1,
+            "corrupt trigger_config must be scrubbed, not skipped"
+        );
+        assert_eq!(
+            report.queue_configs_scrubbed, 1,
+            "corrupt queue_config must be scrubbed, not skipped"
+        );
+
+        let conn = db.conn().unwrap();
+        let (spec, trig, que): (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT spec_json, trigger_config, queue_config FROM workflows WHERE id = ?1",
+                params![wf.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(
+            !spec.unwrap_or_default().contains("CORRUPT-SPEC"),
+            "unparseable spec_json secret must be purged"
+        );
+        assert!(
+            !trig.unwrap_or_default().contains("CORRUPT-TRIGGER"),
+            "unparseable trigger_config secret must be purged"
+        );
+        assert!(
+            !que.unwrap_or_default().contains("CORRUPT-QUEUE"),
+            "unparseable queue_config secret must be purged"
+        );
+
+        // Valid-JSON selective blanking is unchanged: a well-formed spec keeps
+        // its non-secret structure and only the secret field is emptied.
+        let wf_ok = db
+            .create_workflow(
+                "ok",
+                None,
+                "scripts/noop.py",
+                "0 0 * * *",
+                false,
+                true,
+                "UTC",
+                "production",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        db.set_workflow_spec(
+            &wf_ok.id,
+            "generic",
+            Some(r#"{"actions":[{"url":"https://x/y","secret":"live"}]}"#),
+        )
+        .unwrap();
+        db.offboard_purge_secrets().unwrap();
+        let spec_ok: String = conn
+            .query_row(
+                "SELECT spec_json FROM workflows WHERE id = ?1",
+                params![wf_ok.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&spec_ok).unwrap();
+        assert_eq!(parsed["actions"][0]["url"], "https://x/y");
+        assert_eq!(parsed["actions"][0]["secret"], "");
         let _ = std::fs::remove_dir_all(dir);
     }
 
