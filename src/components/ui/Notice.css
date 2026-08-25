@@ -22,26 +22,28 @@
   min-height: 24px;
 }
 
+/* Info: mapped to --accent-rgb (brand accent) — the cs.* equivalent of the
+   former Google Blue (#4285F4) which had no matching token. */
 .ui-notice--info {
-  background: rgba(66, 133, 244, 0.1);
-  border-color: rgba(66, 133, 244, 0.35);
+  background: rgba(var(--accent-rgb), 0.1);
+  border-color: rgba(var(--accent-rgb), 0.35);
   color: var(--text-primary);
 }
 
 .ui-notice--success {
-  background: rgba(52, 168, 83, 0.12);
-  border-color: rgba(52, 168, 83, 0.35);
+  background: rgba(var(--success-rgb), 0.12);
+  border-color: rgba(var(--success-rgb), 0.35);
   color: var(--success);
 }
 
 .ui-notice--error {
-  background: rgba(234, 67, 53, 0.12);
-  border-color: rgba(234, 67, 53, 0.4);
+  background: rgba(var(--error-rgb), 0.12);
+  border-color: rgba(var(--error-rgb), 0.4);
   color: var(--error);
 }
 
 .ui-notice--warning {
-  background: rgba(251, 188, 4, 0.12);
-  border-color: rgba(251, 188, 4, 0.4);
+  background: rgba(var(--warning-rgb), 0.12);
+  border-color: rgba(var(--warning-rgb), 0.4);
   color: var(--warning);
 }

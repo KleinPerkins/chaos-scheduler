@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import "./Modal.css";
 
 export interface ModalProps {
   /** Called when the shell requests a close (scrim click or Escape). */
@@ -142,10 +143,13 @@ export default function Modal({
     return () => dialog.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const backdropClasses =
-    [backdropClassName].filter(Boolean).join(" ") || undefined;
-  const scrimClasses = [scrimClassName].filter(Boolean).join(" ") || undefined;
-  const dialogClasses = [className].filter(Boolean).join(" ") || undefined;
+  const backdropClasses = ["modal-backdrop", backdropClassName]
+    .filter(Boolean)
+    .join(" ");
+  const scrimClasses = ["modal-scrim", scrimClassName]
+    .filter(Boolean)
+    .join(" ");
+  const dialogClasses = ["modal-dialog", className].filter(Boolean).join(" ");
 
   return (
     <div className={backdropClasses}>

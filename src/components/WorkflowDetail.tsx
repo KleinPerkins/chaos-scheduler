@@ -20,6 +20,7 @@ import {
   queueWorkflowRun,
 } from "../lib/workflowEnqueue";
 import "./WorkflowDetail.css";
+import "./PageHeader.css";
 
 interface Props {
   workflow: Workflow;

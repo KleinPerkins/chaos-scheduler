@@ -1,0 +1,13 @@
+# Paths exempt from the raw-hex lint gate.
+# Each line is a repo-relative POSIX path.
+# Add a path here ONLY when the hex value genuinely cannot be mapped to an
+# existing cs.* token (e.g. SVG brand-mark gradients that pre-date the token
+# system and require a dedicated token PR to tokenize properly).
+#
+# DO NOT add paths here to bypass tokenization debt — file a token PR instead.
+
+# BrandMark SVG gradient stops (#c24ffb, #7f36f6, #5aa0ff, #2f43f7, #c471ff,
+# #9a34f2, #49b0ff, #1477f2) — bespoke brand-mark gradient values with no
+# matching cs.* palette token. A follow-up token PR should add brand-gradient
+# tokens; until then these are intentionally exempt.
+src/components/BrandMark.tsx

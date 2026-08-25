@@ -84,7 +84,7 @@
   flex-direction: column;
   gap: 14px;
   padding: 16px;
-  background: var(--bg-secondary, #f8f8fa);
+  background: var(--bg-secondary);
   border-radius: var(--radius);
   border: 1px solid var(--border);
 }

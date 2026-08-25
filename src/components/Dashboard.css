@@ -169,20 +169,5 @@
   padding: 24px 32px;
 }
 
-.page-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 24px;
-}
-
-.page-title {
-  font-size: 20px;
-  font-weight: 700;
-}
-
-.page-subtitle {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-top: 2px;
-}
+/* .page-header / .page-title / .page-subtitle have moved to PageHeader.css
+   (co-located with the PageHeader component). WorkflowDetail imports it directly. */
