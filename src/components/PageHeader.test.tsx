@@ -1,6 +1,14 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { join, dirname } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render } from "@testing-library/react";
 import PageHeader from "./PageHeader";
+
+const pageCss = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "PageHeader.css"),
+  "utf8",
+);
 
 afterEach(cleanup);
 
@@ -59,5 +67,28 @@ describe("PageHeader", () => {
   it("merges a passthrough className after the base `page-header` class", () => {
     const { container } = render(<PageHeader title="x" className="extra" />);
     expect(headerOf(container).className).toBe("page-header extra");
+  });
+});
+
+describe("PageHeader.css token binding", () => {
+  it(".page-title uses var(--font-size-2xl), not a raw px literal", () => {
+    expect(pageCss).toMatch(/\.page-title\s*\{[^}]*var\(--font-size-2xl\)/s);
+    expect(pageCss).not.toMatch(/\.page-title\s*\{[^}]*font-size\s*:\s*20px/s);
+  });
+
+  it(".page-title uses var(--line-height-tight)", () => {
+    expect(pageCss).toMatch(
+      /\.page-title\s*\{[^}]*var\(--line-height-tight\)/s,
+    );
+  });
+
+  it(".page-header uses var(--space-6) for margin-bottom", () => {
+    expect(pageCss).toMatch(
+      /\.page-header\s*\{[^}]*margin-bottom\s*:\s*var\(--space-6\)/s,
+    );
+  });
+
+  it(".page-subtitle uses var(--font-size-md)", () => {
+    expect(pageCss).toMatch(/\.page-subtitle\s*\{[^}]*var\(--font-size-md\)/s);
   });
 });

@@ -1,0 +1,36 @@
+/**
+ * Structural chrome for the Modal shell primitive.
+ * These base classes are applied by default — consumer *ClassName props layer on top.
+ * Size/padding/width overrides (e.g. .rerun-modal) live in the consumer's own CSS.
+ */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-6);
+}
+
+.modal-scrim {
+  position: absolute;
+  inset: 0;
+  border: none;
+  padding: 0;
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(var(--scrim-rgb), 0.55);
+  cursor: default;
+}
+
+.modal-dialog {
+  position: relative;
+  z-index: 1;
+  border-radius: var(--radius-lg);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}

@@ -354,6 +354,26 @@ jobs:
       - name: Unit tests (credential-guard rules)
         run: node --test scripts/check-mcp-config-secret-free.test.mjs
 
+  # Design-system token gate: fail if any src/**/*.{css,tsx,ts} file contains a
+  # raw hex color. All colors must bind to cs.* token vars (e.g. var(--accent))
+  # so the token pipeline owns every color value. The lefthook pre-commit hook is
+  # a local, bypassable first line of defense and is skipped by the git-data-API
+  # single-commit PR flow; this required, credential-free check is the authoritative gate.
+  no-raw-hex:
+    name: No raw hex (token-only colors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Unit tests (hex lint rules)
+        run: npm run test:no-raw-hex
+      - name: Scan src/ for raw hex colors
+        run: npm run check:no-raw-hex
+
   # Secret-scan gate: scan the tracked source tree and the built frontend dist
   # artifact for committed secrets using gitleaks (OSS, Apache-2.0, v8.18.4).
   # Complementary to data-guard (path-based): gitleaks adds content-based pattern
@@ -420,6 +440,7 @@ jobs:
         visual,
         data-guard,
         mcp-config-secret-free,
+        no-raw-hex,
         secret-scan,
       ]
     runs-on: ubuntu-latest

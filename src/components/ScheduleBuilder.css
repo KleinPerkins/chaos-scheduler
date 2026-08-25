@@ -32,7 +32,7 @@
 
 .sched-freq-btn.active {
   background: var(--accent);
-  color: #fff;
+  color: var(--text-inverse);
 }
 
 /* --- Sub-controls area --- */
@@ -102,7 +102,7 @@
 .sched-day-pill.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--text-inverse);
 }
 
 @media (min-width: 460px) {
@@ -141,7 +141,7 @@
 
 .sched-ampm-btn.active {
   background: var(--accent);
-  color: #fff;
+  color: var(--text-inverse);
 }
 
 /* --- Advanced / raw cron --- */

@@ -1,3 +1,5 @@
+import "./PageHeader.css";
+
 export interface PageHeaderProps {
   /** Heading rendered in the `.page-title` h1. */
   title: React.ReactNode;

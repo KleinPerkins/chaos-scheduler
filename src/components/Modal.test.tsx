@@ -6,7 +6,7 @@ import Modal from "./Modal";
 afterEach(cleanup);
 
 describe("Modal", () => {
-  it("renders the backdrop > scrim button + dialog shell with the passed classes", () => {
+  it("renders the backdrop > scrim button + dialog shell with base + consumer classes", () => {
     const { container } = render(
       <Modal
         onClose={vi.fn()}
@@ -20,10 +20,12 @@ describe("Modal", () => {
       </Modal>,
     );
 
-    // Backdrop is the outer element and carries the passthrough class.
+    // Backdrop carries base + consumer class.
     const backdrop = container.firstChild as HTMLElement;
     expect(backdrop.tagName).toBe("DIV");
-    expect(backdrop.getAttribute("class")).toBe("rerun-modal-backdrop");
+    expect(backdrop.getAttribute("class")).toBe(
+      "modal-backdrop rerun-modal-backdrop",
+    );
     // Exactly two children: the scrim button then the dialog (order matters so
     // the dialog paints on top of the absolutely-positioned scrim).
     expect(backdrop.childElementCount).toBe(2);
@@ -31,13 +33,13 @@ describe("Modal", () => {
     const scrim = backdrop.children[0] as HTMLButtonElement;
     expect(scrim.tagName).toBe("BUTTON");
     expect(scrim).toHaveAttribute("type", "button");
-    expect(scrim.getAttribute("class")).toBe("rerun-modal-scrim");
+    expect(scrim.getAttribute("class")).toBe("modal-scrim rerun-modal-scrim");
     expect(scrim).toHaveAttribute("aria-label", "Close dialog");
     expect(scrim).not.toBeDisabled();
 
     const dialog = backdrop.children[1] as HTMLElement;
     expect(dialog.tagName).toBe("DIV");
-    expect(dialog.getAttribute("class")).toBe("rerun-modal");
+    expect(dialog.getAttribute("class")).toBe("modal-dialog rerun-modal");
     expect(dialog).toHaveAttribute("role", "dialog");
     expect(dialog).toHaveAttribute("aria-modal", "true");
     expect(dialog).toHaveAttribute("aria-labelledby", "title-id");
@@ -102,16 +104,16 @@ describe("Modal", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("is class-less by default (no class attribute on any shell element)", () => {
+  it("applies base modal-* classes by default (no consumer *ClassName needed)", () => {
     const { container } = render(
       <Modal onClose={vi.fn()}>
         <p>Body</p>
       </Modal>,
     );
     const backdrop = container.firstChild as HTMLElement;
-    expect(backdrop.hasAttribute("class")).toBe(false);
-    expect(backdrop.children[0].hasAttribute("class")).toBe(false);
-    expect(backdrop.children[1].hasAttribute("class")).toBe(false);
+    expect(backdrop.getAttribute("class")).toBe("modal-backdrop");
+    expect(backdrop.children[0].getAttribute("class")).toBe("modal-scrim");
+    expect(backdrop.children[1].getAttribute("class")).toBe("modal-dialog");
   });
 
   it("omits aria-labelledby / aria-describedby when not provided", () => {
@@ -187,5 +189,43 @@ describe("Modal", () => {
     // Close (Escape): focus returns to the trigger that opened it.
     fireEvent.keyDown(window, { key: "Escape" });
     expect(trigger).toHaveFocus();
+  });
+});
+
+describe("Modal base-class chrome", () => {
+  it("applies modal-backdrop / modal-scrim / modal-dialog when no *ClassName props passed", () => {
+    const { container } = render(
+      <Modal onClose={vi.fn()}>
+        <p>Body</p>
+      </Modal>,
+    );
+    const backdrop = container.firstChild as HTMLElement;
+    expect(backdrop.classList).toContain("modal-backdrop");
+    const scrim = backdrop.children[0] as HTMLElement;
+    expect(scrim.classList).toContain("modal-scrim");
+    const dialog = backdrop.children[1] as HTMLElement;
+    expect(dialog.classList).toContain("modal-dialog");
+  });
+
+  it("merges consumer *ClassName with base classes", () => {
+    const { container } = render(
+      <Modal
+        onClose={vi.fn()}
+        backdropClassName="rerun-modal-backdrop"
+        scrimClassName="rerun-modal-scrim"
+        className="rerun-modal"
+      >
+        <p>Body</p>
+      </Modal>,
+    );
+    const backdrop = container.firstChild as HTMLElement;
+    expect(backdrop.classList).toContain("modal-backdrop");
+    expect(backdrop.classList).toContain("rerun-modal-backdrop");
+    const scrim = backdrop.children[0] as HTMLElement;
+    expect(scrim.classList).toContain("modal-scrim");
+    expect(scrim.classList).toContain("rerun-modal-scrim");
+    const dialog = backdrop.children[1] as HTMLElement;
+    expect(dialog.classList).toContain("modal-dialog");
+    expect(dialog.classList).toContain("rerun-modal");
   });
 });

@@ -33,6 +33,11 @@ pre-commit:
       # `mcp-config-secret-free` CI job is the authoritative gate and also covers
       # the git-data-API single-commit PR flow this repo uses.
       run: node scripts/check-mcp-config-secret-free.mjs {staged_files}
+    no-raw-hex:
+      # Refuse raw hex colors in src/ CSS/TSX/TS — all colors must bind to cs.* token vars.
+      # Local, bypassable defense; the `no-raw-hex` CI job is the authoritative gate.
+      glob: "*.{css,tsx,ts}"
+      run: node scripts/check-no-raw-hex.mjs {staged_files}
     secret-scan:
       # Scan staged content for committed secrets (high-entropy strings, known API
       # key patterns). Requires `brew install gitleaks` (or equivalent).
