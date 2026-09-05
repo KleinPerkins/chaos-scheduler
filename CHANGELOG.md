@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.9.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.8.0...chaos-scheduler-v1.9.0) (2026-09-05)
+
+
+### Features
+
+* **design-system:** f0 foundation primitives (epic [#329](https://github.com/KleinPerkins/chaos-scheduler/issues/329) / [#334](https://github.com/KleinPerkins/chaos-scheduler/issues/334)) ([#392](https://github.com/KleinPerkins/chaos-scheduler/issues/392)) ([24dcabf](https://github.com/KleinPerkins/chaos-scheduler/commit/24dcabfac11c00efc2b0c8cafeff2c4791fbf8a2))
+
+
+### Documentation
+
+* accept v2 roadmap + credential-security plan (CHECKPOINT 2) ([#390](https://github.com/KleinPerkins/chaos-scheduler/issues/390)) ([f060f49](https://github.com/KleinPerkins/chaos-scheduler/commit/f060f4943d23b5747afbdb7560a59661906af499))
+
 ## [1.8.0](https://github.com/KleinPerkins/chaos-scheduler/compare/chaos-scheduler-v1.7.0...chaos-scheduler-v1.8.0) (2026-08-24)
 
 
