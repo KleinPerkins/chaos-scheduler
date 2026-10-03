@@ -47,7 +47,7 @@ reqwest = { version = "0.13.3", default-features = false, features = ["rustls", 
 tauri-plugin-updater = "2.10.1"
 
 [dev-dependencies]
-minisign-verify = "0.2.5"
+minisign-verify = "0.3.0"
 tauri = { version = "2", features = ["tray-icon", "test"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
