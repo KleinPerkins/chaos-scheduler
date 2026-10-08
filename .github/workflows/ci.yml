@@ -267,7 +267,7 @@ jobs:
   # animations disabled + frozen clock + fixed mockIPC fixtures) and path-filtered,
   # so a PR that doesn't touch visual paths skips it without blocking. It renders
   # the stable surfaces inside the SAME pinned Playwright container the baselines
-  # were generated in (v1.61.1-jammy — keep in lockstep with visual-baselines.yml)
+  # were generated in (v1.63.0-jammy — keep in lockstep with visual-baselines.yml)
   # and compares against the committed `-linux` screenshots
   # (e2e/visual/__screenshots__/*-linux.png). After an intentional UI change,
   # refresh the baselines via the visual-baselines.yml workflow (a stale baseline
@@ -278,7 +278,7 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.visual == 'true'
     runs-on: ubuntu-latest
     container:
-      image: mcr.microsoft.com/playwright:v1.61.1-jammy
+      image: mcr.microsoft.com/playwright:v1.63.0-jammy
     steps:
       - uses: actions/checkout@v7
       - name: Trust workspace (container runs as root)
