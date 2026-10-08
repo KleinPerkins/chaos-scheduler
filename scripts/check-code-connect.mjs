@@ -2,15 +2,15 @@
 // Credential-free Code Connect coverage/health check.
 //
 // The repo is the source of truth for its Figma Code Connect mappings
-// (src/**/*.figma.tsx). The live publish (figma-code-connect.yml) needs a PAT
+// (src/**/*.figma.ts). The live publish (figma-code-connect.yml) needs a PAT
 // and is intentionally OUTSIDE ci-required; this check needs NO credentials and
 // IS required, so a malformed mapping is caught on the PR that introduces it —
 // long before the publish step runs.
 //
-// It complements `tsc -p tsconfig.figma.json` (which proves every mapping's
-// `example` uses the REAL component with REAL props). Here we run the
-// credential-free `figma connect parse` and validate that:
-//   1. every *.figma.tsx on disk parses into at least one mapping (no file is
+// It complements `tsc -p tsconfig.figma.json` (which checks every parserless
+// template against the Code Connect API). Here we run the credential-free
+// `figma connect parse` and validate that:
+//   1. every *.figma.ts on disk parses into at least one mapping (no file is
 //      silently skipped), and every parsed mapping traces back to a known file;
 //   2. each mapping points at a source file that actually exists in the repo;
 //   3. each mapping produced a non-empty rendered template (a real snippet);
@@ -45,7 +45,7 @@ const FIGMA_NODE_RE =
  *
  * @param {object} p
  * @param {any[]} p.docs parsed `figma connect parse` output
- * @param {string[]} p.figmaFilesRel repo-relative *.figma.tsx paths on disk
+ * @param {string[]} p.figmaFilesRel repo-relative *.figma.ts paths on disk
  * @param {(relPath: string) => boolean} p.fileExistsRel source-file probe
  * @returns {string[]} human-readable errors (empty when valid)
  */
@@ -120,7 +120,7 @@ function listFigmaFilesRel() {
   const srcDir = join(root, "src");
   return readdirSync(srcDir, { recursive: true })
     .map((p) => String(p))
-    .filter((p) => p.endsWith(".figma.tsx"))
+    .filter((p) => p.endsWith(".figma.ts"))
     .map((p) => `src/${p.replaceAll("\\", "/")}`)
     .sort();
 }
@@ -160,7 +160,7 @@ function parseCodeConnect() {
 function main() {
   const figmaFilesRel = listFigmaFilesRel();
   if (figmaFilesRel.length === 0) {
-    console.log("No *.figma.tsx mappings found — nothing to validate.");
+    console.log("No *.figma.ts mappings found — nothing to validate.");
     return;
   }
 
@@ -174,7 +174,7 @@ function main() {
   if (errors.length > 0) {
     console.error(
       "::error::Code Connect validation failed. Fix the mapping(s) below " +
-        "(src/**/*.figma.tsx). Each mapping must point at a real component " +
+        "(src/**/*.figma.ts). Each mapping must point at a real component " +
         "source and produce a valid snippet:",
     );
     for (const e of errors) console.error(`  - ${e}`);
@@ -183,7 +183,7 @@ function main() {
 
   console.log(
     `OK — ${docs.length} Code Connect mapping(s) valid across ` +
-      `${figmaFilesRel.length} *.figma.tsx file(s).`,
+      `${figmaFilesRel.length} *.figma.ts file(s).`,
   );
 }
 

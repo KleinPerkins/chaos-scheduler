@@ -18,7 +18,7 @@ RaceTrack, StatusDonut, ThresholdBand, Vehicle, plus `scales.ts`) using `d3-scal
   scales/among axes is error-prone. (c) Bespoke SVG primitives over d3 scale/shape math, bound to the
   design tokens and each mapped via Code Connect — chosen.
 - **Evidence.** Every chart primitive ships with a unit test (`.test.tsx`) and a Figma Code Connect
-  mapping (`.figma.tsx`); the primitives depend only on the d3 scale/shape/array/time math packages.
+  mapping (`.figma.ts`); the primitives depend only on the d3 scale/shape/array/time math packages.
 
 ## Consequences
 

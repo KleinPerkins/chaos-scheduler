@@ -151,7 +151,7 @@ impl FieldCipher {
     /// Build a cipher from raw DEK bytes and the key version.
     pub fn from_bytes(dek: [u8; KEY_LEN], version: i64) -> Self {
         Self {
-            dek: *Key::from_slice(&dek),
+            dek: Key::from(dek),
             version,
         }
     }
@@ -180,10 +180,11 @@ impl FieldCipher {
             return Ok(plaintext.to_string());
         }
         let nonce_bytes = random_bytes::<XNONCE_LEN>();
+        let nonce = XNonce::from(nonce_bytes);
         let ciphertext = self
             .aead()
             .encrypt(
-                XNonce::from_slice(&nonce_bytes),
+                &nonce,
                 Payload {
                     msg: plaintext.as_bytes(),
                     aad: aad.as_bytes(),
@@ -209,10 +210,14 @@ impl FieldCipher {
             return Err(EnvelopeError::Corrupt("envelope shorter than nonce".into()));
         }
         let (nonce_bytes, ciphertext) = blob.split_at(XNONCE_LEN);
+        let nonce_bytes: [u8; XNONCE_LEN] = nonce_bytes
+            .try_into()
+            .map_err(|_| EnvelopeError::Corrupt("envelope nonce wrong length".into()))?;
+        let nonce = XNonce::from(nonce_bytes);
         let plaintext = self
             .aead()
             .decrypt(
-                XNonce::from_slice(nonce_bytes),
+                &nonce,
                 Payload {
                     msg: ciphertext,
                     aad: aad.as_bytes(),
@@ -225,11 +230,13 @@ impl FieldCipher {
 
 /// AEAD-wrap a DEK under a KEK. Returns `(wrapped_dek, wrap_nonce)`.
 pub fn wrap_dek(kek: &[u8; KEY_LEN], dek: &[u8; KEY_LEN]) -> EnvelopeResult<(Vec<u8>, Vec<u8>)> {
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(kek));
+    let key = Key::from(*kek);
+    let cipher = XChaCha20Poly1305::new(&key);
     let nonce_bytes = random_bytes::<XNONCE_LEN>();
+    let nonce = XNonce::from(nonce_bytes);
     let wrapped = cipher
         .encrypt(
-            XNonce::from_slice(&nonce_bytes),
+            &nonce,
             Payload {
                 msg: dek,
                 aad: DEK_WRAP_AAD,
@@ -249,10 +256,15 @@ pub fn unwrap_dek(
     if wrap_nonce.len() != XNONCE_LEN {
         return Err(EnvelopeError::Corrupt("wrap nonce wrong length".into()));
     }
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(kek));
+    let key = Key::from(*kek);
+    let cipher = XChaCha20Poly1305::new(&key);
+    let nonce_bytes: [u8; XNONCE_LEN] = wrap_nonce
+        .try_into()
+        .map_err(|_| EnvelopeError::Corrupt("wrap nonce wrong length".into()))?;
+    let nonce = XNonce::from(nonce_bytes);
     let dek = cipher
         .decrypt(
-            XNonce::from_slice(wrap_nonce),
+            &nonce,
             Payload {
                 msg: wrapped,
                 aad: DEK_WRAP_AAD,

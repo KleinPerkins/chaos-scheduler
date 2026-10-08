@@ -20,7 +20,7 @@
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
-// The published team-library file (see src/**/*.figma.tsx node URLs + AGENTS.md).
+// The published team-library file (see src/**/*.figma.ts node URLs + AGENTS.md).
 export const FILE_KEY = "twQmWC8dWT4tqeqIigNsRy";
 // Page "Mission Control" (0:1) + the self-contained component section
 // "v4 — New Components (Affirm DS)" (113:514).
