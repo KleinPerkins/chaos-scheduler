@@ -15,7 +15,7 @@ function doc(overrides = {}) {
     component: "Button",
     source: `${GH}/src/components/Button.tsx`,
     template: "<Button />",
-    _codeConnectFilePath: "/repo/src/components/Button.figma.tsx",
+    _codeConnectFilePath: "/repo/src/components/Button.figma.ts",
     ...overrides,
   };
 }
@@ -24,7 +24,7 @@ function doc(overrides = {}) {
 // pass already-relative on-disk paths and a root-agnostic fileExists stub.
 const opts = (docs, existing = ["src/components/Button.tsx"]) => ({
   docs,
-  figmaFilesRel: ["src/components/Button.figma.tsx"],
+  figmaFilesRel: ["src/components/Button.figma.ts"],
   fileExistsRel: (p) => existing.includes(p),
 });
 
@@ -49,13 +49,13 @@ describe("validateCodeConnectDocs", () => {
     // _codeConnectFilePath uses an absolute-ish path; the validator strips the
     // root prefix, but here there's no matching root so it stays as-is — supply
     // a matching figma file to keep the happy path clean.
-    const d = doc({ _codeConnectFilePath: "src/components/Button.figma.tsx" });
+    const d = doc({ _codeConnectFilePath: "src/components/Button.figma.ts" });
     assert.deepEqual(validateCodeConnectDocs(opts([d])), []);
   });
 
   it("flags a mapping whose source file does not exist", () => {
     const d = doc({
-      _codeConnectFilePath: "src/components/Button.figma.tsx",
+      _codeConnectFilePath: "src/components/Button.figma.ts",
       source: `${GH}/src/components/Ghost.tsx`,
     });
     const errors = validateCodeConnectDocs(opts([d]));
@@ -71,7 +71,7 @@ describe("validateCodeConnectDocs", () => {
 
   it("flags an empty rendered template", () => {
     const d = doc({
-      _codeConnectFilePath: "src/components/Button.figma.tsx",
+      _codeConnectFilePath: "src/components/Button.figma.ts",
       template: "",
     });
     const errors = validateCodeConnectDocs(opts([d]));
@@ -80,7 +80,7 @@ describe("validateCodeConnectDocs", () => {
 
   it("flags an invalid Figma node URL", () => {
     const d = doc({
-      _codeConnectFilePath: "src/components/Button.figma.tsx",
+      _codeConnectFilePath: "src/components/Button.figma.ts",
       figmaNode: "https://example.com/not-figma",
     });
     const errors = validateCodeConnectDocs(opts([d]));
@@ -88,7 +88,7 @@ describe("validateCodeConnectDocs", () => {
   });
 
   it("flags a parsed doc from an unexpected file path", () => {
-    const d = doc({ _codeConnectFilePath: "src/components/Rogue.figma.tsx" });
+    const d = doc({ _codeConnectFilePath: "src/components/Rogue.figma.ts" });
     const errors = validateCodeConnectDocs(opts([d]));
     assert.ok(errors.some((e) => /unexpected file path/.test(e)));
   });
