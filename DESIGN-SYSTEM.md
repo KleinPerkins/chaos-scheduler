@@ -130,8 +130,8 @@ on purpose, not by accident. If Calibre is ever licensed for the app, swap the
   Figma. `.github/workflows/figma-variables-sync.yml` runs the one-way sync on token
   changes.
 - **Code Connect — LIVE (not deferred).** Figma components are mapped to the React
-  primitives above via source-tracked `src/**/*.figma.tsx` files wired through the
-  root `figma.config.json` (react parser). `.github/workflows/figma-code-connect.yml`
+  primitives above via source-tracked parserless `src/**/*.figma.ts` templates wired
+  through the root `figma.config.json`. `.github/workflows/figma-code-connect.yml`
   publishes the mappings to the Figma team library on every push to `main` (PRs get a
   `--dry-run` validate-only pass); a credential-free `code-connect` job in the
   `ci-required` fan-in type-checks and parses every mapping on the PR. See

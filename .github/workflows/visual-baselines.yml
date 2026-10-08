@@ -39,7 +39,7 @@ jobs:
     # Pin to the same image tag as the `visual` job in ci.yml. Bump BOTH in
     # lockstep whenever @playwright/test changes major.minor.
     container:
-      image: mcr.microsoft.com/playwright:v1.61.1-jammy
+      image: mcr.microsoft.com/playwright:v1.63.0-jammy
     steps:
       - uses: actions/checkout@v7
       # The container runs as root while the checkout is owned by the runner
