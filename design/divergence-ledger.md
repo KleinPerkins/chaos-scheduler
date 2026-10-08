@@ -53,7 +53,7 @@ regardless of the row's primary authority.
 
 - **Figma node** — the mapped Figma **component-set** node (variant child nodes
   inherit the mapping). `F` frame node IDs are the roadmap coverage-matrix IDs.
-- **CC** — Code Connect. `✓ live` = a source-tracked `*.figma.tsx` mapping that
+- **CC** — Code Connect. `✓ live` = a source-tracked `*.figma.ts` mapping that
   auto-publishes on every push to `main` via `.github/workflows/figma-code-connect.yml`.
   The 22 design-system masters were additionally **verified live** this session via
   the published Code Connect map; chart primitives are on `main` and publish the
@@ -258,7 +258,7 @@ and must be read by the `G04` plugin audit.
 - **Non-code / composition primitives:** `C22 ChartTile`, `C25 ResourcePanel` are
   surface compositions rather than standalone components; `C07 Tooltip`,
   `C13–C18`, `C23`, `C26`, `C27`, `C29` are partial-inline or missing and carry no
-  dedicated `*.figma.tsx` (their masters are among Figma's unmapped groups → node
+  dedicated `*.figma.ts` (their masters are among Figma's unmapped groups → node
   `pending G04 audit`).
 - **Deliberately-excluded CC props:** design-forward Figma variants that the code
   does not (yet) implement — `Input`/`Textarea` Error/Disabled, `StatCard` Expanded
@@ -386,7 +386,7 @@ determinable from repo + read-only metadata yet and are marked `pending G04 audi
    live-Figma fact confirmed during the `G04`/`G12` re-sync.
 
 **Not** marked pending: Figma node IDs for mapped components (source-tracked in
-each `*.figma.tsx`) and all frame IDs (roadmap coverage matrix); code paths and test
+each `*.figma.ts`) and all frame IDs (roadmap coverage matrix); code paths and test
 paths (verified in-repo); Code Connect presence (source-tracked, and the 22 DS
 masters verified live this session); owner (consolidated under the maintainer per §0).
 
@@ -553,7 +553,7 @@ LOCAL rerun-gated path (#286/#287/#288/#289), which already opens its own draft 
   `.cursor/plans/design-to-code_completion_7b6a5788.plan.md` (§1 coverage matrix, §5
   risks/decisions).
 - **Component node IDs + Code Connect mappings:** the source-tracked
-  `src/**/*.figma.tsx` files + `figma.config.json`; live map verified via the
+  `src/**/*.figma.ts` files + `figma.config.json`; live map verified via the
   published Code Connect map for file `twQmWC8dWT4tqeqIigNsRy`, section `113:514`.
 - **Code / test paths & current status:** the repo working tree at `origin/main`.
 - **DR01 reference:** `enterprise-scheduler-v3.canvas.tsx`.

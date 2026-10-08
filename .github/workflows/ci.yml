@@ -36,7 +36,7 @@ jobs:
               - 'src/playwright-gate.ts'
               - 'playwright.config.ts'
             code_connect:
-              - 'src/**/*.figma.tsx'
+              - 'src/**/*.figma.ts'
               - 'src/components/**/*.tsx'
               - 'figma.config.json'
               - 'tsconfig.figma.json'
@@ -208,10 +208,10 @@ jobs:
         run: npm run tokens:check
 
   # Credential-free Code Connect health check. The repo is the source of truth
-  # for its Figma mappings (src/**/*.figma.tsx); the live publish needs a PAT and
+  # for its Figma mappings (src/**/*.figma.ts); the live publish needs a PAT and
   # is deliberately outside ci-required, so this required, credential-free check
   # catches a malformed mapping on the PR that introduces it. It (1) type-checks
-  # every mapping against the real component (real props), (2) runs the
+  # every parserless template against the Code Connect API, (2) runs the
   # credential-free `figma connect parse`, and (3) validates each existing
   # mapping resolves to a real source file and renders a real snippet. It does
   # NOT require every component to have a mapping. Runs when a mapping OR a

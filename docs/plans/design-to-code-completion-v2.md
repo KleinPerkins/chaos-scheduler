@@ -156,7 +156,7 @@ Runs after the surfaces land (the re-synced surfaces must exist):
 
 - **G00 co-design half:** land the MC mocks (F01/F03/F04/F05, demo states, C12–C29) and close #301/#305/#306.
 - **G03/G04:** live token/version readback and the exhaustive Figma plugin/API audit; resolve residual **R01** (node-level `INSTANCE`/`mainComponent.remote` pass) and capture node IDs for the unmapped masters.
-- **Code Connect version pin:** replace `version: "unknown"` across the mapped nodes (`*.figma.tsx` + `figma.config.json`).
+- **Code Connect version pin:** replace `version: "unknown"` across the mapped nodes (`*.figma.ts` + `figma.config.json`).
 - **G12/G13:** unify the §3a `D04` accepted-final divergences in code and mirror them into the Figma masters; execute and record the rollback drill (evidence pattern in ledger §5c).
 - **Program-level G11 native-proof (R07):** one signed / release-equivalent macOS build smoke across **all** surfaces (main 960×680 + popup 384×590 sizing, scroll/reflow, tray navigation, fonts, focus, drill-downs; Playwright mocks proven isolated from the production SQLite DB).
 - **Ledger:** append accepted re-sync evidence to `design/divergence-ledger.md` (updated only with accepted facts, per its own §0 rule).

@@ -1,8 +1,8 @@
 name: Figma Code Connect
 
-# Publishes the repo's Figma Code Connect mappings (src/**/*.figma.tsx) to the
-# Figma design file so the parser-based mappings — including full prop
-# transforms such as `preference = figma.enum("Selected", {...})` — stay in
+# Publishes the repo's Figma Code Connect mappings (src/**/*.figma.ts) to the
+# Figma design file so the parserless templates — including full prop
+# transforms such as `selectedInstance.getEnum("Selected", {...})` — stay in
 # sync with the code. This is the durable replacement for the one-off MCP
 # node->component stopgap (which only emits generic variant props).
 #
@@ -19,13 +19,13 @@ on:
   push:
     branches: [main]
     paths:
-      - "src/**/*.figma.tsx"
+      - "src/**/*.figma.ts"
       - "figma.config.json"
       - ".github/workflows/figma-code-connect.yml"
   pull_request:
     branches: [main]
     paths:
-      - "src/**/*.figma.tsx"
+      - "src/**/*.figma.ts"
       - "figma.config.json"
       - ".github/workflows/figma-code-connect.yml"
   workflow_dispatch:
@@ -78,8 +78,8 @@ jobs:
             # publish must overwrite any pre-existing UI/MCP-created mapping on
             # the node — otherwise `figma connect publish` warns "already have
             # UI-created mappings ... re-run with --force" and keeps the old
-            # generic-variant stopgap instead of our parser-based mapping (with
-            # the full `preference = figma.enum(...)` prop transform).
+            # generic-variant stopgap instead of our parserless mapping (with
+            # the full `selectedInstance.getEnum(...)` prop transform).
             args+=(--force)
           fi
           args+=(--exit-on-unreadable-files)
