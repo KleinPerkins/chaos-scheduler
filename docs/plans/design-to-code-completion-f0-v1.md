@@ -18,6 +18,12 @@ No visual redesign. No new tokens invented. Every change maps to an existing `cs
 
 ---
 
+## Implementation status
+
+PR #392 merged on August 25 at `24dcabfa`. It tokenized the Notice tints, introduced shared Modal and PageHeader styles, and added the raw-hex check to CI. The PR includes tests for Notice, Modal, PageHeader and the raw-hex rule. [Merged changes](https://github.com/KleinPerkins/chaos-scheduler/pull/392)
+
+Issue #334 remains open. Its acceptance criteria include using the text variants of status colors across the app, enforcing that rule in CI, and checking the Modal, RerunModal and PageHeader against the design rubric. The raw-hex check covers a different rule. This plan retains its draft status. [Remaining work](https://github.com/KleinPerkins/chaos-scheduler/issues/334)
+
 ## Pre-acceptance self-review
 
 - [x] Spec coverage: all four F0 requirements (from v2 plan §5/F0) map to work items below
